@@ -11,6 +11,27 @@ final class ChatServiceTests: XCTestCase {
         }
     }
 
+    private final class SuccessfulEmbedder: EmbeddingProvider, @unchecked Sendable {
+        let name = "successful"
+        let dimension = 2
+
+        func embed(_ text: String) async throws -> [Float] { [1, 0] }
+    }
+
+    private final class StubVectorStore: VectorStore, @unchecked Sendable {
+        let hits: [(fileId: Int64, score: Float)]
+        var count: Int { hits.count }
+
+        init(hits: [(fileId: Int64, score: Float)]) { self.hits = hits }
+
+        func replace(fileId: Int64, chunks: [EmbeddingChunk], model: String) async -> Bool { false }
+        func remove(fileId: Int64) async {}
+        func search(_ query: [Float], k: Int) async -> [(fileId: Int64, score: Float)] {
+            Array(hits.prefix(k))
+        }
+        func loadAll() async {}
+    }
+
     private final class StubLLMProvider: LLMProvider, @unchecked Sendable {
         let name = "stub"
 
@@ -65,12 +86,39 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertEqual(try decodeRelatedIds(response).count, 5)
     }
 
-    private func makeChatService() -> ChatService {
+    func testEmptySemanticResultsFallBackToKeywordSearch() async throws {
+        let matchingId = try insertFile(named: "agreement.pdf", title: "年度合同")
+        let chat = makeChatService(
+            embedder: SuccessfulEmbedder(),
+            vectorStore: StubVectorStore(hits: [])
+        )
+
+        let response = await chat.ask("合同")
+
+        XCTAssertEqual(response.relatedFiles.compactMap(\.id), [matchingId])
+    }
+
+    func testSemanticHitIsPreferredWithoutAddingKeywordMatches() async throws {
+        let semanticId = try insertFile(named: "semantic.pdf", title: "Semantic result")
+        _ = try insertFile(named: "agreement.pdf", title: "年度合同")
+        let chat = makeChatService(
+            embedder: SuccessfulEmbedder(),
+            vectorStore: StubVectorStore(hits: [(semanticId, 0.9)])
+        )
+
+        let response = await chat.ask("合同")
+
+        XCTAssertEqual(response.relatedFiles.compactMap(\.id), [semanticId])
+    }
+
+    private func makeChatService(embedder: EmbeddingProvider = FailingEmbedder(),
+                                 vectorStore: VectorStore? = nil) -> ChatService {
         ChatService(
             store: store,
             settings: .shared,
-            embedder: FailingEmbedder(),
-            llmProvider: StubLLMProvider()
+            embedder: embedder,
+            llmProvider: StubLLMProvider(),
+            vectorStore: vectorStore
         )
     }
 

@@ -8,16 +8,19 @@ final class ChatService {
     private let settings: AppSettings
     private let providedEmbedder: EmbeddingProvider?
     private let providedLLMProvider: LLMProvider?
+    private let providedVectorStore: VectorStore?
     private lazy var embedder: EmbeddingProvider = providedEmbedder ?? settings.makeEmbeddingProvider()
 
     init(store: SQLiteStore,
          settings: AppSettings,
          embedder: EmbeddingProvider? = nil,
-         llmProvider: LLMProvider? = nil) {
+         llmProvider: LLMProvider? = nil,
+         vectorStore: VectorStore? = nil) {
         self.store = store
         self.settings = settings
         self.providedEmbedder = embedder
         self.providedLLMProvider = llmProvider
+        self.providedVectorStore = vectorStore
     }
 
     func loadHistory() -> [ChatMessage] {
@@ -47,15 +50,15 @@ final class ChatService {
         let context: String
         if let qvec = try? await embedder.embed(question), !qvec.isEmpty {
             // 用 IndexerService 的向量库检索；这里复用 AppState 中的实例
-            let store = AppStateIndexerProxy.shared.vectorStore
-            let hits = await store.search(qvec, k: Self.relatedFileLimit)
-            related = hits.compactMap { (id, _) in
+            let vectorStore = providedVectorStore ?? AppStateIndexerProxy.shared.vectorStore
+            let hits = await vectorStore.search(qvec, k: Self.relatedFileLimit)
+            let semanticMatches = hits.compactMap { (id, _) in
                 try? self.store.file(id: id)
             }
+            related = semanticMatches.isEmpty ? keywordMatches(question) : semanticMatches
         } else {
             // embedding 不可用：退化为关键词检索
-            let matches = (try? self.store.files(matching: question)) ?? []
-            related = Array(matches.prefix(Self.relatedFileLimit))
+            related = keywordMatches(question)
         }
 
         context = buildContext(from: related)
@@ -84,6 +87,11 @@ final class ChatService {
         assistantMsg.relatedFiles = related
         _ = try? store.addChatMessage(assistantMsg)
         return assistantMsg
+    }
+
+    private func keywordMatches(_ question: String) -> [FileRecord] {
+        let matches = (try? store.files(matching: question)) ?? []
+        return Array(matches.prefix(Self.relatedFileLimit))
     }
 
     /// 把检索到的文件拼成给 LLM 的上下文

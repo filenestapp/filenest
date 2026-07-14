@@ -7,9 +7,9 @@ import NaturalLanguage
 /// 注意：@Published 属性不能用 didSet，因此持久化逻辑放在独立的 set() 里，
 /// UI 通过 SettingBinding 适配器间接调用 set()。
 final class AppSettings: ObservableObject {
-    static let shared = AppSettings()
+    static let shared = AppSettings(store: .shared)
 
-    private let store = SQLiteStore.shared
+    private let store: SQLiteStore
     private weak var organizer: OrganizerService?
     private weak var indexer: IndexerService?
     private weak var chat: ChatService?
@@ -33,14 +33,16 @@ final class AppSettings: ObservableObject {
         var label: String { self == .ollama ? "本地 Ollama" : self == .cloud ? "云端 API" : "禁用" }
     }
 
-    private init() {
+    init(store: SQLiteStore) {
+        self.store = store
         watchDirs = loadStrArr(.watchDirs, sep: "\n") ?? [defaultDownloads().path]
         enabledExtensions = loadStrArr(.enabledExts, sep: ",") ?? defaultExts
         excludeHidden = load(.excludeHidden) != "0"
         classifyStrategy = ClassificationStrategy(
             storedValue: load(.classifyStrategy) ?? ClassificationStrategy.hybrid.rawValue
         ).rawValue
-        llmChoice = load(.llmChoice) ?? LLMChoice.ollama.rawValue
+        llmChoice = LLMChoice(rawValue: load(.llmChoice) ?? "")?.rawValue
+            ?? LLMChoice.ollama.rawValue
         ollamaHost = load(.ollamaHost) ?? "http://127.0.0.1:11434"
         ollamaModel = load(.ollamaModel) ?? "qwen2.5:7b"
         cloudAPIKey = load(.cloudKey) ?? ""
@@ -66,7 +68,11 @@ final class AppSettings: ObservableObject {
         classifyStrategy = normalized
         save(.classifyStrategy, normalized)
     }
-    func setLLMChoice(_ v: String) { llmChoice = v; save(.llmChoice, v) }
+    func setLLMChoice(_ v: String) {
+        let normalized = LLMChoice(rawValue: v)?.rawValue ?? LLMChoice.ollama.rawValue
+        llmChoice = normalized
+        save(.llmChoice, normalized)
+    }
     func setOllamaHost(_ v: String) { ollamaHost = v; save(.ollamaHost, v) }
     func setOllamaModel(_ v: String) { ollamaModel = v; save(.ollamaModel, v) }
     func setCloudKey(_ v: String) { cloudAPIKey = v; save(.cloudKey, v) }

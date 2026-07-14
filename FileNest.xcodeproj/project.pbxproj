@@ -11,6 +11,7 @@
 		19310935F0A7DA7AE25AB8B6 /* LLMProviders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E2841AC565E2C180CE122C2 /* LLMProviders.swift */; };
 		25446E8EBCD8DB2D43F36121 /* FileContentHasherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93AF189A6E886107AA525ED4 /* FileContentHasherTests.swift */; };
 		25F4F037026B133DF6FBBD81 /* AccelerateVectorStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E16E128627D1FAF79016D738 /* AccelerateVectorStore.swift */; };
+		2C2164A680993E7AFDA06680 /* AppSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DDEE9EB899F17FB57569A2A /* AppSettingsTests.swift */; };
 		2EAD682AF620F5C5BBBB3DAD /* EmbeddingProviders.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9625AF00E9C156137E913EF /* EmbeddingProviders.swift */; };
 		3C2FA6B98BE8E51541AFE2D5 /* RulesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF170772F5419E6FA6D2AC01 /* RulesView.swift */; };
 		3F2AEC1B7DB37C42CE6653DE /* ChatService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BC13866E4DE2369E11F04E4 /* ChatService.swift */; };
@@ -59,6 +60,7 @@
 		07F627F75F60ECBD269437A6 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		0A8A793C6CFB7D4E6B507F3E /* FileNestApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNestApp.swift; sourceTree = "<group>"; };
 		0B1E54077AA4314A64BF946B /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
+		1DDEE9EB899F17FB57569A2A /* AppSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettingsTests.swift; sourceTree = "<group>"; };
 		1E2841AC565E2C180CE122C2 /* LLMProviders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMProviders.swift; sourceTree = "<group>"; };
 		27303B439066A29084763669 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		32F78A71B3DCB8483A341C7A /* OrganizerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizerService.swift; sourceTree = "<group>"; };
@@ -220,6 +222,7 @@
 			isa = PBXGroup;
 			children = (
 				ACF82143A6594FB0098BAD8A /* AccelerateVectorStoreTests.swift */,
+				1DDEE9EB899F17FB57569A2A /* AppSettingsTests.swift */,
 				C7F32D12E48807558F2E0953 /* ChatServiceTests.swift */,
 				D4BDDE8F83AD233317468507 /* ContentExtractorTests.swift */,
 				93AF189A6E886107AA525ED4 /* FileContentHasherTests.swift */,
@@ -351,6 +354,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C858C26590E234AE9B3FC73B /* AccelerateVectorStoreTests.swift in Sources */,
+				2C2164A680993E7AFDA06680 /* AppSettingsTests.swift in Sources */,
 				3FD55A45333F5F9E7F7999BB /* ChatServiceTests.swift in Sources */,
 				681BA571496E9D40BF36EB9F /* ContentExtractorTests.swift in Sources */,
 				25446E8EBCD8DB2D43F36121 /* FileContentHasherTests.swift in Sources */,
