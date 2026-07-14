@@ -3,13 +3,21 @@ import Foundation
 /// 聊天服务：用户问题 -> 向量检索相关文件 -> 拼 context -> LLM -> 引用文件。
 /// RAG 检索 + 文件引用。
 final class ChatService {
+    private static let relatedFileLimit = 5
     private let store: SQLiteStore
     private let settings: AppSettings
-    private lazy var embedder: EmbeddingProvider = settings.makeEmbeddingProvider()
+    private let providedEmbedder: EmbeddingProvider?
+    private let providedLLMProvider: LLMProvider?
+    private lazy var embedder: EmbeddingProvider = providedEmbedder ?? settings.makeEmbeddingProvider()
 
-    init(store: SQLiteStore, settings: AppSettings) {
+    init(store: SQLiteStore,
+         settings: AppSettings,
+         embedder: EmbeddingProvider? = nil,
+         llmProvider: LLMProvider? = nil) {
         self.store = store
         self.settings = settings
+        self.providedEmbedder = embedder
+        self.providedLLMProvider = llmProvider
     }
 
     func loadHistory() -> [ChatMessage] {
@@ -40,13 +48,14 @@ final class ChatService {
         if let qvec = try? await embedder.embed(question), !qvec.isEmpty {
             // 用 IndexerService 的向量库检索；这里复用 AppState 中的实例
             let store = AppStateIndexerProxy.shared.vectorStore
-            let hits = await store.search(qvec, k: 5)
-            related = hits.compactMap { (id, score) in
+            let hits = await store.search(qvec, k: Self.relatedFileLimit)
+            related = hits.compactMap { (id, _) in
                 try? self.store.file(id: id)
             }
         } else {
             // embedding 不可用：退化为关键词检索
-            related = (try? self.store.files(matching: question)) ?? []
+            let matches = (try? self.store.files(matching: question)) ?? []
+            related = Array(matches.prefix(Self.relatedFileLimit))
         }
 
         context = buildContext(from: related)
@@ -58,7 +67,7 @@ final class ChatService {
             ?? []
         // 截断历史，避免 token 爆炸（最近 8 轮）
         let turns = Array(history.suffix(16))
-        let provider = settings.makeLLMProvider()
+        let provider = providedLLMProvider ?? settings.makeLLMProvider()
 
         let reply: String
         do {

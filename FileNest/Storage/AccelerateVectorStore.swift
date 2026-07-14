@@ -162,13 +162,18 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                     return
                 }
                 // 逐条点积（vectors 已在入库时归一化；这里再做一次防御性归一化）
-                var scored: [(Int64, Float)] = []
-                scored.reserveCapacity(self.entries.count)
+                var bestScoreByFile: [Int64: Float] = [:]
+                bestScoreByFile.reserveCapacity(self.entries.count)
                 for e in self.entries {
                     let dot = Self.dot(q, e.vector)
-                    scored.append((e.fileId, dot))
+                    if dot > bestScoreByFile[e.fileId, default: -.infinity] {
+                        bestScoreByFile[e.fileId] = dot
+                    }
                 }
-                scored.sort { $0.1 > $1.1 }
+                var scored = bestScoreByFile.map { (fileId: $0.key, score: $0.value) }
+                scored.sort {
+                    $0.score == $1.score ? $0.fileId < $1.fileId : $0.score > $1.score
+                }
                 cont.resume(returning: Array(scored.prefix(k)))
             }
         }

@@ -121,6 +121,30 @@ final class AccelerateVectorStoreTests: XCTestCase {
         XCTAssertEqual(invalidQueryHits.count, 0)
     }
 
+    func testSearchReturnsEachFileOnceUsingItsHighestChunkScore() async throws {
+        let firstId = try insertFile(named: "first.md")
+        let secondId = try insertFile(named: "second.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        _ = await vectorStore.replace(
+            fileId: firstId,
+            chunks: [
+                EmbeddingChunk(vector: [1, 0], text: "best"),
+                EmbeddingChunk(vector: [0.8, 0.2], text: "also relevant"),
+            ],
+            model: "test-model"
+        )
+        _ = await vectorStore.replace(
+            fileId: secondId,
+            chunks: [EmbeddingChunk(vector: [0, 1], text: "other")],
+            model: "test-model"
+        )
+
+        let hits = await vectorStore.search([1, 0], k: 5)
+
+        XCTAssertEqual(hits.map(\.fileId), [firstId, secondId])
+        XCTAssertEqual(hits.first?.score ?? 0, 1, accuracy: 0.0001)
+    }
+
     private func insertFile(named name: String) throws -> Int64 {
         try store.upsertFile(FileRecord(
             id: nil,

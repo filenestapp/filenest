@@ -20,7 +20,7 @@
 
 ### 已完成 ✅
 - 完整的垂直切片 MVP，**可以编译、可以运行、核心闭环已验证通过**
-- 23 个 App Swift 源文件，另有 7 个单元/端到端测试文件
+- 23 个 App Swift 源文件，另有 8 个单元/端到端测试文件
 - `xcodebuild` clean build 成功（macOS 26.6 / Xcode 26.6 / Swift 6.3，arm64）
 - 已用真实下载目录验证：68 个文件被扫描，按类型正确归类，文本文件成功抽取+向量化（512维一致）
 
@@ -37,7 +37,7 @@
 | 稳定性 | ✅ 进程长期运行无崩溃 |
 
 ### 未做（明确的后续工作，见第 8 节）
-- 当前有 24 项测试，覆盖向量存储一致性与非法输入、文件稳定性、SHA-256、内容抽取降级/截断、中英文分块、索引状态、规则语义，以及文件移动与 DB 路径回写
+- 当前有 27 项测试，覆盖向量存储一致性/非法输入/文件级去重、文件稳定性、SHA-256、内容抽取降级/截断、中英文分块、索引状态、聊天关键词降级/引用持久化、规则语义，以及文件移动与 DB 路径回写
 - AI 语义分类尚未实现；界面只提供「仅规则 / 混合」，历史 AI 规则会显示为停用且不参与分类
 - 没有图片多模态识别
 - 没有上架打包/签名配置（当前是 ad-hoc 签名 `-`）
@@ -139,7 +139,7 @@ ollama pull qwen2.5:7b      # 拉模型（首次几 GB）
 | 文件 | 行 | 职责 |
 |---|---|---|
 | `SQLiteStore.swift` | 252 | **数据基础**。DatabasePool，建库建表迁移，files/embeddings/rules/chat/settings 的 CRUD，默认规则注入 |
-| `AccelerateVectorStore.swift` | 214 | 向量检索。向量以 BLOB 存 SQLite，启动时载入内存，用 vDSP 做 cosine 暴力检索，入库前拒绝非有限或维度不一致的向量。**核心方法：`loadAll` / `replace` / `remove` / `search`** |
+| `AccelerateVectorStore.swift` | 219 | 向量检索。向量以 BLOB 存 SQLite，用 vDSP 做 cosine 检索；入库前拒绝非有限或维度不一致的向量，检索时每个文件取最高分块得分且只返回一次。**核心方法：`loadAll` / `replace` / `remove` / `search`** |
 
 ### Providers/（可插拔实现）
 | 文件 | 行 | 职责 |
@@ -153,7 +153,7 @@ ollama pull qwen2.5:7b      # 拉模型（首次几 GB）
 | `FileWatcherService.swift` | 224 | 监听目录（DispatchSource + 10秒轮询兜底），文件稳定至少2秒后→入DB→触发索引+归类 |
 | `OrganizerService.swift` | 161 | 规则决策 + 扩展名回退 + 文件移动（含自定义目标和同名冲突处理）。`organize(fileId:)` 单个，`runOnce()` 批量 |
 | `IndexerService.swift` | 178 | 内容抽取→中英文滑动窗口分块→向量化→入库。`indexFile(id:overridePath:)` 是核心方法 |
-| `ChatService.swift` | 115 | RAG：问题向量化→检索top5→拼context→调LLM→保存带引用的回复 |
+| `ChatService.swift` | 124 | RAG：问题向量化→检索 top 5→拼 context→调 LLM→保存带引用的回复；embedding 失败时降级为最多 5 个关键词结果 |
 
 ### Extraction/
 | 文件 | 行 | 职责 |
@@ -237,7 +237,7 @@ watcher 有两个事件来源：每个目录一个 DispatchSource + 一个全局
 
 ### P0（建议先做）
 1. **实测聊天功能** — 装上 Ollama + 拉模型，跑通 RAG 端到端，验证引用文件是否正确
-2. **继续补核心测试** — 已覆盖 `ContentExtractor`、中英文分块、向量编解码/检索边界、索引状态、规则和整理端到端；下一步覆盖 PDF 真实文本抽取、`ChatService` 检索去重/降级和 SQLite CRUD 边界
+2. **继续补核心测试** — 已覆盖 `ContentExtractor`、中英文分块、向量边界/文件级去重、聊天关键词降级、索引状态、规则和整理端到端；下一步覆盖 PDF 真实文本抽取、SQLite CRUD 边界和 LLM Provider 响应解析
 
 ### P1（体验提升）
 3. **AI 真正语义分类** — 当前不对用户暴露未实现的 AI 策略，历史 `classifyStrategy="ai"` 会安全归一化为 `hybrid`。实现时可让 LLM 读文件名/内容前 N 字返回分类，并增加超时/失败回退策略
