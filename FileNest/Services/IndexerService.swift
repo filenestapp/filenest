@@ -59,6 +59,10 @@ final class IndexerService {
 
         // 向量化（仅对有实质文本的）
         guard !extracted.text.isEmpty else {
+            guard Self.contentIsUnchanged(at: url, expectedHash: contentHash) else {
+                Self.log("index aborted \(file.name): file changed during extraction")
+                return false
+            }
             await vectorStore.remove(fileId: id)
             updated.indexedAt = Date()
             do {
@@ -92,6 +96,10 @@ final class IndexerService {
             Self.log("index failed \(file.name): no embeddings generated")
             return false
         }
+        guard Self.contentIsUnchanged(at: url, expectedHash: contentHash) else {
+            Self.log("index aborted \(file.name): file changed during embedding")
+            return false
+        }
         guard await vectorStore.replace(fileId: id, chunks: embeddings, model: embedder.name) else {
             Self.log("index failed \(file.name): vector store rejected replacement")
             return false
@@ -105,6 +113,11 @@ final class IndexerService {
         }
         Self.log("done \(file.name): \(embeddings.count)/\(texts.count) embedded")
         return true
+    }
+
+    private static func contentIsUnchanged(at url: URL, expectedHash: String?) -> Bool {
+        guard let expectedHash else { return true }
+        return (try? FileContentHasher.sha256(of: url)) == expectedHash
     }
 
     /// 重新索引全部文件

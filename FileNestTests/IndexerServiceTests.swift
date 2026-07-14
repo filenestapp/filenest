@@ -21,6 +21,43 @@ final class IndexerServiceTests: XCTestCase {
         }
     }
 
+    private final class GateEmbedder: EmbeddingProvider, @unchecked Sendable {
+        let name = "gate"
+        let dimension = 2
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var released = false
+
+        var isWaiting: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return continuation != nil
+        }
+
+        func embed(_ text: String) async throws -> [Float] {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if released {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    self.continuation = continuation
+                    lock.unlock()
+                }
+            }
+            return [1, 0]
+        }
+
+        func release() {
+            lock.lock()
+            released = true
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume()
+        }
+    }
+
     private var temporaryDirectory: URL!
     private var store: SQLiteStore!
 
@@ -89,6 +126,36 @@ final class IndexerServiceTests: XCTestCase {
         XCTAssertEqual(indexer.vectorStore.count, 0)
     }
 
+    func testFileChangedDuringEmbeddingIsRejectedAndLatestContentCanRetry() async throws {
+        let fileURL = temporaryDirectory.appendingPathComponent("changing.txt")
+        try Data("old content".utf8).write(to: fileURL)
+        let fileId = try insertFile(at: fileURL)
+        let embedder = GateEmbedder()
+        defer { embedder.release() }
+        let indexer = IndexerService(store: store, settings: .shared, embedder: embedder)
+
+        let indexingTask = Task {
+            await indexer.indexFile(id: fileId, overridePath: fileURL)
+        }
+        let didStartEmbedding = await waitUntil { embedder.isWaiting }
+        XCTAssertTrue(didStartEmbedding)
+        try Data("latest content".utf8).write(to: fileURL)
+        embedder.release()
+
+        let acceptedStaleContent = await indexingTask.value
+        XCTAssertFalse(acceptedStaleContent)
+        XCTAssertNil(try store.file(id: fileId)?.indexedAt)
+        XCTAssertEqual(indexer.vectorStore.count, 0)
+
+        let didRetryLatestContent = await indexer.indexFile(id: fileId, overridePath: fileURL)
+        XCTAssertTrue(didRetryLatestContent)
+        let latest = try XCTUnwrap(store.file(id: fileId))
+        XCTAssertEqual(latest.contentText, "latest content")
+        XCTAssertEqual(latest.contentHash, try FileContentHasher.sha256(of: fileURL))
+        XCTAssertNotNil(latest.indexedAt)
+        XCTAssertEqual(indexer.vectorStore.count, 2)
+    }
+
     func testChunkReturnsNoSegmentsForBlankOrInvalidInput() {
         XCTAssertEqual(IndexerService.chunk(text: "", maxWords: 200, overlap: 30), [])
         XCTAssertEqual(IndexerService.chunk(text: "  \n\t", maxWords: 200, overlap: 30), [])
@@ -132,5 +199,15 @@ final class IndexerServiceTests: XCTestCase {
             title: nil,
             contentText: nil
         ))
+    }
+
+    private func waitUntil(timeout: TimeInterval = 5,
+                           condition: @escaping () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return condition()
     }
 }

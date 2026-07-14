@@ -251,6 +251,40 @@ final class FileWatcherServiceTests: XCTestCase {
         XCTAssertEqual(embedder.callCount, 6)
     }
 
+    func testRapidWatchDirectoryChangesUseFinalConfiguration() async throws {
+        let secondDirectory = temporaryDirectory.appendingPathComponent("second", isDirectory: true)
+        let finalDirectory = temporaryDirectory.appendingPathComponent("final", isDirectory: true)
+        try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: finalDirectory, withIntermediateDirectories: true)
+        settings.setAutoOrganize(false)
+        let watcher = makeWatcher(
+            embedder: CountingEmbedder(result: [1, 0]),
+            pollingInterval: 0.05
+        )
+        watcher.start()
+        defer { watcher.stop() }
+
+        settings.setWatchDirs([secondDirectory.path])
+        settings.setWatchDirs([sourceDirectory.path, secondDirectory.path])
+        settings.setWatchDirs([finalDirectory.path])
+        watcher.scanNow()
+        XCTAssertEqual(watcher.watchedDirectoryCount, 1)
+
+        let ignoredSource = try createFile(named: "ignored-source.txt", in: sourceDirectory)
+        let ignoredSecond = try createFile(named: "ignored-second.txt", in: secondDirectory)
+        _ = try createFile(named: "accepted.txt", in: finalDirectory)
+        let finalFileIndexed = await waitUntil {
+            guard let records = try? self.store.allFiles() else { return false }
+            return records.contains { $0.name == "accepted.txt" && $0.indexedAt != nil }
+        }
+        XCTAssertTrue(finalFileIndexed)
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertNil(try store.file(path: ignoredSource.path))
+        XCTAssertNil(try store.file(path: ignoredSecond.path))
+        XCTAssertEqual(try store.allFiles().map(\.name), ["accepted.txt"])
+    }
+
     private func makeWatcher(embedder: EmbeddingProvider,
                              pollingInterval: TimeInterval = 10) -> FileWatcherService {
         let organizer = OrganizerService(
