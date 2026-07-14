@@ -1,0 +1,43 @@
+name: FileNest
+options:
+  bundleIdPrefix: com.local
+  deploymentTarget:
+    macOS: "13.0"
+  developmentLanguage: zh-Hans
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    GENERATE_INFOPLIST_FILE: "YES"
+    INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright (c) 2026 FileNest"
+    INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "-"
+    ENABLE_HARDENED_RUNTIME: YES
+    SWIFT_STRICT_CONCURRENCY: minimal
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  FileNest:
+    type: application
+    platform: macOS
+    sources:
+      - path: FileNest
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.local.filenest
+        PRODUCT_NAME: FileNest
+        INFOPLIST_KEY_CFBundleDisplayName: FileNest
+        INFOPLIST_KEY_LSUIElement: "YES"
+        ENABLE_PREVIEWS: "YES"
+    dependencies:
+      - package: GRDB
+        product: GRDB
+
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: "6.29.0"

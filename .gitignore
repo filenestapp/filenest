@@ -1,0 +1,14 @@
+.DS_Store
+
+# Xcode user state and build output
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+
+# Swift Package Manager local state
+.build/
+.swiftpm/
+
+# Local tooling
+.zcode/
