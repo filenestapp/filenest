@@ -8,6 +8,9 @@ final class IndexerService {
     private let providedEmbedder: EmbeddingProvider?
     let vectorStore: AccelerateVectorStore
     private lazy var embedder: EmbeddingProvider = providedEmbedder ?? settings.makeEmbeddingProvider()
+    private let generationLock = NSLock()
+    private var nextGeneration: UInt64 = 0
+    private var activeGenerations: [Int64: UInt64] = [:]
 
     init(store: SQLiteStore, settings: AppSettings, embedder: EmbeddingProvider? = nil) {
         self.store = store
@@ -25,6 +28,8 @@ final class IndexerService {
     /// - Parameter overridePath: 可选的文件实际路径（用于文件尚未移动到 DB 记录路径时的索引）
     @discardableResult
     func indexFile(id: Int64, overridePath: URL? = nil, force: Bool = false) async -> Bool {
+        let generation = beginIndexGeneration(fileId: id)
+        defer { finishIndexGeneration(fileId: id, generation: generation) }
         guard let file = try? store.file(id: id) else {
             Self.log("indexFile: file \(id) not found"); return false
         }
@@ -51,7 +56,10 @@ final class IndexerService {
         updated.contentHash = contentHash
         updated.indexedAt = nil
         do {
-            _ = try store.upsertFile(updated)
+            guard try upsertIfCurrent(updated, fileId: id, generation: generation) else {
+                Self.log("index superseded \(file.name) before metadata update")
+                return false
+            }
         } catch {
             Self.log("update metadata failed for \(file.name): \(error)")
             return false
@@ -63,10 +71,24 @@ final class IndexerService {
                 Self.log("index aborted \(file.name): file changed during extraction")
                 return false
             }
-            await vectorStore.remove(fileId: id)
+            guard isCurrentGeneration(fileId: id, generation: generation) else {
+                Self.log("index superseded \(file.name) before vector removal")
+                return false
+            }
+            guard await vectorStore.remove(fileId: id, revision: generation) else {
+                Self.log("index failed \(file.name): vector removal rejected")
+                return false
+            }
+            guard Self.contentIsUnchanged(at: url, expectedHash: contentHash) else {
+                Self.log("index aborted \(file.name): file changed before completion")
+                return false
+            }
             updated.indexedAt = Date()
             do {
-                _ = try store.upsertFile(updated)
+                guard try upsertIfCurrent(updated, fileId: id, generation: generation) else {
+                    Self.log("index superseded \(file.name) before completion")
+                    return false
+                }
             } catch {
                 Self.log("mark indexed failed for \(file.name): \(error)")
                 return false
@@ -100,13 +122,29 @@ final class IndexerService {
             Self.log("index aborted \(file.name): file changed during embedding")
             return false
         }
-        guard await vectorStore.replace(fileId: id, chunks: embeddings, model: embedder.name) else {
+        guard isCurrentGeneration(fileId: id, generation: generation) else {
+            Self.log("index superseded \(file.name) before vector replacement")
+            return false
+        }
+        guard await vectorStore.replace(
+            fileId: id,
+            chunks: embeddings,
+            model: embedder.name,
+            revision: generation
+        ) else {
             Self.log("index failed \(file.name): vector store rejected replacement")
+            return false
+        }
+        guard Self.contentIsUnchanged(at: url, expectedHash: contentHash) else {
+            Self.log("index aborted \(file.name): file changed before completion")
             return false
         }
         updated.indexedAt = Date()
         do {
-            _ = try store.upsertFile(updated)
+            guard try upsertIfCurrent(updated, fileId: id, generation: generation) else {
+                Self.log("index superseded \(file.name) before completion")
+                return false
+            }
         } catch {
             Self.log("mark indexed failed for \(file.name): \(error)")
             return false
@@ -118,6 +156,38 @@ final class IndexerService {
     private static func contentIsUnchanged(at url: URL, expectedHash: String?) -> Bool {
         guard let expectedHash else { return true }
         return (try? FileContentHasher.sha256(of: url)) == expectedHash
+    }
+
+    private func beginIndexGeneration(fileId: Int64) -> UInt64 {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        nextGeneration &+= 1
+        activeGenerations[fileId] = nextGeneration
+        return nextGeneration
+    }
+
+    private func finishIndexGeneration(fileId: Int64, generation: UInt64) {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        if activeGenerations[fileId] == generation {
+            activeGenerations.removeValue(forKey: fileId)
+        }
+    }
+
+    private func isCurrentGeneration(fileId: Int64, generation: UInt64) -> Bool {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        return activeGenerations[fileId] == generation
+    }
+
+    private func upsertIfCurrent(_ record: FileRecord,
+                                 fileId: Int64,
+                                 generation: UInt64) throws -> Bool {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        guard activeGenerations[fileId] == generation else { return false }
+        _ = try store.upsertFile(record)
+        return true
     }
 
     /// 重新索引全部文件

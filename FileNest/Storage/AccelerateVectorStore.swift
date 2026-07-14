@@ -18,6 +18,8 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
         let chunkText: String?
     }
     private var entries: [Entry] = []
+    /// 仅用于当前进程内并发提交排序；所有访问均在 queue 上。
+    private var latestRevisionByFile: [Int64: UInt64] = [:]
     var count: Int { queue.sync { entries.count } }
 
     init(store: SQLiteStore) { self.store = store }
@@ -71,6 +73,14 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
 
     @discardableResult
     func replace(fileId: Int64, chunks: [EmbeddingChunk], model: String) async -> Bool {
+        await replace(fileId: fileId, chunks: chunks, model: model, revision: nil)
+    }
+
+    @discardableResult
+    func replace(fileId: Int64,
+                 chunks: [EmbeddingChunk],
+                 model: String,
+                 revision: UInt64?) async -> Bool {
         guard !chunks.isEmpty,
               chunks.allSatisfy({ Self.isValidVector($0.vector) }) else {
             NSLog("[VectorStore] replace rejected: invalid vector for file \(fileId)")
@@ -86,6 +96,13 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
 
         return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             queue.async {
+                if let revision,
+                   let latestRevision = self.latestRevisionByFile[fileId],
+                   revision < latestRevision {
+                    NSLog("[VectorStore] replace rejected: stale revision for file \(fileId)")
+                    cont.resume(returning: false)
+                    return
+                }
                 let dimensions = Set(normalized.map { $0.vector.count })
                 guard dimensions.count <= 1 else {
                     NSLog("[VectorStore] replace rejected: mixed dimensions for file \(fileId)")
@@ -118,6 +135,9 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                         Entry(fileId: fileId, vector: chunk.vector, model: model,
                               chunkIndex: index, chunkText: chunk.text)
                     })
+                    if let revision {
+                        self.latestRevisionByFile[fileId] = revision
+                    }
                 } catch {
                     NSLog("[VectorStore] replace failed: \(error)")
                     cont.resume(returning: false)
@@ -129,17 +149,34 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
     }
 
     func remove(fileId: Int64) async {
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+        _ = await remove(fileId: fileId, revision: nil)
+    }
+
+    @discardableResult
+    func remove(fileId: Int64, revision: UInt64?) async -> Bool {
+        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             queue.async {
+                if let revision,
+                   let latestRevision = self.latestRevisionByFile[fileId],
+                   revision < latestRevision {
+                    NSLog("[VectorStore] delete rejected: stale revision for file \(fileId)")
+                    cont.resume(returning: false)
+                    return
+                }
                 do {
                     try self.store.dbPool.write { db in
                         try db.execute(sql: "DELETE FROM embeddings WHERE file_id = ?", arguments: [fileId])
                     }
                     self.entries.removeAll { $0.fileId == fileId }
+                    if let revision {
+                        self.latestRevisionByFile[fileId] = revision
+                    }
                 } catch {
                     NSLog("[VectorStore] delete failed: \(error)")
+                    cont.resume(returning: false)
+                    return
                 }
-                cont.resume()
+                cont.resume(returning: true)
             }
         }
     }

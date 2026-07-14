@@ -103,6 +103,30 @@ final class AccelerateVectorStoreTests: XCTestCase {
         XCTAssertEqual(hits.first?.fileId, fileId)
     }
 
+    func testOlderRevisionCannotOverwriteNewerReplacement() async throws {
+        let fileId = try insertFile(named: "notes.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+
+        let newerSucceeded = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(vector: [0, 1], text: "newer")],
+            model: "test-model",
+            revision: 2
+        )
+        let olderSucceeded = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(vector: [1, 0], text: "older")],
+            model: "test-model",
+            revision: 1
+        )
+
+        XCTAssertTrue(newerSucceeded)
+        XCTAssertFalse(olderSucceeded)
+        let hits = await vectorStore.search([0, 1], k: 1)
+        XCTAssertEqual(hits.first?.fileId, fileId)
+        XCTAssertEqual(try XCTUnwrap(hits.first).score, 1, accuracy: 0.0001)
+    }
+
     func testSearchRejectsInvalidLimitAndQuery() async throws {
         let fileId = try insertFile(named: "notes.md")
         let vectorStore = AccelerateVectorStore(store: store)

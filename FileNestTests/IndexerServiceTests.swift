@@ -58,6 +58,38 @@ final class IndexerServiceTests: XCTestCase {
         }
     }
 
+    private final class SupersedingEmbedder: EmbeddingProvider, @unchecked Sendable {
+        let name = "superseding"
+        let dimension = 2
+        private let queue = DispatchQueue(label: "filenest.tests.superseding-embedder")
+        private var calls = 0
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        var isFirstCallWaiting: Bool { queue.sync { continuation != nil } }
+
+        func embed(_ text: String) async throws -> [Float] {
+            let call = queue.sync {
+                calls += 1
+                return calls
+            }
+            if call == 1 {
+                await withCheckedContinuation { continuation in
+                    queue.sync { self.continuation = continuation }
+                }
+            }
+            return call == 2 || call == 3 ? [0, 1] : [1, 0]
+        }
+
+        func releaseFirstCall() {
+            let continuation = queue.sync {
+                let value = self.continuation
+                self.continuation = nil
+                return value
+            }
+            continuation?.resume()
+        }
+    }
+
     private var temporaryDirectory: URL!
     private var store: SQLiteStore!
 
@@ -154,6 +186,32 @@ final class IndexerServiceTests: XCTestCase {
         XCTAssertEqual(latest.contentHash, try FileContentHasher.sha256(of: fileURL))
         XCTAssertNotNil(latest.indexedAt)
         XCTAssertEqual(indexer.vectorStore.count, 2)
+    }
+
+    func testNewerConcurrentIndexSupersedesOlderTask() async throws {
+        let fileURL = temporaryDirectory.appendingPathComponent("concurrent.txt")
+        try Data("same content".utf8).write(to: fileURL)
+        let fileId = try insertFile(at: fileURL)
+        let embedder = SupersedingEmbedder()
+        defer { embedder.releaseFirstCall() }
+        let indexer = IndexerService(store: store, settings: .shared, embedder: embedder)
+
+        let olderTask = Task {
+            await indexer.indexFile(id: fileId, overridePath: fileURL)
+        }
+        let olderTaskDidBlock = await waitUntil { embedder.isFirstCallWaiting }
+        XCTAssertTrue(olderTaskDidBlock)
+
+        let newerTaskSucceeded = await indexer.indexFile(id: fileId, overridePath: fileURL)
+        XCTAssertTrue(newerTaskSucceeded)
+        embedder.releaseFirstCall()
+
+        let olderTaskWasAccepted = await olderTask.value
+        XCTAssertFalse(olderTaskWasAccepted)
+        let matches = await indexer.vectorStore.search([0, 1], k: 1)
+        XCTAssertEqual(matches.first?.fileId, fileId)
+        XCTAssertEqual(try XCTUnwrap(matches.first).score, 1, accuracy: 0.001)
+        XCTAssertNotNil(try store.file(id: fileId)?.indexedAt)
     }
 
     func testChunkReturnsNoSegmentsForBlankOrInvalidInput() {
