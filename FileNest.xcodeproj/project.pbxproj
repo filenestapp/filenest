@@ -14,6 +14,7 @@
 		3C2FA6B98BE8E51541AFE2D5 /* RulesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF170772F5419E6FA6D2AC01 /* RulesView.swift */; };
 		3F2AEC1B7DB37C42CE6653DE /* ChatService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BC13866E4DE2369E11F04E4 /* ChatService.swift */; };
 		47F2BC7EB6E2CD2AEF302180 /* FileWatcherService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB409BFD16A49BF17B904414 /* FileWatcherService.swift */; };
+		58C60715E5958EC742B4C465 /* OrganizerServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3852187AB6DFCAF137FE021B /* OrganizerServiceTests.swift */; };
 		5E523175D5F8F4F0428ACAB2 /* FileContentHasher.swift in Sources */ = {isa = PBXBuildFile; fileRef = F358502FCADBC66CD3727C7F /* FileContentHasher.swift */; };
 		5F68F392524A348200FDA99D /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07F627F75F60ECBD269437A6 /* AppSettings.swift */; };
 		619BA81D48D5114F7D7146D1 /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3ED860C7A38EA05934B40D2C /* MainView.swift */; };
@@ -33,6 +34,8 @@
 		C858C26590E234AE9B3FC73B /* AccelerateVectorStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF82143A6594FB0098BAD8A /* AccelerateVectorStoreTests.swift */; };
 		CFEF238FB153D24FC6A03282 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27303B439066A29084763669 /* ChatView.swift */; };
 		D468979A8C879103497D34A7 /* ContentExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B290655B42F0B0722076C1D9 /* ContentExtractor.swift */; };
+		D9D9DE504E105FFD9A319390 /* OrganizationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AF71E1C61D599A9EC1771B /* OrganizationPolicy.swift */; };
+		E89F38010375D2AAFDA93164 /* RuleClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C17548A0C41EE3AB803FFF /* RuleClassifierTests.swift */; };
 		F3756EEC872DD311665B8684 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B384135AFF13CA8C8B35647 /* Protocols.swift */; };
 		F483106C890A5D06AC88546F /* FileStabilityTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6593BF0E6103F8909253FADE /* FileStabilityTracker.swift */; };
 /* End PBXBuildFile section */
@@ -54,6 +57,7 @@
 		1E2841AC565E2C180CE122C2 /* LLMProviders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMProviders.swift; sourceTree = "<group>"; };
 		27303B439066A29084763669 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		32F78A71B3DCB8483A341C7A /* OrganizerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizerService.swift; sourceTree = "<group>"; };
+		3852187AB6DFCAF137FE021B /* OrganizerServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizerServiceTests.swift; sourceTree = "<group>"; };
 		3ED860C7A38EA05934B40D2C /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		41ABE72DDFB85190D0B6DDD6 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		581C46E087A7CE99D4ED2B6F /* FileNestTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FileNestTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -70,9 +74,11 @@
 		9E792A846DAEB2DEAC97A618 /* FileNest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FileNest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ACF82143A6594FB0098BAD8A /* AccelerateVectorStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccelerateVectorStoreTests.swift; sourceTree = "<group>"; };
 		B290655B42F0B0722076C1D9 /* ContentExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentExtractor.swift; sourceTree = "<group>"; };
+		C1AF71E1C61D599A9EC1771B /* OrganizationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationPolicy.swift; sourceTree = "<group>"; };
 		D279A11830E6026464167E5D /* IndexerServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexerServiceTests.swift; sourceTree = "<group>"; };
 		D9625AF00E9C156137E913EF /* EmbeddingProviders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddingProviders.swift; sourceTree = "<group>"; };
 		E16E128627D1FAF79016D738 /* AccelerateVectorStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccelerateVectorStore.swift; sourceTree = "<group>"; };
+		E5C17548A0C41EE3AB803FFF /* RuleClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleClassifierTests.swift; sourceTree = "<group>"; };
 		EB409BFD16A49BF17B904414 /* FileWatcherService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcherService.swift; sourceTree = "<group>"; };
 		EF170772F5419E6FA6D2AC01 /* RulesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulesView.swift; sourceTree = "<group>"; };
 		F358502FCADBC66CD3727C7F /* FileContentHasher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileContentHasher.swift; sourceTree = "<group>"; };
@@ -160,6 +166,7 @@
 			isa = PBXGroup;
 			children = (
 				41ABE72DDFB85190D0B6DDD6 /* Models.swift */,
+				C1AF71E1C61D599A9EC1771B /* OrganizationPolicy.swift */,
 				6B384135AFF13CA8C8B35647 /* Protocols.swift */,
 			);
 			path = Domain;
@@ -208,6 +215,8 @@
 				93AF189A6E886107AA525ED4 /* FileContentHasherTests.swift */,
 				7C1B8C692F4C1A7136F74DFF /* FileStabilityTrackerTests.swift */,
 				D279A11830E6026464167E5D /* IndexerServiceTests.swift */,
+				3852187AB6DFCAF137FE021B /* OrganizerServiceTests.swift */,
+				E5C17548A0C41EE3AB803FFF /* RuleClassifierTests.swift */,
 			);
 			path = FileNestTests;
 			sourceTree = "<group>";
@@ -316,6 +325,7 @@
 				619BA81D48D5114F7D7146D1 /* MainView.swift in Sources */,
 				91E4FCD02C332A942183BCE0 /* MenuBarView.swift in Sources */,
 				7C01A5CE17EBDFB072B323D9 /* Models.swift in Sources */,
+				D9D9DE504E105FFD9A319390 /* OrganizationPolicy.swift in Sources */,
 				6FA1EF6DEB91E79B62A8D9D8 /* OrganizerService.swift in Sources */,
 				F3756EEC872DD311665B8684 /* Protocols.swift in Sources */,
 				3C2FA6B98BE8E51541AFE2D5 /* RulesView.swift in Sources */,
@@ -332,6 +342,8 @@
 				25446E8EBCD8DB2D43F36121 /* FileContentHasherTests.swift in Sources */,
 				AF858DEA4596E60D4F744EE2 /* FileStabilityTrackerTests.swift in Sources */,
 				750134831B313854FDD639B1 /* IndexerServiceTests.swift in Sources */,
+				58C60715E5958EC742B4C465 /* OrganizerServiceTests.swift in Sources */,
+				E89F38010375D2AAFDA93164 /* RuleClassifierTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

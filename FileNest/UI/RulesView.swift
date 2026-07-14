@@ -12,7 +12,9 @@ struct RulesView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("整理规则").font(.title2.bold())
-                    Text("规则按优先级从高到低匹配。未命中规则的文件按扩展名自动归类。")
+                    Text(appState.settings.classifyStrategy == ClassificationStrategy.rule.rawValue
+                         ? "仅规则：未命中的文件保留在原位。"
+                         : "混合：优先匹配规则，未命中时按扩展名自动归类。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -20,12 +22,11 @@ struct RulesView: View {
                     get: { appState.settings.classifyStrategy },
                     set: { appState.settings.setClassifyStrategy($0) }
                 )) {
-                    Text("混合").tag("hybrid")
-                    Text("仅规则").tag("rule")
-                    Text("仅AI").tag("ai")
+                    Text("混合").tag(ClassificationStrategy.hybrid.rawValue)
+                    Text("仅规则").tag(ClassificationStrategy.rule.rawValue)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 220)
+                .frame(width: 160)
                 Button { showAdd = true } label: { Label("新增规则", systemImage: "plus") }
             }
             .padding(12)
@@ -37,10 +38,10 @@ struct RulesView: View {
                     Toggle("", isOn: Binding(
                         get: { r.enabled },
                         set: { newVal in update(r, enabled: newVal) }
-                    )).labelsHidden()
+                    )).labelsHidden().disabled(r.typeEnum == .ai)
                 }.width(50)
                 TableColumn("规则名") { r in Text(r.name) }
-                TableColumn("类型") { r in Text(r.typeEnum == .rule ? "规则" : "AI") }.width(60)
+                TableColumn("类型") { r in Text(r.typeEnum == .rule ? "规则" : "AI（停用）") }.width(80)
                 TableColumn("匹配模式") { r in
                     Text(r.pattern).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
@@ -106,18 +107,39 @@ struct RuleEditor: View {
     let onSave: (Rule) -> Void
     @Environment(\.dismiss) var dismiss
 
+    private var validatedTargetFolder: String? {
+        OrganizationTarget.folderName(from: rule.targetFolder)
+    }
+
+    private var canSave: Bool {
+        !rule.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !rule.pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        validatedTargetFolder != nil &&
+        rule.type == RuleType.rule.rawValue
+    }
+
     var body: some View {
         VStack(spacing: 16) {
             Text(rule.id == nil ? "新增规则" : "编辑规则").font(.headline)
             Form {
                 TextField("规则名", text: $rule.name)
-                Picker("类型", selection: $rule.type) {
-                    Text("规则（按扩展名）").tag("rule")
-                    Text("AI（语义）").tag("ai")
+                if rule.type == RuleType.ai.rawValue {
+                    Picker("类型", selection: $rule.type) {
+                        Text("规则（按扩展名）").tag(RuleType.rule.rawValue)
+                        Text("AI（尚未实现）").tag(RuleType.ai.rawValue)
+                    }
+                    Text("AI 规则当前不会执行。请改为扩展名规则后再保存。")
+                        .font(.caption2).foregroundStyle(.orange)
+                } else {
+                    LabeledContent("类型", value: "规则（按扩展名）")
                 }
                 TextField("匹配模式（逗号分隔扩展名，如 pdf,doc,md）", text: $rule.pattern, axis: .vertical)
                     .lineLimit(2...4)
                 TextField("目标文件夹（如 文档 / 合同 / 发票）", text: $rule.targetFolder)
+                if !rule.targetFolder.isEmpty && validatedTargetFolder == nil {
+                    Text("目标文件夹必须是单个名称，不能包含 /、\\、:，也不能是 . 或 ..")
+                        .font(.caption2).foregroundStyle(.red)
+                }
                 Stepper("优先级：\(rule.priority)", value: $rule.priority, in: 0...100)
                 Toggle("启用", isOn: $rule.enabled)
             }
@@ -126,9 +148,15 @@ struct RuleEditor: View {
             HStack {
                 Button("取消") { dismiss() }
                 Spacer()
-                Button("保存") { onSave(rule); dismiss() }
+                Button("保存") {
+                    var saved = rule
+                    saved.name = saved.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    saved.targetFolder = validatedTargetFolder ?? saved.targetFolder
+                    onSave(saved)
+                    dismiss()
+                }
                     .buttonStyle(.borderedProminent)
-                    .disabled(rule.name.isEmpty || rule.targetFolder.isEmpty)
+                    .disabled(!canSave)
             }
             .padding()
         }

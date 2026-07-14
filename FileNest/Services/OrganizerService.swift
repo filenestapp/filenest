@@ -4,33 +4,40 @@ import Foundation
 /// hybrid 模式 = 先匹配规则，无命中则回退到扩展名大类。
 final class RuleClassifier: Classifier {
     private let rules: [Rule]
-    private let strategy: String
+    private let strategy: ClassificationStrategy
 
     init(rules: [Rule], strategy: String) {
         // 按优先级降序
         self.rules = rules.filter { $0.enabled }.sorted { $0.priority > $1.priority }
-        self.strategy = strategy
+        self.strategy = ClassificationStrategy(storedValue: strategy)
     }
 
-    func classify(_ file: FileRecord) -> FileCategory {
+    func classify(_ file: FileRecord) -> ClassificationDecision? {
         let ext = file.ext.lowercased()
 
         // 规则匹配（rule 类型：pattern 是逗号分隔的扩展名列表）
-        if strategy == "rule" || strategy == "hybrid" {
-            for r in rules where r.type == "rule" {
-                let exts = r.pattern.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-                if exts.contains(ext) {
-                    // target_folder 映射回 FileCategory
-                    return FileCategory.allCases.first { $0.folderName == r.targetFolder } ?? .other
-                }
+        for rule in rules where rule.type == RuleType.rule.rawValue {
+            let extensions = rule.pattern.split(separator: ",").map {
+                let value = $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return value.hasPrefix(".") ? String(value.dropFirst()) : value
+            }
+            if extensions.contains(ext),
+               let targetFolder = OrganizationTarget.folderName(from: rule.targetFolder) {
+                return ClassificationDecision(
+                    category: FileCategory.from(extension: ext),
+                    targetFolder: targetFolder,
+                    matchedRuleID: rule.id
+                )
             }
         }
-        // AI 分类留待后续迭代；hybrid 下回退到扩展名大类
-        if strategy == "ai" {
-            // MVP：AI 分类降级为扩展名大类
-            return FileCategory.from(extension: ext)
-        }
-        return FileCategory.from(extension: ext)
+
+        guard strategy == .hybrid else { return nil }
+        let category = FileCategory.from(extension: ext)
+        return ClassificationDecision(
+            category: category,
+            targetFolder: category.folderName,
+            matchedRuleID: nil
+        )
     }
 }
 
@@ -38,25 +45,37 @@ final class RuleClassifier: Classifier {
 final class OrganizerService {
     private let store: SQLiteStore
     private let settings: AppSettings
+    private let organizeRootOverride: URL?
+    private let strategyOverride: ClassificationStrategy?
 
-    init(store: SQLiteStore, settings: AppSettings) {
+    init(store: SQLiteStore,
+         settings: AppSettings,
+         organizeRoot: URL? = nil,
+         strategy: ClassificationStrategy? = nil) {
         self.store = store
         self.settings = settings
+        self.organizeRootOverride = organizeRoot
+        self.strategyOverride = strategy
     }
 
     /// 目标根目录：默认在用户主目录建一个 FileNestOrganized 目录，按分类分子文件夹。
     var organizeRoot: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("FileNestOrganized")
+        organizeRootOverride
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("FileNestOrganized")
     }
 
     /// 对一个已入 DB 的文件执行归类
     func organize(fileId: Int64) throws {
         guard var file = try store.file(id: fileId) else { return }
         let rules = (try? store.allRules()) ?? []
-        let classifier = RuleClassifier(rules: rules, strategy: settings.classifyStrategy)
-        let category = classifier.classify(file)
+        let strategy = strategyOverride?.rawValue ?? settings.classifyStrategy
+        let classifier = RuleClassifier(rules: rules, strategy: strategy)
+        guard let decision = classifier.classify(file) else {
+            NSLog("[Organizer] no matching rule for \(file.name); keeping file in place")
+            return
+        }
 
-        let destDir = organizeRoot.appendingPathComponent(category.folderName)
+        let destDir = organizeRoot.appendingPathComponent(decision.targetFolder)
         try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
         let src = URL(fileURLWithPath: file.path)
         let dst = destDir.appendingPathComponent(file.name)
@@ -69,7 +88,7 @@ final class OrganizerService {
         do {
             try FileManager.default.moveItem(at: src, to: finalDst)
             file.path = finalDst.path
-            file.category = category.rawValue
+            file.category = decision.category.rawValue
             _ = try store.upsertFile(file)
             NSLog("[Organizer] moved \(src.lastPathComponent) → \(finalDst.path)")
         } catch {
@@ -101,11 +120,13 @@ final class OrganizerService {
                 let mtime = (attrs?[.modificationDate] as? Date) ?? now
                 let size = Int64((attrs?[.size] as? NSNumber)?.intValue ?? 0)
                 let category = FileCategory.from(extension: ext)
+                let existing = try? store.file(path: entry.path)
                 let record = FileRecord(
-                    id: nil, path: entry.path, name: name, ext: ext,
+                    id: existing?.id, path: entry.path, name: name, ext: ext,
                     size: size, mtime: mtime, category: category.rawValue,
                     sourceDir: entry.deletingLastPathComponent().path,
-                    indexedAt: Date(), contentHash: nil, title: nil, contentText: nil
+                    indexedAt: existing?.indexedAt, contentHash: existing?.contentHash,
+                    title: existing?.title, contentText: existing?.contentText
                 )
                 if let id = try? store.upsertFile(record) {
                     // 先索引（文件在原位），再整理移动

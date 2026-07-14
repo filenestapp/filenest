@@ -20,7 +20,7 @@
 
 ### 已完成 ✅
 - 完整的垂直切片 MVP，**可以编译、可以运行、核心闭环已验证通过**
-- 22 个 App Swift 源文件，另有 4 个单元测试文件
+- 23 个 App Swift 源文件，另有 6 个单元/端到端测试文件
 - `xcodebuild` clean build 成功（macOS 26.6 / Xcode 26.6 / Swift 6.3，arm64）
 - 已用真实下载目录验证：68 个文件被扫描，按类型正确归类，文本文件成功抽取+向量化（512维一致）
 
@@ -29,7 +29,7 @@
 | 环节 | 结果 |
 |---|---|
 | 文件监听 | ✅ 扫描下载目录，正确跳过不在白名单的文件 |
-| 自动归类 | ✅ txt/md→文档，py→代码，zip→压缩包，文件物理移动到目标目录 |
+| 自动归类 | ✅ txt/md→文档，py→代码，zip→压缩包；自定义规则可移入指定子文件夹并正确回写 DB 路径 |
 | 内容抽取 | ✅ PDF(PDFKit)/文本/代码，提取标题+正文入 DB |
 | 向量化 | ✅ NLEmbedding 512维，所有向量维度一致 |
 | 语义检索 | ✅ "产品需求文档"→正确匹配笔记.md（相似度0.94） |
@@ -37,8 +37,8 @@
 | 稳定性 | ✅ 进程长期运行无崩溃 |
 
 ### 未做（明确的后续工作，见第 8 节）
-- 当前有 8 项单元测试，覆盖向量存储一致性、文件稳定性、SHA-256 和索引成功/失败/幂等状态；规则与内容抽取边界仍待补齐
-- AI 语义分类是占位实现（hybrid 策略实际降级为规则分类）
+- 当前有 15 项测试，覆盖向量存储一致性、文件稳定性、SHA-256、索引状态、规则优先级/回退语义，以及文件移动与 DB 路径回写；内容抽取边界仍待补齐
+- AI 语义分类尚未实现；界面只提供「仅规则 / 混合」，历史 AI 规则会显示为停用且不参与分类
 - 没有图片多模态识别
 - 没有上架打包/签名配置（当前是 ad-hoc 签名 `-`）
 - 已初始化 Git 仓库，并保存原始 MVP 基线提交
@@ -126,18 +126,19 @@ ollama pull qwen2.5:7b      # 拉模型（首次几 GB）
 |---|---|---|
 | `FileNestApp.swift` | 39 | `@main` 入口，三个 Scene：MenuBarExtra + WindowGroup + Settings |
 | `AppState.swift` | 71 | **全局状态中枢**，`@MainActor` ObservableObject，持有所有服务实例。UI 通过 `@EnvironmentObject` 访问 |
-| `AppSettings.swift` | 118 | 所有可配置项，持久化到 SQLite `settings` 表。**注意：`@Published` 属性不能用 didSet，持久化逻辑在独立的 `setXxx()` 方法里**，UI 用自定义 Binding 调这些 setter |
+| `AppSettings.swift` | 124 | 所有可配置项，持久化到 SQLite `settings` 表。**注意：`@Published` 属性不能用 didSet，持久化逻辑在独立的 `setXxx()` 方法里**，UI 用自定义 Binding 调这些 setter |
 
 ### Domain/（模型与协议）
 | 文件 | 行 | 职责 |
 |---|---|---|
 | `Models.swift` | 126 | `FileRecord` / `Rule` / `ChatMessage` 三个 GRDB 模型 + `FileCategory` 枚举（含扩展名→大类映射） |
-| `Protocols.swift` | 36 | 四个可插拔协议：`EmbeddingProvider` / `LLMProvider` / `VectorStore` / `Classifier` |
+| `Protocols.swift` | 43 | 四个可插拔协议：`EmbeddingProvider` / `LLMProvider` / `VectorStore` / `Classifier` |
+| `OrganizationPolicy.swift` | 32 | 分类策略、分类决策和安全目标子文件夹校验 |
 
 ### Storage/（数据层）
 | 文件 | 行 | 职责 |
 |---|---|---|
-| `SQLiteStore.swift` | 233 | **数据基础**。DatabasePool，建库建表迁移，files/embeddings/rules/chat/settings 的 CRUD，默认规则注入 |
+| `SQLiteStore.swift` | 252 | **数据基础**。DatabasePool，建库建表迁移，files/embeddings/rules/chat/settings 的 CRUD，默认规则注入 |
 | `AccelerateVectorStore.swift` | 191 | 向量检索。向量以 BLOB 存 SQLite，启动时载入内存，用 vDSP 做 cosine 暴力检索。**核心方法：`loadAll` / `upsert` / `remove` / `search`** |
 
 ### Providers/（可插拔实现）
@@ -150,7 +151,7 @@ ollama pull qwen2.5:7b      # 拉模型（首次几 GB）
 | 文件 | 行 | 职责 |
 |---|---|---|
 | `FileWatcherService.swift` | 224 | 监听目录（DispatchSource + 10秒轮询兜底），文件稳定至少2秒后→入DB→触发索引+归类 |
-| `OrganizerService.swift` | 138 | 规则分类器 + 文件移动（含同名冲突处理）。`organize(fileId:)` 单个，`runOnce()` 批量 |
+| `OrganizerService.swift` | 161 | 规则决策 + 扩展名回退 + 文件移动（含自定义目标和同名冲突处理）。`organize(fileId:)` 单个，`runOnce()` 批量 |
 | `IndexerService.swift` | 117 | 内容抽取→分块→向量化→入库。`indexFile(id:overridePath:)` 是核心方法 |
 | `ChatService.swift` | 115 | RAG：问题向量化→检索top5→拼context→调LLM→保存带引用的回复 |
 
@@ -166,7 +167,7 @@ ollama pull qwen2.5:7b      # 拉模型（首次几 GB）
 | `MainView.swift` | 60 | 主窗口三栏导航：文件库/聊天/规则 |
 | `LibraryView.swift` | 138 | 文件库：搜索 + 分类筛选 + Table 列表 + 右键在Finder显示 |
 | `ChatView.swift` | 174 | 聊天：消息流（含引用文件卡片）+ 输入框。乐观插入用户消息，异步等LLM回复 |
-| `RulesView.swift` | 137 | 规则管理：Table + 新增/编辑(sheet) + 策略切换 |
+| `RulesView.swift` | 165 | 规则管理：Table + 新增/编辑(sheet) + 策略切换 + 目标文件夹安全校验；历史 AI 规则可转为普通规则 |
 | `SettingsView.swift` | 163 | 设置：监听目录/文件类型/自动整理 + AI Provider配置(Ollama/云端) + 连接测试 |
 
 ---
@@ -236,10 +237,10 @@ watcher 有两个事件来源：每个目录一个 DispatchSource + 一个全局
 
 ### P0（建议先做）
 1. **实测聊天功能** — 装上 Ollama + 拉模型，跑通 RAG 端到端，验证引用文件是否正确
-2. **继续补核心单元测试** — 已覆盖向量一致性、文件稳定性、SHA-256 和索引状态；下一步覆盖 `RuleClassifier`、`ContentExtractor`、`encode/decode/search` 边界和 `IndexerService.chunk`
+2. **继续补核心单元测试** — 已覆盖向量一致性、文件稳定性、SHA-256、索引状态、`RuleClassifier` 和整理端到端；下一步覆盖 `ContentExtractor`、`encode/decode/search` 边界和 `IndexerService.chunk`
 
 ### P1（体验提升）
-3. **AI 真正语义分类** — 当前 `classifyStrategy="ai"` 是占位（降级为扩展名分类）。可让 LLM 读文件名/内容前N字返回分类
+3. **AI 真正语义分类** — 当前不对用户暴露未实现的 AI 策略，历史 `classifyStrategy="ai"` 会安全归一化为 `hybrid`。实现时可让 LLM 读文件名/内容前 N 字返回分类，并增加超时/失败回退策略
 4. **更强的中文 embedding** — 接 Ollama nomic-embed-text 或云端 embedding，提升中文语义区分度（需重新索引）
 5. **索引任务队列与失败重试** — `content_hash` 已用于跳过内容未变化的文件；下一步限制大文件并发哈希/抽取数量，并持久化失败原因和重试次数
 6. **文件监听改用 FSEvents 全树** — 当前 DispatchSource 只监听目录描述符 + 10秒轮询，不够实时

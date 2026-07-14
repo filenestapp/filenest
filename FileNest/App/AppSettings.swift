@@ -37,7 +37,9 @@ final class AppSettings: ObservableObject {
         watchDirs = loadStrArr(.watchDirs, sep: "\n") ?? [defaultDownloads().path]
         enabledExtensions = loadStrArr(.enabledExts, sep: ",") ?? defaultExts
         excludeHidden = load(.excludeHidden) != "0"
-        classifyStrategy = load(.classifyStrategy) ?? "hybrid"
+        classifyStrategy = ClassificationStrategy(
+            storedValue: load(.classifyStrategy) ?? ClassificationStrategy.hybrid.rawValue
+        ).rawValue
         llmChoice = load(.llmChoice) ?? LLMChoice.ollama.rawValue
         ollamaHost = load(.ollamaHost) ?? "http://127.0.0.1:11434"
         ollamaModel = load(.ollamaModel) ?? "qwen2.5:7b"
@@ -59,7 +61,11 @@ final class AppSettings: ObservableObject {
     func setWatchDirs(_ v: [String]) { watchDirs = v; save(.watchDirs, v.joined(separator: "\n")) }
     func setEnabledExtensions(_ v: [String]) { enabledExtensions = v; save(.enabledExts, v.joined(separator: ",")) }
     func setExcludeHidden(_ v: Bool) { excludeHidden = v; save(.excludeHidden, v ? "1" : "0") }
-    func setClassifyStrategy(_ v: String) { classifyStrategy = v; save(.classifyStrategy, v) }
+    func setClassifyStrategy(_ v: String) {
+        let normalized = ClassificationStrategy(storedValue: v).rawValue
+        classifyStrategy = normalized
+        save(.classifyStrategy, normalized)
+    }
     func setLLMChoice(_ v: String) { llmChoice = v; save(.llmChoice, v) }
     func setOllamaHost(_ v: String) { ollamaHost = v; save(.ollamaHost, v) }
     func setOllamaModel(_ v: String) { ollamaModel = v; save(.ollamaModel, v) }

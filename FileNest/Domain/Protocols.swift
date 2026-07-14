@@ -39,5 +39,5 @@ protocol VectorStore {
 
 /// 分类器
 protocol Classifier {
-    func classify(_ file: FileRecord) -> FileCategory
+    func classify(_ file: FileRecord) -> ClassificationDecision?
 }

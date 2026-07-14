@@ -92,7 +92,15 @@ final class SQLiteStore {
     // MARK: - files CRUD
     func upsertFile(_ record: FileRecord) throws -> Int64 {
         try dbPool.write { db in
-            // 按 path 唯一：若已存在则更新
+            // 已入库记录可能会在文件整理后更换 path，因此优先按 id 更新。
+            if let id = record.id,
+               try FileRecord.fetchOne(db, key: id) != nil {
+                let updated = record
+                try updated.update(db)
+                return id
+            }
+
+            // 新发现的文件按 path 唯一：若已存在则更新。
             if let existing = try FileRecord.fetchOne(
                 db,
                 sql: "SELECT * FROM files WHERE path = ?",
@@ -104,6 +112,7 @@ final class SQLiteStore {
                 return updated.id!
             } else {
                 var inserted = record
+                inserted.id = nil
                 try inserted.insert(db)
                 return inserted.id!
             }
