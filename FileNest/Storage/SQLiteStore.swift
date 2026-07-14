@@ -128,6 +128,16 @@ final class SQLiteStore {
         }
     }
 
+    func file(path: String) throws -> FileRecord? {
+        try dbPool.read { db in
+            try FileRecord.fetchOne(
+                db,
+                sql: "SELECT * FROM files WHERE path = ?",
+                arguments: [path]
+            )
+        }
+    }
+
     func files(matching keyword: String) throws -> [FileRecord] {
         try dbPool.read { db in
             let pattern = "%\(keyword)%"

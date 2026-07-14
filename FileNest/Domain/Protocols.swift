@@ -29,7 +29,8 @@ struct EmbeddingChunk {
 
 protocol VectorStore {
     /// 原子替换一个文件的全部分块，避免持久化与内存索引出现半更新状态。
-    func replace(fileId: Int64, chunks: [EmbeddingChunk], model: String) async
+    @discardableResult
+    func replace(fileId: Int64, chunks: [EmbeddingChunk], model: String) async -> Bool
     func remove(fileId: Int64) async
     func search(_ query: [Float], k: Int) async -> [(fileId: Int64, score: Float)]
     func loadAll() async  // 启动时载入内存索引

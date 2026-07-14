@@ -65,7 +65,7 @@ UI 层 (SwiftUI)
   MenuBarView · MainView · LibraryView · ChatView · RulesView · SettingsView
         │
 服务层
-  FileWatcherService  → 监听目录，发现新文件
+  FileWatcherService  → 监听目录，等待文件稳定后发现新文件
   OrganizerService    → 规则分类，移动文件
   IndexerService      → 内容抽取 + 分块 + 向量化
   ChatService         → RAG 检索 + LLM 对话

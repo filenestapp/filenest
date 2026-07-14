@@ -5,12 +5,14 @@ import Foundation
 final class IndexerService {
     private let store: SQLiteStore
     private let settings: AppSettings
+    private let providedEmbedder: EmbeddingProvider?
     let vectorStore: AccelerateVectorStore
-    private lazy var embedder: EmbeddingProvider = settings.makeEmbeddingProvider()
+    private lazy var embedder: EmbeddingProvider = providedEmbedder ?? settings.makeEmbeddingProvider()
 
-    init(store: SQLiteStore, settings: AppSettings) {
+    init(store: SQLiteStore, settings: AppSettings, embedder: EmbeddingProvider? = nil) {
         self.store = store
         self.settings = settings
+        self.providedEmbedder = embedder
         self.vectorStore = AccelerateVectorStore(store: store)
     }
 
@@ -21,28 +23,52 @@ final class IndexerService {
 
     /// 对单个文件建立/重建索引
     /// - Parameter overridePath: 可选的文件实际路径（用于文件尚未移动到 DB 记录路径时的索引）
-    func indexFile(id: Int64, overridePath: URL? = nil) async {
+    @discardableResult
+    func indexFile(id: Int64, overridePath: URL? = nil, force: Bool = false) async -> Bool {
         guard let file = try? store.file(id: id) else {
-            Self.log("indexFile: file \(id) not found"); return
+            Self.log("indexFile: file \(id) not found"); return false
         }
         let url = overridePath ?? URL(fileURLWithPath: file.path)
         guard FileManager.default.fileExists(atPath: url.path) else {
-            Self.log("indexFile: \(file.name) not found at \(url.path)"); return
+            Self.log("indexFile: \(file.name) not found at \(url.path)"); return false
         }
         Self.log("indexFile START: \(file.name) (.\(file.ext))")
+
+        let contentHash = try? FileContentHasher.sha256(of: url)
+        if !force,
+           file.indexedAt != nil,
+           let contentHash,
+           file.contentHash == contentHash {
+            Self.log("skip \(file.name): content unchanged")
+            return true
+        }
 
         let extracted = ContentExtractor.extract(url: url, ext: file.ext)
         // 更新 files 表的内容字段
         var updated = file
         updated.title = extracted.title
         updated.contentText = extracted.text
-        updated.indexedAt = Date()
-        _ = try? store.upsertFile(updated)
+        updated.contentHash = contentHash
+        updated.indexedAt = nil
+        do {
+            _ = try store.upsertFile(updated)
+        } catch {
+            Self.log("update metadata failed for \(file.name): \(error)")
+            return false
+        }
 
         // 向量化（仅对有实质文本的）
         guard !extracted.text.isEmpty else {
+            await vectorStore.remove(fileId: id)
+            updated.indexedAt = Date()
+            do {
+                _ = try store.upsertFile(updated)
+            } catch {
+                Self.log("mark indexed failed for \(file.name): \(error)")
+                return false
+            }
             Self.log("skip vectorize \(file.name): no text")
-            return
+            return true
         }
         let chunks = Self.chunk(text: extracted.text, maxWords: 200, overlap: 30)
         // 把标题也作为一段参与向量化，提升「按主题找」的召回
@@ -62,10 +88,23 @@ final class IndexerService {
                 Self.log("  segment \(i): embed FAILED/empty for piece(\(piece.count) chars)")
             }
         }
-        if !embeddings.isEmpty {
-            await vectorStore.replace(fileId: id, chunks: embeddings, model: embedder.name)
+        guard !embeddings.isEmpty else {
+            Self.log("index failed \(file.name): no embeddings generated")
+            return false
+        }
+        guard await vectorStore.replace(fileId: id, chunks: embeddings, model: embedder.name) else {
+            Self.log("index failed \(file.name): vector store rejected replacement")
+            return false
+        }
+        updated.indexedAt = Date()
+        do {
+            _ = try store.upsertFile(updated)
+        } catch {
+            Self.log("mark indexed failed for \(file.name): \(error)")
+            return false
         }
         Self.log("done \(file.name): \(embeddings.count)/\(texts.count) embedded")
+        return true
     }
 
     /// 重新索引全部文件
@@ -74,7 +113,7 @@ final class IndexerService {
         Task {
             await vectorStore.loadAll()
             for f in files {
-                await indexFile(id: f.id!)
+                await indexFile(id: f.id!, force: true)
             }
         }
     }

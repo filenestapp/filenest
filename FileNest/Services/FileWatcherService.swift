@@ -3,20 +3,21 @@ import Darwin
 
 /// 文件监听服务：用 DispatchSource 监听指定目录的新增文件，
 /// 触发归类(Organizer) + 索引(Indexer)。
-final class FileWatcherService {
+final class FileWatcherService: @unchecked Sendable {
     private let store: SQLiteStore
     private let organizer: OrganizerService
     private let indexer: IndexerService
     private var sources: [DispatchSourceFileSystemObject] = []
-    private var fds: [CInt] = []
     /// 串行队列：所有扫描操作排队执行，避免共享状态并发损坏
     private let queue = DispatchQueue(label: "filenest.watcher")
-    private(set) var isRunning = false
+    private var running = false
+    var isRunning: Bool { queue.sync { running } }
     private let settings = AppSettings.shared
     private var pollTimer: DispatchSourceTimer?
-    /// 已处理文件去重表 —— 用锁保护，避免并发损坏
+    private var stabilityTracker = FileStabilityTracker()
+    private let minimumStableDuration: TimeInterval = 2
+    /// 仅由 queue 访问的已处理文件去重表
     private var seen: Set<String> = []
-    private let seenLock = NSLock()
 
     init(store: SQLiteStore, organizer: OrganizerService, indexer: IndexerService) {
         self.store = store
@@ -24,25 +25,30 @@ final class FileWatcherService {
         self.indexer = indexer
     }
 
-    func start() async {
-        guard !isRunning else { return }
-        isRunning = true
+    func start() {
+        queue.async { [weak self] in self?.startLocked() }
+    }
+
+    private func startLocked() {
+        guard !running else { return }
+        running = true
         let dirs = settings.watchDirs.compactMap { URL(fileURLWithPath: $0) }
         Self.log("start: watching \(dirs.count) dirs: \(dirs.map(\.path))")
         Self.log("enabledExts count=\(settings.enabledExtensions.count), autoOrganize=\(settings.autoOrganize)")
         for dir in dirs { watchDirectory(dir) }
         startPolling()
-        Self.log("start complete, sources=\(sources.count), fds=\(fds.count)")
+        Self.log("start complete, sources=\(sources.count)")
     }
 
     func stop() {
-        isRunning = false
-        for s in sources { s.cancel() }
-        sources.removeAll()
-        for fd in fds { close(fd) }
-        fds.removeAll()
-        pollTimer?.cancel()
-        pollTimer = nil
+        queue.sync {
+            running = false
+            for source in sources { source.cancel() }
+            sources.removeAll()
+            pollTimer?.cancel()
+            pollTimer = nil
+            stabilityTracker = FileStabilityTracker()
+        }
     }
 
     /// 监听单个目录：用 DispatchSource 监视目录描述符的写入事件
@@ -52,7 +58,6 @@ final class FileWatcherService {
             Self.log("open failed for \(url.path)")
             return
         }
-        fds.append(fd)
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
             eventMask: [.write, .delete, .rename],
@@ -67,7 +72,7 @@ final class FileWatcherService {
         }
         src.resume()
         sources.append(src)
-        // 启动时先扫一遍
+        // 启动时记录第一份快照，文件稳定后由后续事件或轮询处理。
         scanDirectory(url)
     }
 
@@ -98,6 +103,7 @@ final class FileWatcherService {
         let enabledExts = Set(settings.enabledExtensions.map { $0.lowercased() })
         let now = Date()
         var processedThisScan = 0
+        let existingPaths = Set(entries.map(\.path))
 
         for entry in entries {
             let name = entry.lastPathComponent
@@ -117,36 +123,50 @@ final class FileWatcherService {
             // 去重：同一路径已处理过则跳过（除非 mtime 变了）
             let attrs = try? fm.attributesOfItem(atPath: entry.path)
             let mtime = (attrs?[.modificationDate] as? Date) ?? now
-            let dedupKey = "\(entry.path)|\(Int(mtime.timeIntervalSince1970))"
-            seenLock.lock()
-            let alreadySeen = seen.contains(dedupKey)
-            if !alreadySeen { seen.insert(dedupKey) }
-            seenLock.unlock()
-            if alreadySeen {
+            let size = Int64((attrs?[.size] as? NSNumber)?.intValue ?? 0)
+            let dedupKey = "\(entry.path)|\(size)|\(mtime.timeIntervalSinceReferenceDate)"
+            if seen.contains(dedupKey) { continue }
+
+            // 已成功索引且文件元数据未变化，重启后无需再次计算内容哈希。
+            if let existing = try? store.file(path: entry.path),
+               existing.size == size,
+               abs(existing.mtime.timeIntervalSince(mtime)) < 0.001,
+               existing.indexedAt != nil,
+               existing.contentHash != nil {
+                seen.insert(dedupKey)
                 continue
             }
-            processedThisScan += 1
 
-            let size = Int64((attrs?[.size] as? NSNumber)?.intValue ?? 0)
-            handleNewFile(at: entry, mtime: mtime, size: size)
+            let snapshot = FileSnapshot(size: size, modificationDate: mtime)
+            guard stabilityTracker.isStable(path: entry.path,
+                                             snapshot: snapshot,
+                                             observedAt: now,
+                                             minimumStableDuration: minimumStableDuration) else {
+                continue
+            }
+
+            seen.insert(dedupKey)
+            processedThisScan += 1
+            handleNewFile(at: entry, mtime: mtime, size: size, dedupKey: dedupKey)
         }
+        stabilityTracker.retainExistingPaths(existingPaths)
         Self.log("scanned \(url.path): \(entries.count) entries, processed \(processedThisScan) new")
         // 防止 seen 无限增长：保留最近 2000 条
-        seenLock.lock()
         if seen.count > 2000 {
             seen = Set(seen.suffix(1000))
         }
-        seenLock.unlock()
     }
 
-    private func handleNewFile(at url: URL, mtime: Date, size: Int64) {
+    private func handleNewFile(at url: URL, mtime: Date, size: Int64, dedupKey: String) {
         let ext = url.pathExtension
         let category = FileCategory.from(extension: ext)
+        let existing = try? store.file(path: url.path)
         let record = FileRecord(
-            id: nil, path: url.path, name: url.lastPathComponent, ext: ext,
+            id: existing?.id, path: url.path, name: url.lastPathComponent, ext: ext,
             size: size, mtime: mtime, category: category.rawValue,
             sourceDir: url.deletingLastPathComponent().path,
-            indexedAt: Date(), contentHash: nil, title: nil, contentText: nil
+            indexedAt: existing?.indexedAt, contentHash: existing?.contentHash,
+            title: existing?.title, contentText: existing?.contentText
         )
         do {
             let id = try store.upsertFile(record)
@@ -155,7 +175,11 @@ final class FileWatcherService {
             // 若先移动再索引，indexer 会因原路径失效而抓取不到内容。
             // 索引用原 url（文件当前所在），整理后由 organizer 更新 DB 中的 path。
             Task {
-                await indexer.indexFile(id: id, overridePath: url)
+                guard await indexer.indexFile(id: id, overridePath: url) else {
+                    Self.log("index failed for \(record.name); keeping file in place")
+                    self.allowRetry(for: dedupKey)
+                    return
+                }
                 if self.settings.autoOrganize {
                     do {
                         try self.organizer.organize(fileId: id)
@@ -166,6 +190,13 @@ final class FileWatcherService {
             }
         } catch {
             Self.log("handle new file failed: \(error)")
+            allowRetry(for: dedupKey)
+        }
+    }
+
+    private func allowRetry(for dedupKey: String) {
+        queue.async { [weak self] in
+            self?.seen.remove(dedupKey)
         }
     }
 

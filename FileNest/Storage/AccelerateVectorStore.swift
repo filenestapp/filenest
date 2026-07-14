@@ -67,18 +67,19 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
         }
     }
 
-    func replace(fileId: Int64, chunks: [EmbeddingChunk], model: String) async {
+    @discardableResult
+    func replace(fileId: Int64, chunks: [EmbeddingChunk], model: String) async -> Bool {
         let normalized = chunks.compactMap { chunk -> EmbeddingChunk? in
             guard !chunk.vector.isEmpty else { return nil }
             return EmbeddingChunk(vector: Self.normalize(chunk.vector), text: chunk.text)
         }
 
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             queue.async {
                 let dimensions = Set(normalized.map { $0.vector.count })
                 guard dimensions.count <= 1 else {
                     NSLog("[VectorStore] replace rejected: mixed dimensions for file \(fileId)")
-                    cont.resume()
+                    cont.resume(returning: false)
                     return
                 }
 
@@ -86,7 +87,7 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                    let existing = self.entries.first(where: { $0.fileId != fileId }),
                    (existing.vector.count != first.vector.count || existing.model != model) {
                     NSLog("[VectorStore] replace rejected: vector space mismatch for file \(fileId)")
-                    cont.resume()
+                    cont.resume(returning: false)
                     return
                 }
 
@@ -109,8 +110,10 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                     })
                 } catch {
                     NSLog("[VectorStore] replace failed: \(error)")
+                    cont.resume(returning: false)
+                    return
                 }
-                cont.resume()
+                cont.resume(returning: true)
             }
         }
     }

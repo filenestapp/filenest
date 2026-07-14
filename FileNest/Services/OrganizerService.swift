@@ -110,7 +110,9 @@ final class OrganizerService {
                 if let id = try? store.upsertFile(record) {
                     // 先索引（文件在原位），再整理移动
                     Task {
-                        await AppStateIndexerProxy.shared.indexer?.indexFile(id: id, overridePath: entry)
+                        guard await AppStateIndexerProxy.shared.indexer?.indexFile(id: id, overridePath: entry) == true else {
+                            return
+                        }
                         try? self.organize(fileId: id)
                     }
                 }

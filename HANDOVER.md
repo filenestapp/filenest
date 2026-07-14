@@ -20,7 +20,7 @@
 
 ### 已完成 ✅
 - 完整的垂直切片 MVP，**可以编译、可以运行、核心闭环已验证通过**
-- 20 个 App Swift 源文件，另有 1 个单元测试文件
+- 22 个 App Swift 源文件，另有 4 个单元测试文件
 - `xcodebuild` clean build 成功（macOS 26.6 / Xcode 26.6 / Swift 6.3，arm64）
 - 已用真实下载目录验证：68 个文件被扫描，按类型正确归类，文本文件成功抽取+向量化（512维一致）
 
@@ -37,7 +37,7 @@
 | 稳定性 | ✅ 进程长期运行无崩溃 |
 
 ### 未做（明确的后续工作，见第 8 节）
-- 单元测试目前只覆盖向量存储的多分块持久化、重复替换和重载一致性，其余模块仍待补齐
+- 当前有 8 项单元测试，覆盖向量存储一致性、文件稳定性、SHA-256 和索引成功/失败/幂等状态；规则与内容抽取边界仍待补齐
 - AI 语义分类是占位实现（hybrid 策略实际降级为规则分类）
 - 没有图片多模态识别
 - 没有上架打包/签名配置（当前是 ad-hoc 签名 `-`）
@@ -149,7 +149,7 @@ ollama pull qwen2.5:7b      # 拉模型（首次几 GB）
 ### Services/（业务逻辑）
 | 文件 | 行 | 职责 |
 |---|---|---|
-| `FileWatcherService.swift` | 193 | 监听目录（DispatchSource + 10秒轮询兜底），发现新文件→入DB→触发索引+归类 |
+| `FileWatcherService.swift` | 224 | 监听目录（DispatchSource + 10秒轮询兜底），文件稳定至少2秒后→入DB→触发索引+归类 |
 | `OrganizerService.swift` | 138 | 规则分类器 + 文件移动（含同名冲突处理）。`organize(fileId:)` 单个，`runOnce()` 批量 |
 | `IndexerService.swift` | 117 | 内容抽取→分块→向量化→入库。`indexFile(id:overridePath:)` 是核心方法 |
 | `ChatService.swift` | 115 | RAG：问题向量化→检索top5→拼context→调LLM→保存带引用的回复 |
@@ -222,9 +222,10 @@ SwiftUI 的 `@Published` property wrapper 与 `didSet` 冲突。
 - `ContentUnavailableView` —— macOS 14+，已替换为自定义 VStack
 
 ### 7.7 FileWatcherService 的并发安全
-watcher 有两个并发来源：每个目录一个 DispatchSource + 一个全局轮询 Timer。共享状态 `seen: Set<String>`（去重表）曾因并发损坏崩溃。
-- **现状**：`seen` 用 `NSLock` 保护；DispatchSource 和 Timer 都挂在同一个串行 `queue` 上。
-- **注意**：watcher 的 `queue` 必须保持串行。
+watcher 有两个事件来源：每个目录一个 DispatchSource + 一个全局轮询 Timer。共享状态曾因并发访问损坏崩溃。
+- **现状**：启动、停止、扫描、`seen` 和稳定性快照都只在同一个串行 `queue` 上访问；DispatchSource 的取消处理负责且只负责一次文件描述符关闭。
+- **文件安全**：大小和修改时间连续不变至少 2 秒才进入索引；索引失败时文件留在原位、不执行自动移动，并允许后续轮询重试。
+- **注意**：watcher 的 `queue` 必须保持串行，不要重新从其他队列直接调用 `scanDirectory`。
 
 ### 7.8 为什么不用 sqlite-vec / vec1
 深入调研过。**App Sandbox 禁止运行时加载 SQLite 扩展**，系统 SQLite 也禁用了 `load_extension`。要用 sqlite-vec/vec1 必须自带整套 SQLite 源码静态编译，构建/分发复杂度高。而当前规模（几万向量）下 Accelerate 暴力检索反而更快。`VectorStore` 协议已抽象，未来若超几十万向量需要 ANN 索引，可平滑迁移到 vec1。详见 README「关键设计决策」。
@@ -235,12 +236,12 @@ watcher 有两个并发来源：每个目录一个 DispatchSource + 一个全局
 
 ### P0（建议先做）
 1. **实测聊天功能** — 装上 Ollama + 拉模型，跑通 RAG 端到端，验证引用文件是否正确
-2. **继续补核心单元测试** — `AccelerateVectorStore` 已覆盖多分块持久化、重复替换和重载一致性；下一步覆盖 `RuleClassifier`、`ContentExtractor`、`encode/decode/search` 边界和 `IndexerService.chunk`
+2. **继续补核心单元测试** — 已覆盖向量一致性、文件稳定性、SHA-256 和索引状态；下一步覆盖 `RuleClassifier`、`ContentExtractor`、`encode/decode/search` 边界和 `IndexerService.chunk`
 
 ### P1（体验提升）
 3. **AI 真正语义分类** — 当前 `classifyStrategy="ai"` 是占位（降级为扩展名分类）。可让 LLM 读文件名/内容前N字返回分类
 4. **更强的中文 embedding** — 接 Ollama nomic-embed-text 或云端 embedding，提升中文语义区分度（需重新索引）
-5. **增量索引优化** — 当前 `seen` 去重表在重启后丢失，每次启动重扫全部目录。可改用 DB 里的 `content_hash` 判断文件是否变更
+5. **索引任务队列与失败重试** — `content_hash` 已用于跳过内容未变化的文件；下一步限制大文件并发哈希/抽取数量，并持久化失败原因和重试次数
 6. **文件监听改用 FSEvents 全树** — 当前 DispatchSource 只监听目录描述符 + 10秒轮询，不够实时
 
 ### P2（功能扩展）

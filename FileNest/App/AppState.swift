@@ -58,7 +58,7 @@ final class AppState: ObservableObject {
     }
 
     func startWatching() {
-        Task { await watcher.start() }
+        watcher.start()
         isWatching = true
         statusIcon = "tray.full"
         statusText = "监听中"
