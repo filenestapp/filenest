@@ -87,12 +87,24 @@ final class OrganizerService {
 
         do {
             try FileManager.default.moveItem(at: src, to: finalDst)
-            file.path = finalDst.path
-            file.category = decision.category.rawValue
+        } catch {
+            NSLog("[Organizer] move failed for \(file.name): \(error)")
+            return
+        }
+
+        file.path = finalDst.path
+        file.category = decision.category.rawValue
+        do {
             _ = try store.upsertFile(file)
             NSLog("[Organizer] moved \(src.lastPathComponent) → \(finalDst.path)")
         } catch {
-            NSLog("[Organizer] move failed for \(file.name): \(error)")
+            let databaseError = error
+            do {
+                try FileManager.default.moveItem(at: finalDst, to: src)
+                NSLog("[Organizer] database update failed for \(file.name); move rolled back: \(databaseError)")
+            } catch {
+                NSLog("[Organizer] database update failed for \(file.name): \(databaseError); rollback failed: \(error)")
+            }
         }
     }
 

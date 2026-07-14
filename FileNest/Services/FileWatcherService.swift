@@ -211,7 +211,7 @@ final class FileWatcherService: @unchecked Sendable {
             processedThisScan += 1
             handleNewFile(at: entry, mtime: mtime, size: size, dedupKey: dedupKey)
         }
-        stabilityTracker.retainExistingPaths(existingPaths)
+        stabilityTracker.retainExistingPaths(existingPaths, in: url.standardizedFileURL.path)
         Self.log("scanned \(url.path): \(entries.count) entries, processed \(processedThisScan) new")
         // 防止 seen 无限增长：保留最近 2000 条
         if seen.count > 2000 {

@@ -31,7 +31,10 @@ struct FileStabilityTracker {
         return true
     }
 
-    mutating func retainExistingPaths(_ paths: Set<String>) {
-        observations = observations.filter { paths.contains($0.key) }
+    mutating func retainExistingPaths(_ paths: Set<String>, in directoryPath: String) {
+        let prefix = directoryPath.hasSuffix("/") ? directoryPath : directoryPath + "/"
+        observations = observations.filter { path, _ in
+            !path.hasPrefix(prefix) || paths.contains(path)
+        }
     }
 }

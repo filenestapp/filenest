@@ -211,6 +211,46 @@ final class FileWatcherServiceTests: XCTestCase {
         XCTAssertEqual(embedder.callCount, 4)
     }
 
+    func testRunningWatcherReconcilesAddedAndRemovedDirectories() async throws {
+        let secondDirectory = temporaryDirectory.appendingPathComponent("second", isDirectory: true)
+        try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+        let embedder = CountingEmbedder(result: [1, 0])
+        settings.setAutoOrganize(false)
+        let watcher = makeWatcher(embedder: embedder, pollingInterval: 0.05)
+        watcher.start()
+        defer { watcher.stop() }
+        XCTAssertEqual(watcher.watchedDirectoryCount, 1)
+
+        settings.setWatchDirs([sourceDirectory.path, secondDirectory.path])
+        let attachedSecondDirectory = await waitUntil { watcher.watchedDirectoryCount == 2 }
+        XCTAssertTrue(attachedSecondDirectory)
+        _ = try createFile(named: "first.txt", in: sourceDirectory)
+        _ = try createFile(named: "second.txt", in: secondDirectory)
+
+        let indexedBothDirectories = await waitUntil {
+            guard let records = try? self.store.allFiles() else { return false }
+            return records.count == 2 && records.allSatisfy { $0.indexedAt != nil }
+        }
+        XCTAssertTrue(indexedBothDirectories)
+
+        settings.setWatchDirs([secondDirectory.path])
+        let detachedFirstDirectory = await waitUntil { watcher.watchedDirectoryCount == 1 }
+        XCTAssertTrue(detachedFirstDirectory)
+        let ignored = try createFile(named: "ignored.txt", in: sourceDirectory)
+        _ = try createFile(named: "active.txt", in: secondDirectory)
+
+        let activeFileIndexed = await waitUntil {
+            guard let records = try? self.store.allFiles() else { return false }
+            return records.contains { $0.name == "active.txt" && $0.indexedAt != nil }
+        }
+        XCTAssertTrue(activeFileIndexed)
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertNil(try store.file(path: ignored.path))
+        XCTAssertEqual(try store.allFiles().count, 3)
+        XCTAssertEqual(embedder.callCount, 6)
+    }
+
     private func makeWatcher(embedder: EmbeddingProvider,
                              pollingInterval: TimeInterval = 10) -> FileWatcherService {
         let organizer = OrganizerService(
@@ -230,8 +270,8 @@ final class FileWatcherServiceTests: XCTestCase {
         )
     }
 
-    private func createFile(named name: String) throws -> URL {
-        let url = sourceDirectory.appendingPathComponent(name)
+    private func createFile(named name: String, in directory: URL? = nil) throws -> URL {
+        let url = (directory ?? sourceDirectory).appendingPathComponent(name)
         try Data("hello world".utf8).write(to: url)
         return url
     }

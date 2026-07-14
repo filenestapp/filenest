@@ -70,6 +70,27 @@ final class OrganizerServiceTests: XCTestCase {
         XCTAssertEqual(try store.file(id: fileId)?.path, source.path)
     }
 
+    func testDatabaseUpdateFailureRollsBackPhysicalMove() throws {
+        let source = try createFile(named: "rollback.txt")
+        let fileId = try insertFile(at: source)
+        let destination = organizedDirectory
+            .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
+            .appendingPathComponent(source.lastPathComponent)
+        _ = try insertFile(at: destination)
+        let organizer = OrganizerService(
+            store: store,
+            settings: AppSettings(store: store),
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid
+        )
+
+        try organizer.organize(fileId: fileId)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertEqual(try store.file(id: fileId)?.path, source.path)
+    }
+
     private func createFile(named name: String) throws -> URL {
         let url = sourceDirectory.appendingPathComponent(name)
         try Data("test".utf8).write(to: url)

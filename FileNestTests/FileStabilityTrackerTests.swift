@@ -38,7 +38,7 @@ final class FileStabilityTrackerTests: XCTestCase {
 
         XCTAssertFalse(tracker.isStable(path: "/tmp/file.pdf", snapshot: snapshot,
                                         observedAt: start, minimumStableDuration: 2))
-        tracker.retainExistingPaths([])
+        tracker.retainExistingPaths([], in: "/tmp")
         XCTAssertFalse(tracker.isStable(path: "/tmp/file.pdf", snapshot: snapshot,
                                         observedAt: start.addingTimeInterval(3), minimumStableDuration: 2))
     }
