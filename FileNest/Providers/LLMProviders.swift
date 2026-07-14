@@ -7,10 +7,13 @@ final class OllamaLLMProvider: LLMProvider {
     let name = "ollama"
     private let host: String
     private let model: String
-    init(host: String, model: String) { self.host = host; self.model = model }
+    private let session: URLSession
+    init(host: String, model: String, session: URLSession = .shared) {
+        self.host = host; self.model = model; self.session = session
+    }
 
     func chat(_ messages: [ChatTurn], context: String?) async throws -> String {
-        let url = URL(string: "\(host)/api/chat")!
+        guard let url = URL(string: "\(host)/api/chat") else { throw URLError(.badURL) }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -24,7 +27,7 @@ final class OllamaLLMProvider: LLMProvider {
         let body: [String: Any] = ["model": model, "messages": msgs, "stream": false]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -33,7 +36,7 @@ final class OllamaLLMProvider: LLMProvider {
            let content = m["content"] as? String {
             return content
         }
-        return ""
+        throw URLError(.cannotParseResponse)
     }
 }
 
@@ -43,14 +46,15 @@ final class OpenAICompatibleLLMProvider: LLMProvider {
     private let baseURL: String
     private let apiKey: String
     private let model: String
-    init(baseURL: String, apiKey: String, model: String) {
-        self.baseURL = baseURL; self.apiKey = apiKey; self.model = model
+    private let session: URLSession
+    init(baseURL: String, apiKey: String, model: String, session: URLSession = .shared) {
+        self.baseURL = baseURL; self.apiKey = apiKey; self.model = model; self.session = session
     }
 
     func chat(_ messages: [ChatTurn], context: String?) async throws -> String {
         guard !apiKey.isEmpty else { throw NSError(domain: "filenest", code: 1,
             userInfo: [NSLocalizedDescriptionKey: "未配置云端 API Key"]) }
-        let url = URL(string: "\(baseURL)/chat/completions")!
+        guard let url = URL(string: "\(baseURL)/chat/completions") else { throw URLError(.badURL) }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -64,7 +68,7 @@ final class OpenAICompatibleLLMProvider: LLMProvider {
         let body: [String: Any] = ["model": model, "messages": msgs, "stream": false]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -74,7 +78,7 @@ final class OpenAICompatibleLLMProvider: LLMProvider {
            let content = msg["content"] as? String {
             return content
         }
-        return ""
+        throw URLError(.cannotParseResponse)
     }
 }
 

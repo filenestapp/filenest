@@ -20,7 +20,7 @@
 
 ### 已完成 ✅
 - 完整的垂直切片 MVP，**可以编译、可以运行、核心闭环已验证通过**
-- 23 个 App Swift 源文件，另有 9 个单元/端到端测试文件
+- 23 个 App Swift 源文件，另有 10 个单元/端到端测试文件
 - `xcodebuild` clean build 成功（macOS 26.6 / Xcode 26.6 / Swift 6.3，arm64）
 - 已用真实下载目录验证：68 个文件被扫描，按类型正确归类，文本文件成功抽取+向量化（512维一致）
 
@@ -37,7 +37,7 @@
 | 稳定性 | ✅ 进程长期运行无崩溃 |
 
 ### 未做（明确的后续工作，见第 8 节）
-- 当前有 34 项测试，覆盖向量存储/文件级去重、真实 PDF 文本与标题抽取、文件稳定性、SHA-256、中英文分块、索引状态、聊天降级/引用持久化、规则语义、SQLite CRUD/外键级联，以及文件移动与 DB 路径回写
+- 当前有 41 项测试，覆盖向量存储/文件级去重、真实 PDF 抽取、文件稳定性、SHA-256、中英文分块、索引状态、聊天降级/引用持久化、规则语义、SQLite CRUD/外键级联、Ollama/OpenAI/Embedding Provider 的请求与响应边界，以及文件移动与 DB 路径回写
 - AI 语义分类尚未实现；界面只提供「仅规则 / 混合」，历史 AI 规则会显示为停用且不参与分类
 - 没有图片多模态识别
 - 没有上架打包/签名配置（当前是 ad-hoc 签名 `-`）
@@ -144,8 +144,8 @@ ollama pull qwen2.5:7b      # 拉模型（首次几 GB）
 ### Providers/（可插拔实现）
 | 文件 | 行 | 职责 |
 |---|---|---|
-| `EmbeddingProviders.swift` | 61 | `NLEmbeddingProvider`（默认，Apple内置512维）/ `OllamaEmbeddingProvider`（可选768维） |
-| `LLMProviders.swift` | 88 | `OllamaLLMProvider`（默认本地）/ `OpenAICompatibleLLMProvider`（云端）/ `NoopLLMProvider`（降级） |
+| `EmbeddingProviders.swift` | 75 | `NLEmbeddingProvider`（默认，Apple 内置 512 维）/ `OllamaEmbeddingProvider`（可选 768 维）；Ollama 请求校验 URL、HTTP 状态和响应结构 |
+| `LLMProviders.swift` | 92 | `OllamaLLMProvider`（默认本地）/ `OpenAICompatibleLLMProvider`（云端）/ `NoopLLMProvider`（降级）；网络 Provider 对无效 URL、非 2xx 和缺少关键字段的响应抛出明确错误 |
 
 ### Services/（业务逻辑）
 | 文件 | 行 | 职责 |
@@ -237,7 +237,7 @@ watcher 有两个事件来源：每个目录一个 DispatchSource + 一个全局
 
 ### P0（建议先做）
 1. **实测聊天功能** — 装上 Ollama + 拉模型，跑通 RAG 端到端，验证引用文件是否正确
-2. **继续补核心测试** — 已覆盖真实 PDF 抽取、SQLite CRUD/外键级联、向量边界/文件级去重、聊天降级、索引、规则和整理端到端；下一步覆盖 LLM/Embedding Provider 响应解析、HTTP 错误与超时边界
+2. **继续补核心测试** — 已覆盖 Provider HTTP 边界、真实 PDF 抽取、SQLite CRUD/外键级联、向量/聊天降级、索引、规则和整理端到端；下一步覆盖 `AppSettings` 持久化/切换 Provider，以及语义检索无结果时的聊天回退
 
 ### P1（体验提升）
 3. **AI 真正语义分类** — 当前不对用户暴露未实现的 AI 策略，历史 `classifyStrategy="ai"` 会安全归一化为 `hybrid`。实现时可让 LLM 读文件名/内容前 N 字返回分类，并增加超时/失败回退策略

@@ -43,23 +43,33 @@ final class OllamaEmbeddingProvider: EmbeddingProvider {
     let dimension = 768
     private let host: String
     private let model: String
-    init(host: String, model: String) {
+    private let session: URLSession
+    init(host: String, model: String, session: URLSession = .shared) {
         self.host = host
         self.model = model
+        self.session = session
         self.name = "ollama:\(model)"
     }
 
     func embed(_ text: String) async throws -> [Float] {
-        var req = URLRequest(url: URL(string: "\(host)/api/embeddings")!)
+        guard let url = URL(string: "\(host)/api/embeddings") else {
+            throw URLError(.badURL)
+        }
+        var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 60
         let body: [String: Any] = ["model": model, "prompt": text]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, _) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
         if let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
            let emb = obj["embedding"] as? [Double] {
             return emb.map { Float($0) }
         }
-        return []
+        throw URLError(.cannotParseResponse)
     }
 }

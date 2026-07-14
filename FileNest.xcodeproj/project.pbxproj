@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1803A0D5DC3335026AC0E5AE /* ProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEF4267D593581CD58AA17C5 /* ProviderTests.swift */; };
 		19310935F0A7DA7AE25AB8B6 /* LLMProviders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E2841AC565E2C180CE122C2 /* LLMProviders.swift */; };
 		25446E8EBCD8DB2D43F36121 /* FileContentHasherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93AF189A6E886107AA525ED4 /* FileContentHasherTests.swift */; };
 		25F4F037026B133DF6FBBD81 /* AccelerateVectorStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E16E128627D1FAF79016D738 /* AccelerateVectorStore.swift */; };
@@ -88,6 +89,7 @@
 		EB409BFD16A49BF17B904414 /* FileWatcherService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcherService.swift; sourceTree = "<group>"; };
 		EF170772F5419E6FA6D2AC01 /* RulesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulesView.swift; sourceTree = "<group>"; };
 		F358502FCADBC66CD3727C7F /* FileContentHasher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileContentHasher.swift; sourceTree = "<group>"; };
+		FEF4267D593581CD58AA17C5 /* ProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -224,6 +226,7 @@
 				7C1B8C692F4C1A7136F74DFF /* FileStabilityTrackerTests.swift */,
 				D279A11830E6026464167E5D /* IndexerServiceTests.swift */,
 				3852187AB6DFCAF137FE021B /* OrganizerServiceTests.swift */,
+				FEF4267D593581CD58AA17C5 /* ProviderTests.swift */,
 				E5C17548A0C41EE3AB803FFF /* RuleClassifierTests.swift */,
 				05F3FDF12A0309FE2F98566C /* SQLiteStoreTests.swift */,
 			);
@@ -354,6 +357,7 @@
 				AF858DEA4596E60D4F744EE2 /* FileStabilityTrackerTests.swift in Sources */,
 				750134831B313854FDD639B1 /* IndexerServiceTests.swift in Sources */,
 				58C60715E5958EC742B4C465 /* OrganizerServiceTests.swift in Sources */,
+				1803A0D5DC3335026AC0E5AE /* ProviderTests.swift in Sources */,
 				E89F38010375D2AAFDA93164 /* RuleClassifierTests.swift in Sources */,
 				E7FA958F6DBE15D13D2B9355 /* SQLiteStoreTests.swift in Sources */,
 			);
