@@ -158,7 +158,61 @@ final class FileWatcherServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
     }
 
-    private func makeWatcher(embedder: EmbeddingProvider) -> FileWatcherService {
+    func testDeletedWatchDirectoryIsDetachedAndReattachedWhenRecreated() async throws {
+        settings.setAutoOrganize(false)
+        let watcher = makeWatcher(
+            embedder: CountingEmbedder(result: [1, 0]),
+            pollingInterval: 0.05
+        )
+        watcher.start()
+        defer { watcher.stop() }
+        XCTAssertEqual(watcher.watchedDirectoryCount, 1)
+
+        try FileManager.default.removeItem(at: sourceDirectory)
+        let detached = await waitUntil { watcher.watchedDirectoryCount == 0 }
+        XCTAssertTrue(detached)
+
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        let reattached = await waitUntil { watcher.watchedDirectoryCount == 1 }
+        XCTAssertTrue(reattached)
+        _ = try createFile(named: "recreated.txt")
+
+        let indexed = await waitUntil {
+            guard let records = try? self.store.allFiles() else { return false }
+            return records.first?.name == "recreated.txt" && records.first?.indexedAt != nil
+        }
+        XCTAssertTrue(indexed)
+    }
+
+    func testRestartProcessesOnlyFilesAddedAfterStop() async throws {
+        let embedder = CountingEmbedder(result: [1, 0])
+        settings.setAutoOrganize(false)
+        _ = try createFile(named: "before-stop.txt")
+        let watcher = makeWatcher(embedder: embedder)
+
+        watcher.start()
+        watcher.scanNow()
+        let firstIndexed = await waitUntil { embedder.callCount == 2 }
+        XCTAssertTrue(firstIndexed)
+        watcher.stop()
+        XCTAssertFalse(watcher.isRunning)
+        XCTAssertEqual(watcher.watchedDirectoryCount, 0)
+
+        _ = try createFile(named: "after-restart.txt")
+        watcher.start()
+        defer { watcher.stop() }
+        watcher.scanNow()
+        let bothIndexed = await waitUntil {
+            guard let records = try? self.store.allFiles() else { return false }
+            return records.count == 2 && records.allSatisfy { $0.indexedAt != nil }
+        }
+
+        XCTAssertTrue(bothIndexed)
+        XCTAssertEqual(embedder.callCount, 4)
+    }
+
+    private func makeWatcher(embedder: EmbeddingProvider,
+                             pollingInterval: TimeInterval = 10) -> FileWatcherService {
         let organizer = OrganizerService(
             store: store,
             settings: settings,
@@ -171,7 +225,8 @@ final class FileWatcherServiceTests: XCTestCase {
             organizer: organizer,
             indexer: indexer,
             settings: settings,
-            minimumStableDuration: 0
+            minimumStableDuration: 0,
+            pollingInterval: pollingInterval
         )
     }
 

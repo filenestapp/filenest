@@ -7,7 +7,7 @@ final class FileWatcherService: @unchecked Sendable {
     private let store: SQLiteStore
     private let organizer: OrganizerService
     private let indexer: IndexerService
-    private var sources: [DispatchSourceFileSystemObject] = []
+    private var sources: [String: DispatchSourceFileSystemObject] = [:]
     /// 串行队列：所有扫描操作排队执行，避免共享状态并发损坏
     private let queue = DispatchQueue(label: "filenest.watcher")
     private var running = false
@@ -18,19 +18,23 @@ final class FileWatcherService: @unchecked Sendable {
     private var pollTimer: DispatchSourceTimer?
     private var stabilityTracker = FileStabilityTracker()
     private let minimumStableDuration: TimeInterval
+    private let pollingInterval: TimeInterval
     /// 仅由 queue 访问的已处理文件去重表
     private var seen: Set<String> = []
+    var watchedDirectoryCount: Int { queue.sync { sources.count } }
 
     init(store: SQLiteStore,
          organizer: OrganizerService,
          indexer: IndexerService,
          settings: AppSettings = .shared,
-         minimumStableDuration: TimeInterval = 2) {
+         minimumStableDuration: TimeInterval = 2,
+         pollingInterval: TimeInterval = 10) {
         self.store = store
         self.organizer = organizer
         self.indexer = indexer
         self.settings = settings
         self.minimumStableDuration = minimumStableDuration
+        self.pollingInterval = pollingInterval
     }
 
     func start() {
@@ -44,7 +48,7 @@ final class FileWatcherService: @unchecked Sendable {
         let dirs = settings.watchDirs.compactMap { URL(fileURLWithPath: $0) }
         Self.log("start: watching \(dirs.count) dirs: \(dirs.map(\.path))")
         Self.log("enabledExts count=\(settings.enabledExtensions.count), autoOrganize=\(settings.autoOrganize)")
-        for dir in dirs { watchDirectory(dir) }
+        reconcileWatchedDirectories()
         startPolling()
         Self.log("start complete, sources=\(sources.count)")
     }
@@ -53,7 +57,7 @@ final class FileWatcherService: @unchecked Sendable {
         queue.sync {
             running = false
             runGeneration &+= 1
-            for source in sources { source.cancel() }
+            for source in sources.values { source.cancel() }
             sources.removeAll()
             pollTimer?.cancel()
             pollTimer = nil
@@ -65,6 +69,7 @@ final class FileWatcherService: @unchecked Sendable {
     func scanNow() {
         queue.sync {
             guard running else { return }
+            reconcileWatchedDirectories()
             for dir in settings.watchDirs {
                 scanDirectory(URL(fileURLWithPath: dir))
             }
@@ -73,9 +78,12 @@ final class FileWatcherService: @unchecked Sendable {
 
     /// 监听单个目录：用 DispatchSource 监视目录描述符的写入事件
     private func watchDirectory(_ url: URL) {
-        let fd = open(url.path, O_EVTONLY)
+        let standardizedURL = url.standardizedFileURL
+        let path = standardizedURL.path
+        guard sources[path] == nil else { return }
+        let fd = open(path, O_EVTONLY)
         guard fd >= 0 else {
-            Self.log("open failed for \(url.path)")
+            Self.log("open failed for \(path)")
             return
         }
         let src = DispatchSource.makeFileSystemObjectSource(
@@ -83,25 +91,59 @@ final class FileWatcherService: @unchecked Sendable {
             eventMask: [.write, .delete, .rename],
             queue: queue
         )
-        let weakURL = url
         src.setEventHandler { [weak self] in
-            self?.scanDirectory(weakURL)
+            guard let self else { return }
+            let events = self.sources[path]?.data ?? []
+            if events.contains(.delete) || events.contains(.rename) {
+                self.removeWatchDirectory(path: path)
+                return
+            }
+            self.scanDirectory(standardizedURL)
         }
         src.setCancelHandler { [fd] in
             close(fd)
         }
+        sources[path] = src
         src.resume()
-        sources.append(src)
         // 启动时记录第一份快照，文件稳定后由后续事件或轮询处理。
-        scanDirectory(url)
+        scanDirectory(standardizedURL)
+    }
+
+    private func removeWatchDirectory(path: String) {
+        guard let source = sources.removeValue(forKey: path) else { return }
+        source.cancel()
+    }
+
+    /// 对账配置和磁盘状态：目录消失时释放旧源，重新出现时恢复监听。
+    private func reconcileWatchedDirectories() {
+        let directories = settings.watchDirs.map {
+            URL(fileURLWithPath: $0).standardizedFileURL
+        }
+        let desiredPaths = Set(directories.map(\.path))
+
+        for path in Array(sources.keys) {
+            var isDirectory: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            if !desiredPaths.contains(path) || !exists || !isDirectory.boolValue {
+                removeWatchDirectory(path: path)
+            }
+        }
+
+        for directory in directories where sources[directory.path] == nil {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { continue }
+            watchDirectory(directory)
+        }
     }
 
     /// 定时轮询兜底（DispatchSource 对部分事件不敏感，用轮询保证捕获新文件）
     private func startPolling() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 10, repeating: 10)
+        timer.schedule(deadline: .now() + pollingInterval, repeating: pollingInterval)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
+            self.reconcileWatchedDirectories()
             for dir in self.settings.watchDirs {
                 self.scanDirectory(URL(fileURLWithPath: dir))
             }
