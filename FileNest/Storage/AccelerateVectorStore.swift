@@ -52,11 +52,13 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                 var expectedSpace: (model: String, dim: Int)?
                 for r in rows {
                     let vec = Self.decode(r.vector)
-                    guard !vec.isEmpty, vec.count == r.dim else { continue }
+                    guard Self.isValidVector(vec), vec.count == r.dim else { continue }
+                    let normalized = Self.normalize(vec)
+                    guard Self.isValidVector(normalized) else { continue }
                     if expectedSpace == nil { expectedSpace = (r.model, r.dim) }
                     guard expectedSpace?.model == r.model, expectedSpace?.dim == r.dim else { continue }
                     entries.append(Entry(fileId: r.fileId,
-                                         vector: Self.normalize(vec),
+                                         vector: normalized,
                                          model: r.model,
                                          chunkIndex: r.chunkIndex,
                                          chunkText: r.chunkText))
@@ -69,9 +71,17 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
 
     @discardableResult
     func replace(fileId: Int64, chunks: [EmbeddingChunk], model: String) async -> Bool {
-        let normalized = chunks.compactMap { chunk -> EmbeddingChunk? in
-            guard !chunk.vector.isEmpty else { return nil }
+        guard !chunks.isEmpty,
+              chunks.allSatisfy({ Self.isValidVector($0.vector) }) else {
+            NSLog("[VectorStore] replace rejected: invalid vector for file \(fileId)")
+            return false
+        }
+        let normalized = chunks.map { chunk in
             return EmbeddingChunk(vector: Self.normalize(chunk.vector), text: chunk.text)
+        }
+        guard normalized.allSatisfy({ Self.isValidVector($0.vector) }) else {
+            NSLog("[VectorStore] replace rejected: normalization failed for file \(fileId)")
+            return false
         }
 
         return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
@@ -138,14 +148,19 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
     func search(_ query: [Float], k: Int) async -> [(fileId: Int64, score: Float)] {
         return await withCheckedContinuation { (cont: CheckedContinuation<[(Int64, Float)], Never>) in
             queue.async {
-                guard let first = self.entries.first,
-                      !query.isEmpty,
+                guard k > 0,
+                      let first = self.entries.first,
+                      Self.isValidVector(query),
                       query.count == first.vector.count else {
                     cont.resume(returning: [])
                     return
                 }
 
                 let q = Self.normalize(query)
+                guard Self.isValidVector(q) else {
+                    cont.resume(returning: [])
+                    return
+                }
                 // 逐条点积（vectors 已在入库时归一化；这里再做一次防御性归一化）
                 var scored: [(Int64, Float)] = []
                 scored.reserveCapacity(self.entries.count)
@@ -176,6 +191,10 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
         var inv = 1.0 / Float(n)
         vDSP_vsmul(v, 1, &inv, &out, 1, vDSP_Length(v.count))
         return out
+    }
+
+    private static func isValidVector(_ vector: [Float]) -> Bool {
+        !vector.isEmpty && vector.allSatisfy { $0.isFinite }
     }
 
     /// [Float] -> Data (little-endian)

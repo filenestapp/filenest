@@ -121,10 +121,30 @@ final class IndexerService {
     /// 简单滑动窗口分块（按词/按字符近似）
     static func chunk(text: String, maxWords: Int, overlap: Int) -> [String] {
         let words = text.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
-        guard words.count > maxWords else { return [text] }
+        guard maxWords > 0, !words.isEmpty else { return [] }
+
+        let boundedOverlap = min(max(overlap, 0), maxWords - 1)
+        let maxChars = maxWords * 4
+        if words.count <= maxWords {
+            guard text.count > maxChars else { return [text] }
+
+            let characters = Array(text)
+            let overlapChars = min(boundedOverlap * 4, maxChars - 1)
+            let step = maxChars - overlapChars
+            var chunks: [String] = []
+            var start = 0
+            while start < characters.count {
+                let end = min(start + maxChars, characters.count)
+                chunks.append(String(characters[start..<end]))
+                if end >= characters.count { break }
+                start += step
+            }
+            return chunks
+        }
+
         var result: [String] = []
         var i = 0
-        let step = max(1, maxWords - overlap)
+        let step = maxWords - boundedOverlap
         while i < words.count {
             let end = min(i + maxWords, words.count)
             let chunk = words[i..<end].joined(separator: " ")

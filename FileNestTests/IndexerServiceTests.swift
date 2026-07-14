@@ -89,6 +89,33 @@ final class IndexerServiceTests: XCTestCase {
         XCTAssertEqual(indexer.vectorStore.count, 0)
     }
 
+    func testChunkReturnsNoSegmentsForBlankOrInvalidInput() {
+        XCTAssertEqual(IndexerService.chunk(text: "", maxWords: 200, overlap: 30), [])
+        XCTAssertEqual(IndexerService.chunk(text: "  \n\t", maxWords: 200, overlap: 30), [])
+        XCTAssertEqual(IndexerService.chunk(text: "content", maxWords: 0, overlap: 0), [])
+    }
+
+    func testChunkUsesOverlappingWordWindows() {
+        let chunks = IndexerService.chunk(
+            text: "one two three four five six seven",
+            maxWords: 3,
+            overlap: 1
+        )
+
+        XCTAssertEqual(chunks, ["one two three", "three four five", "five six seven"])
+    }
+
+    func testChunkSplitsLongTextWithoutWhitespaceByCharacters() {
+        let text = String(repeating: "文", count: 1_000)
+
+        let chunks = IndexerService.chunk(text: text, maxWords: 200, overlap: 30)
+
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertEqual(chunks[0].count, 800)
+        XCTAssertEqual(String(chunks[0].suffix(120)), String(chunks[1].prefix(120)))
+        XCTAssertEqual(chunks[1].count, 320)
+    }
+
     private func insertFile(at url: URL) throws -> Int64 {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         return try store.upsertFile(FileRecord(

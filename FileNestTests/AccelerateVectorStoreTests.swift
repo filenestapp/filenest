@@ -73,6 +73,54 @@ final class AccelerateVectorStoreTests: XCTestCase {
         try assertPersistedChunks(fileId: secondId, expectedIndexes: [0])
     }
 
+    func testVectorEncodingRoundTripsAndRejectsMalformedData() {
+        let vector: [Float] = [0, -1.25, 3.5, Float.leastNonzeroMagnitude]
+
+        XCTAssertEqual(AccelerateVectorStore.decode(AccelerateVectorStore.encode(vector)), vector)
+        XCTAssertEqual(AccelerateVectorStore.decode(Data([0, 1, 2])), [])
+    }
+
+    func testInvalidReplacementPreservesExistingChunks() async throws {
+        let fileId = try insertFile(named: "notes.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let initialReplaceSucceeded = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(vector: [1, 0], text: "valid")],
+            model: "test-model"
+        )
+        XCTAssertTrue(initialReplaceSucceeded)
+
+        let invalidReplaceSucceeded = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(vector: [.nan, 0], text: "invalid")],
+            model: "test-model"
+        )
+        XCTAssertFalse(invalidReplaceSucceeded)
+
+        XCTAssertEqual(vectorStore.count, 1)
+        try assertPersistedChunks(fileId: fileId, expectedIndexes: [0])
+        let hits = await vectorStore.search([1, 0], k: 1)
+        XCTAssertEqual(hits.first?.fileId, fileId)
+    }
+
+    func testSearchRejectsInvalidLimitAndQuery() async throws {
+        let fileId = try insertFile(named: "notes.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let replaceSucceeded = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(vector: [1, 0], text: "valid")],
+            model: "test-model"
+        )
+        XCTAssertTrue(replaceSucceeded)
+
+        let zeroLimitHits = await vectorStore.search([1, 0], k: 0)
+        let negativeLimitHits = await vectorStore.search([1, 0], k: -1)
+        let invalidQueryHits = await vectorStore.search([.infinity, 0], k: 1)
+        XCTAssertEqual(zeroLimitHits.count, 0)
+        XCTAssertEqual(negativeLimitHits.count, 0)
+        XCTAssertEqual(invalidQueryHits.count, 0)
+    }
+
     private func insertFile(named name: String) throws -> Int64 {
         try store.upsertFile(FileRecord(
             id: nil,
