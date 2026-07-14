@@ -84,10 +84,73 @@ final class OrganizerServiceTests: XCTestCase {
             strategy: .hybrid
         )
 
-        try organizer.organize(fileId: fileId)
+        XCTAssertThrowsError(try organizer.organize(fileId: fileId)) { error in
+            guard let organizerError = error as? OrganizerError,
+                  case .databaseUpdateFailed(_, _) = organizerError else {
+                return XCTFail("Expected databaseUpdateFailed, got \(error)")
+            }
+        }
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertEqual(try store.file(id: fileId)?.path, source.path)
+    }
+
+    func testPhysicalMoveFailureIsReportedWithoutChangingDatabase() throws {
+        let source = try createFile(named: "move-failure.txt")
+        let fileId = try insertFile(at: source)
+        let destination = organizedDirectory
+            .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
+            .appendingPathComponent(source.lastPathComponent)
+        let organizer = OrganizerService(
+            store: store,
+            settings: AppSettings(store: store),
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid,
+            moveItem: { _, _ in throw TestError.forcedMoveFailure }
+        )
+
+        XCTAssertThrowsError(try organizer.organize(fileId: fileId)) { error in
+            guard let organizerError = error as? OrganizerError,
+                  case .moveFailed(_, _) = organizerError else {
+                return XCTFail("Expected moveFailed, got \(error)")
+            }
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertEqual(try store.file(id: fileId)?.path, source.path)
+    }
+
+    func testRollbackFailureIsReportedSeparately() throws {
+        let source = try createFile(named: "rollback-failure.txt")
+        let fileId = try insertFile(at: source)
+        let destination = organizedDirectory
+            .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
+            .appendingPathComponent(source.lastPathComponent)
+        _ = try insertFile(at: destination)
+        var moveCount = 0
+        let organizer = OrganizerService(
+            store: store,
+            settings: AppSettings(store: store),
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid,
+            moveItem: { source, destination in
+                moveCount += 1
+                guard moveCount == 1 else { throw TestError.forcedMoveFailure }
+                try FileManager.default.moveItem(at: source, to: destination)
+            }
+        )
+
+        XCTAssertThrowsError(try organizer.organize(fileId: fileId)) { error in
+            guard let organizerError = error as? OrganizerError,
+                  case .rollbackFailed(_, _, _) = organizerError else {
+                return XCTFail("Expected rollbackFailed, got \(error)")
+            }
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
         XCTAssertEqual(try store.file(id: fileId)?.path, source.path)
     }
 
@@ -112,5 +175,9 @@ final class OrganizerServiceTests: XCTestCase {
             title: nil,
             contentText: nil
         ))
+    }
+
+    private enum TestError: Error {
+        case forcedMoveFailure
     }
 }

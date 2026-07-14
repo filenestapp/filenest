@@ -41,21 +41,46 @@ final class RuleClassifier: Classifier {
     }
 }
 
+/// 整理失败类型，区分移动、数据库更新和物理回滚失败。
+enum OrganizerError: LocalizedError {
+    case moveFailed(fileName: String, reason: String)
+    case databaseUpdateFailed(fileName: String, reason: String)
+    case rollbackFailed(fileName: String, databaseReason: String, rollbackReason: String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .moveFailed(fileName, reason):
+            return "Failed to move \(fileName): \(reason)"
+        case let .databaseUpdateFailed(fileName, reason):
+            return "Database update failed for \(fileName); move was rolled back: \(reason)"
+        case let .rollbackFailed(fileName, databaseReason, rollbackReason):
+            return "Database update failed for \(fileName): \(databaseReason); rollback failed: \(rollbackReason)"
+        }
+    }
+}
+
 /// 整理服务：执行文件移动到「目标根/分类子文件夹」，处理冲突 + 撤销记录。
 final class OrganizerService {
+    typealias MoveItem = (URL, URL) throws -> Void
+
     private let store: SQLiteStore
     private let settings: AppSettings
     private let organizeRootOverride: URL?
     private let strategyOverride: ClassificationStrategy?
+    private let moveItem: MoveItem
 
     init(store: SQLiteStore,
          settings: AppSettings,
          organizeRoot: URL? = nil,
-         strategy: ClassificationStrategy? = nil) {
+         strategy: ClassificationStrategy? = nil,
+         moveItem: @escaping MoveItem = { source, destination in
+             try FileManager.default.moveItem(at: source, to: destination)
+         }) {
         self.store = store
         self.settings = settings
         self.organizeRootOverride = organizeRoot
         self.strategyOverride = strategy
+        self.moveItem = moveItem
     }
 
     /// 目标根目录：默认在用户主目录建一个 FileNestOrganized 目录，按分类分子文件夹。
@@ -86,10 +111,11 @@ final class OrganizerService {
         let finalDst = resolveConflict(at: dst)
 
         do {
-            try FileManager.default.moveItem(at: src, to: finalDst)
+            try moveItem(src, finalDst)
         } catch {
-            NSLog("[Organizer] move failed for \(file.name): \(error)")
-            return
+            let reason = String(describing: error)
+            NSLog("[Organizer] move failed for \(file.name): \(reason)")
+            throw OrganizerError.moveFailed(fileName: file.name, reason: reason)
         }
 
         file.path = finalDst.path
@@ -100,11 +126,20 @@ final class OrganizerService {
         } catch {
             let databaseError = error
             do {
-                try FileManager.default.moveItem(at: finalDst, to: src)
-                NSLog("[Organizer] database update failed for \(file.name); move rolled back: \(databaseError)")
+                try moveItem(finalDst, src)
             } catch {
-                NSLog("[Organizer] database update failed for \(file.name): \(databaseError); rollback failed: \(error)")
+                let databaseReason = String(describing: databaseError)
+                let rollbackReason = String(describing: error)
+                NSLog("[Organizer] database update failed for \(file.name): \(databaseReason); rollback failed: \(rollbackReason)")
+                throw OrganizerError.rollbackFailed(
+                    fileName: file.name,
+                    databaseReason: databaseReason,
+                    rollbackReason: rollbackReason
+                )
             }
+            let reason = String(describing: databaseError)
+            NSLog("[Organizer] database update failed for \(file.name); move rolled back: \(reason)")
+            throw OrganizerError.databaseUpdateFailed(fileName: file.name, reason: reason)
         }
     }
 
@@ -146,7 +181,11 @@ final class OrganizerService {
                         guard await AppStateIndexerProxy.shared.indexer?.indexFile(id: id, overridePath: entry) == true else {
                             return
                         }
-                        try? self.organize(fileId: id)
+                        do {
+                            try self.organize(fileId: id)
+                        } catch {
+                            NSLog("[Organizer] background organize failed for \(entry.lastPathComponent): \(error)")
+                        }
                     }
                 }
             }
