@@ -24,24 +24,30 @@ final class AppState: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
 
-    init() {
-        let store = SQLiteStore.shared
+    init(store: SQLiteStore = .shared,
+         settings: AppSettings = .shared,
+         startAutomatically: Bool = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil) {
         self.store = store
-        self.settings = AppSettings.shared
-        self.organizer = OrganizerService(store: store, settings: AppSettings.shared)
-        self.indexer = IndexerService(store: store, settings: AppSettings.shared)
-        self.chat = ChatService(store: store, settings: AppSettings.shared)
+        self.settings = settings
+        let organizer = OrganizerService(store: store, settings: settings)
+        let indexer = IndexerService(store: store, settings: settings)
+        let chat = ChatService(store: store, settings: settings, vectorStore: indexer.vectorStore)
         // watcher 依赖 organizer + indexer，先创建前两者
-        self.watcher = FileWatcherService(
+        let watcher = FileWatcherService(
             store: store,
-            organizer: self.organizer,
-            indexer: self.indexer
+            organizer: organizer,
+            indexer: indexer,
+            settings: settings
         )
+        self.organizer = organizer
+        self.indexer = indexer
+        self.chat = chat
+        self.watcher = watcher
         self.settings.attach(store: store, organizer: organizer, indexer: indexer, chat: chat, watcher: watcher)
-        // 让 ChatService 能访问向量库
+        // Organizer 批处理与设置页仍通过代理访问当前索引器。
         AppStateIndexerProxy.shared.indexer = indexer
-        // XCTest 会启动宿主 App；测试期间不得扫描或移动用户真实文件。
-        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        // XCTest 会启动宿主 App；测试期间默认只刷新状态，不扫描用户目录。
+        guard startAutomatically else { refresh(); return }
         // 首次启动注入默认规则
         try? store.seedDefaultRulesIfNeeded()
         // 预热向量索引

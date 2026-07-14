@@ -11,18 +11,26 @@ final class FileWatcherService: @unchecked Sendable {
     /// 串行队列：所有扫描操作排队执行，避免共享状态并发损坏
     private let queue = DispatchQueue(label: "filenest.watcher")
     private var running = false
+    /// 每次启停都会变化，用于识别已失效的异步索引任务。
+    private var runGeneration: UInt64 = 0
     var isRunning: Bool { queue.sync { running } }
-    private let settings = AppSettings.shared
+    private let settings: AppSettings
     private var pollTimer: DispatchSourceTimer?
     private var stabilityTracker = FileStabilityTracker()
-    private let minimumStableDuration: TimeInterval = 2
+    private let minimumStableDuration: TimeInterval
     /// 仅由 queue 访问的已处理文件去重表
     private var seen: Set<String> = []
 
-    init(store: SQLiteStore, organizer: OrganizerService, indexer: IndexerService) {
+    init(store: SQLiteStore,
+         organizer: OrganizerService,
+         indexer: IndexerService,
+         settings: AppSettings = .shared,
+         minimumStableDuration: TimeInterval = 2) {
         self.store = store
         self.organizer = organizer
         self.indexer = indexer
+        self.settings = settings
+        self.minimumStableDuration = minimumStableDuration
     }
 
     func start() {
@@ -31,6 +39,7 @@ final class FileWatcherService: @unchecked Sendable {
 
     private func startLocked() {
         guard !running else { return }
+        runGeneration &+= 1
         running = true
         let dirs = settings.watchDirs.compactMap { URL(fileURLWithPath: $0) }
         Self.log("start: watching \(dirs.count) dirs: \(dirs.map(\.path))")
@@ -43,11 +52,22 @@ final class FileWatcherService: @unchecked Sendable {
     func stop() {
         queue.sync {
             running = false
+            runGeneration &+= 1
             for source in sources { source.cancel() }
             sources.removeAll()
             pollTimer?.cancel()
             pollTimer = nil
             stabilityTracker = FileStabilityTracker()
+        }
+    }
+
+    /// 立即扫描当前监听目录；仅在监听运行时生效。
+    func scanNow() {
+        queue.sync {
+            guard running else { return }
+            for dir in settings.watchDirs {
+                scanDirectory(URL(fileURLWithPath: dir))
+            }
         }
     }
 
@@ -158,6 +178,7 @@ final class FileWatcherService: @unchecked Sendable {
     }
 
     private func handleNewFile(at url: URL, mtime: Date, size: Int64, dedupKey: String) {
+        let generation = runGeneration
         let ext = url.pathExtension
         let category = FileCategory.from(extension: ext)
         let existing = try? store.file(path: url.path)
@@ -180,6 +201,10 @@ final class FileWatcherService: @unchecked Sendable {
                     self.allowRetry(for: dedupKey)
                     return
                 }
+                guard await self.isActive(generation: generation) else {
+                    Self.log("watcher stopped before organizing \(record.name); keeping file in place")
+                    return
+                }
                 if self.settings.autoOrganize {
                     do {
                         try self.organizer.organize(fileId: id)
@@ -197,6 +222,18 @@ final class FileWatcherService: @unchecked Sendable {
     private func allowRetry(for dedupKey: String) {
         queue.async { [weak self] in
             self?.seen.remove(dedupKey)
+        }
+    }
+
+    private func isActive(generation: UInt64) async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                continuation.resume(returning: self.running && self.runGeneration == generation)
+            }
         }
     }
 

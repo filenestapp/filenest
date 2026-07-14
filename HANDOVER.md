@@ -20,7 +20,7 @@
 
 ### 已完成 ✅
 - 完整的垂直切片 MVP，**可以编译、可以运行、核心闭环已验证通过**
-- 23 个 App Swift 源文件，另有 11 个单元/端到端测试文件
+- 23 个 App Swift 源文件，另有 13 个单元/端到端测试文件
 - `xcodebuild` clean build 成功（macOS 26.6 / Xcode 26.6 / Swift 6.3，arm64）
 - 已用真实下载目录验证：68 个文件被扫描，按类型正确归类，文本文件成功抽取+向量化（512维一致）
 
@@ -37,7 +37,7 @@
 | 稳定性 | ✅ 进程长期运行无崩溃 |
 
 ### 未做（明确的后续工作，见第 8 节）
-- 当前有 47 项测试，覆盖向量存储/文件级去重、真实 PDF 抽取、文件稳定性、SHA-256、中英文分块、索引状态、聊天降级/引用持久化/语义空结果回退、设置持久化与 Provider 切换、规则语义、SQLite CRUD/外键级联、Provider HTTP 边界，以及文件移动与 DB 路径回写
+- 当前有 51 项测试，覆盖向量存储/文件级去重、真实 PDF 抽取、文件稳定性、SHA-256、中英文分块、索引状态、聊天降级/引用持久化/语义空结果回退、设置持久化与 Provider 切换、规则语义、SQLite CRUD/外键级联、Provider HTTP 边界、文件移动与 DB 路径回写、watcher 重复事件/失败重试/停止竞态，以及 `AppState.refresh()`
 - AI 语义分类尚未实现；界面只提供「仅规则 / 混合」，历史 AI 规则会显示为停用且不参与分类
 - 没有图片多模态识别
 - 没有上架打包/签名配置（当前是 ad-hoc 签名 `-`）
@@ -125,7 +125,7 @@ ollama pull qwen2.5:7b      # 拉模型（首次几 GB）
 | 文件 | 行 | 职责 |
 |---|---|---|
 | `FileNestApp.swift` | 39 | `@main` 入口，三个 Scene：MenuBarExtra + WindowGroup + Settings |
-| `AppState.swift` | 71 | **全局状态中枢**，`@MainActor` ObservableObject，持有所有服务实例。UI 通过 `@EnvironmentObject` 访问 |
+| `AppState.swift` | 79 | **全局状态中枢**，`@MainActor` ObservableObject，持有所有服务实例。支持注入 Store/Settings 并关闭自动启动，测试时只刷新临时库、不扫描用户目录。UI 通过 `@EnvironmentObject` 访问 |
 | `AppSettings.swift` | 130 | 所有可配置项，持久化到 SQLite `settings` 表；历史/无效 LLM 选择归一化为 Ollama。**注意：`@Published` 属性不能用 didSet，持久化逻辑在独立的 `setXxx()` 方法里** |
 
 ### Domain/（模型与协议）
@@ -150,7 +150,7 @@ ollama pull qwen2.5:7b      # 拉模型（首次几 GB）
 ### Services/（业务逻辑）
 | 文件 | 行 | 职责 |
 |---|---|---|
-| `FileWatcherService.swift` | 224 | 监听目录（DispatchSource + 10秒轮询兜底），文件稳定至少2秒后→入DB→触发索引+归类 |
+| `FileWatcherService.swift` | 261 | 监听目录（DispatchSource + 10秒轮询兜底），文件稳定至少2秒后→入DB→触发索引+归类；重复事件去重、失败后允许重试，停止监听后用运行代际阻止旧索引任务继续移动文件 |
 | `OrganizerService.swift` | 161 | 规则决策 + 扩展名回退 + 文件移动（含自定义目标和同名冲突处理）。`organize(fileId:)` 单个，`runOnce()` 批量 |
 | `IndexerService.swift` | 178 | 内容抽取→中英文滑动窗口分块→向量化→入库。`indexFile(id:overridePath:)` 是核心方法 |
 | `ChatService.swift` | 132 | RAG：问题向量化→检索 top 5→拼 context→调 LLM→保存带引用的回复；embedding 失败或语义结果无可解析文件时，降级为最多 5 个关键词结果 |
@@ -226,6 +226,7 @@ SwiftUI 的 `@Published` property wrapper 与 `didSet` 冲突。
 watcher 有两个事件来源：每个目录一个 DispatchSource + 一个全局轮询 Timer。共享状态曾因并发访问损坏崩溃。
 - **现状**：启动、停止、扫描、`seen` 和稳定性快照都只在同一个串行 `queue` 上访问；DispatchSource 的取消处理负责且只负责一次文件描述符关闭。
 - **文件安全**：大小和修改时间连续不变至少 2 秒才进入索引；索引失败时文件留在原位、不执行自动移动，并允许后续轮询重试。
+- **生命周期安全**：每次启停更新运行代际；已开始的索引可以完成数据库写入，但停止后不会再执行自动移动，重启后的新任务也不会被旧任务混淆。
 - **注意**：watcher 的 `queue` 必须保持串行，不要重新从其他队列直接调用 `scanDirectory`。
 
 ### 7.8 为什么不用 sqlite-vec / vec1
@@ -237,7 +238,7 @@ watcher 有两个事件来源：每个目录一个 DispatchSource + 一个全局
 
 ### P0（建议先做）
 1. **实测聊天功能** — 装上 Ollama + 拉模型，跑通 RAG 端到端，验证引用文件是否正确
-2. **继续补核心测试** — 已覆盖设置持久化/Provider 切换、语义空结果回退、Provider HTTP、PDF、SQLite、向量、索引、规则和整理端到端；下一步覆盖 `AppState` 服务组装/状态刷新，以及 watcher 重复事件与重试边界
+2. **继续补核心测试** — 已覆盖 `AppState` 状态刷新和 watcher 重复事件/失败重试/停止竞态；下一步覆盖监听目录删除与重建、启停循环、多个目录并发事件，以及 Organizer 移动失败后的状态一致性
 
 ### P1（体验提升）
 3. **AI 真正语义分类** — 当前不对用户暴露未实现的 AI 策略，历史 `classifyStrategy="ai"` 会安全归一化为 `hybrid`。实现时可让 LLM 读文件名/内容前 N 字返回分类，并增加超时/失败回退策略
