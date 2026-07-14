@@ -39,11 +39,15 @@ final class NLEmbeddingProvider: EmbeddingProvider {
 
 /// Ollama embedding（可选，需本地装 nomic-embed-text 等模型）
 final class OllamaEmbeddingProvider: EmbeddingProvider {
-    let name = "ollama"
+    let name: String
     let dimension = 768
     private let host: String
     private let model: String
-    init(host: String, model: String) { self.host = host; self.model = model }
+    init(host: String, model: String) {
+        self.host = host
+        self.model = model
+        self.name = "ollama:\(model)"
+    }
 
     func embed(_ text: String) async throws -> [Float] {
         var req = URLRequest(url: URL(string: "\(host)/api/embeddings")!)

@@ -18,6 +18,7 @@
 		6FA1EF6DEB91E79B62A8D9D8 /* OrganizerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F78A71B3DCB8483A341C7A /* OrganizerService.swift */; };
 		738623A6F243BE6B0326C280 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92AB18FB7207E6AAFB5AC33F /* SettingsView.swift */; };
 		7C01A5CE17EBDFB072B323D9 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41ABE72DDFB85190D0B6DDD6 /* Models.swift */; };
+		7F8D94874A5A9B67A476E32E /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A5DA86309B1EC6717579503C /* GRDB */; };
 		857B9C95B04104247BE51E01 /* IndexerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DE24403AF530F82278B6BC3 /* IndexerService.swift */; };
 		91E4FCD02C332A942183BCE0 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6649AC190414A7EAA31FD24E /* MenuBarView.swift */; };
 		973F86E6A2DFBFF214A72876 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B1E54077AA4314A64BF946B /* LibraryView.swift */; };
@@ -25,10 +26,21 @@
 		A02F1E1580AA1F36CA2E8255 /* FileNestApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A8A793C6CFB7D4E6B507F3E /* FileNestApp.swift */; };
 		B49D9D7EA98C6F84980EA311 /* SQLiteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8649BE2799C7BB363E75B4E0 /* SQLiteStore.swift */; };
 		BEBC03D76FF2213EB6A80707 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7970E57A08715FE45E17523A /* AppState.swift */; };
+		C858C26590E234AE9B3FC73B /* AccelerateVectorStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF82143A6594FB0098BAD8A /* AccelerateVectorStoreTests.swift */; };
 		CFEF238FB153D24FC6A03282 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27303B439066A29084763669 /* ChatView.swift */; };
 		D468979A8C879103497D34A7 /* ContentExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B290655B42F0B0722076C1D9 /* ContentExtractor.swift */; };
 		F3756EEC872DD311665B8684 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B384135AFF13CA8C8B35647 /* Protocols.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		408DF4A9480A5BE857169796 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = ACE28B5881AECD5B8031A374 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5F08F20CC02E8F582FF7D550;
+			remoteInfo = FileNest;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		07F627F75F60ECBD269437A6 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
@@ -39,6 +51,7 @@
 		32F78A71B3DCB8483A341C7A /* OrganizerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizerService.swift; sourceTree = "<group>"; };
 		3ED860C7A38EA05934B40D2C /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		41ABE72DDFB85190D0B6DDD6 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		581C46E087A7CE99D4ED2B6F /* FileNestTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FileNestTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5DE24403AF530F82278B6BC3 /* IndexerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexerService.swift; sourceTree = "<group>"; };
 		6649AC190414A7EAA31FD24E /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		6B384135AFF13CA8C8B35647 /* Protocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocols.swift; sourceTree = "<group>"; };
@@ -47,6 +60,7 @@
 		8BC13866E4DE2369E11F04E4 /* ChatService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatService.swift; sourceTree = "<group>"; };
 		92AB18FB7207E6AAFB5AC33F /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		9E792A846DAEB2DEAC97A618 /* FileNest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FileNest.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		ACF82143A6594FB0098BAD8A /* AccelerateVectorStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccelerateVectorStoreTests.swift; sourceTree = "<group>"; };
 		B290655B42F0B0722076C1D9 /* ContentExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentExtractor.swift; sourceTree = "<group>"; };
 		D9625AF00E9C156137E913EF /* EmbeddingProviders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddingProviders.swift; sourceTree = "<group>"; };
 		E16E128627D1FAF79016D738 /* AccelerateVectorStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccelerateVectorStore.swift; sourceTree = "<group>"; };
@@ -55,6 +69,14 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		1E9F9FEE0D1DD77CF42E8179 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7F8D94874A5A9B67A476E32E /* GRDB in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		73AB67FCD8FE7B43F257E73F /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -136,6 +158,7 @@
 			isa = PBXGroup;
 			children = (
 				2B0DCE95AC1A34D0F1D9105D /* FileNest */,
+				F9FCEDC352F8D9EA27C63558 /* FileNestTests */,
 				C675E3B7C4DF0C8964C28CD9 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -161,8 +184,17 @@
 			isa = PBXGroup;
 			children = (
 				9E792A846DAEB2DEAC97A618 /* FileNest.app */,
+				581C46E087A7CE99D4ED2B6F /* FileNestTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		F9FCEDC352F8D9EA27C63558 /* FileNestTests */ = {
+			isa = PBXGroup;
+			children = (
+				ACF82143A6594FB0098BAD8A /* AccelerateVectorStoreTests.swift */,
+			);
+			path = FileNestTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -187,6 +219,26 @@
 			productReference = 9E792A846DAEB2DEAC97A618 /* FileNest.app */;
 			productType = "com.apple.product-type.application";
 		};
+		AA062CC69ED4C98AA49CF8E8 /* FileNestTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CFF4DAF643A79FD34C34D454 /* Build configuration list for PBXNativeTarget "FileNestTests" */;
+			buildPhases = (
+				68223FF761DF86D088B608F0 /* Sources */,
+				1E9F9FEE0D1DD77CF42E8179 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				68AEF54AB8ACD71856188105 /* PBXTargetDependency */,
+			);
+			name = FileNestTests;
+			packageProductDependencies = (
+				A5DA86309B1EC6717579503C /* GRDB */,
+			);
+			productName = FileNestTests;
+			productReference = 581C46E087A7CE99D4ED2B6F /* FileNestTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -197,6 +249,9 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					5F08F20CC02E8F582FF7D550 = {
+						ProvisioningStyle = Automatic;
+					};
+					AA062CC69ED4C98AA49CF8E8 = {
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -219,6 +274,7 @@
 			projectRoot = "";
 			targets = (
 				5F08F20CC02E8F582FF7D550 /* FileNest */,
+				AA062CC69ED4C98AA49CF8E8 /* FileNestTests */,
 			);
 		};
 /* End PBXProject section */
@@ -251,9 +307,42 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		68223FF761DF86D088B608F0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C858C26590E234AE9B3FC73B /* AccelerateVectorStoreTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		68AEF54AB8ACD71856188105 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5F08F20CC02E8F582FF7D550 /* FileNest */;
+			targetProxy = 408DF4A9480A5BE857169796 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		6B81FD71A509F5D28BF8221B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.local.FileNestTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FileNest.app/Contents/MacOS/FileNest";
+			};
+			name = Debug;
+		};
 		9F83E1F3AA006E79EC9D8592 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -429,6 +518,23 @@
 			};
 			name = Debug;
 		};
+		CE7FA41FC0262DC69DB6EF8F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.local.FileNestTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FileNest.app/Contents/MacOS/FileNest";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -437,6 +543,15 @@
 			buildConfigurations = (
 				CD1300A8A5F3F8906D95C060 /* Debug */,
 				C20393FF8B9D971249BD8EA8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		CFF4DAF643A79FD34C34D454 /* Build configuration list for PBXNativeTarget "FileNestTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6B81FD71A509F5D28BF8221B /* Debug */,
+				CE7FA41FC0262DC69DB6EF8F /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
@@ -465,6 +580,11 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		64E59484A5961578C5B1A8A2 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2C62EC91FBB26C3FE5D739BD /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
+		};
+		A5DA86309B1EC6717579503C /* GRDB */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 2C62EC91FBB26C3FE5D739BD /* XCRemoteSwiftPackageReference "GRDB.swift" */;
 			productName = GRDB;

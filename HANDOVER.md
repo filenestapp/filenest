@@ -20,7 +20,7 @@
 
 ### 已完成 ✅
 - 完整的垂直切片 MVP，**可以编译、可以运行、核心闭环已验证通过**
-- 20 个 Swift 源文件，约 2387 行
+- 20 个 App Swift 源文件，另有 1 个单元测试文件
 - `xcodebuild` clean build 成功（macOS 26.6 / Xcode 26.6 / Swift 6.3，arm64）
 - 已用真实下载目录验证：68 个文件被扫描，按类型正确归类，文本文件成功抽取+向量化（512维一致）
 
@@ -37,11 +37,11 @@
 | 稳定性 | ✅ 进程长期运行无崩溃 |
 
 ### 未做（明确的后续工作，见第 8 节）
-- 没有写单元测试
+- 单元测试目前只覆盖向量存储的多分块持久化、重复替换和重载一致性，其余模块仍待补齐
 - AI 语义分类是占位实现（hybrid 策略实际降级为规则分类）
 - 没有图片多模态识别
 - 没有上架打包/签名配置（当前是 ad-hoc 签名 `-`）
-- 不是 git 仓库（**建议接手后第一件事 `git init`**）
+- 已初始化 Git 仓库，并保存原始 MVP 基线提交
 
 ---
 
@@ -234,21 +234,20 @@ watcher 有两个并发来源：每个目录一个 DispatchSource + 一个全局
 ## 8. 建议的后续工作（按优先级）
 
 ### P0（建议先做）
-1. **`git init` + 提交首个 commit** — 当前不是版本控制，代码丢了就没了
-2. **实测聊天功能** — 装上 Ollama + 拉模型，跑通 RAG 端到端，验证引用文件是否正确
-3. **写核心单元测试** — 至少覆盖：`RuleClassifier`、`ContentExtractor`、`AccelerateVectorStore`(encode/decode/search)、`IndexerService.chunk`
+1. **实测聊天功能** — 装上 Ollama + 拉模型，跑通 RAG 端到端，验证引用文件是否正确
+2. **继续补核心单元测试** — `AccelerateVectorStore` 已覆盖多分块持久化、重复替换和重载一致性；下一步覆盖 `RuleClassifier`、`ContentExtractor`、`encode/decode/search` 边界和 `IndexerService.chunk`
 
 ### P1（体验提升）
-4. **AI 真正语义分类** — 当前 `classifyStrategy="ai"` 是占位（降级为扩展名分类）。可让 LLM 读文件名/内容前N字返回分类
-5. **更强的中文 embedding** — 接 Ollama nomic-embed-text 或云端 embedding，提升中文语义区分度（需重新索引）
-6. **增量索引优化** — 当前 `seen` 去重表在重启后丢失，每次启动重扫全部目录。可改用 DB 里的 `content_hash` 判断文件是否变更
-7. **文件监听改用 FSEvents 全树** — 当前 DispatchSource 只监听目录描述符 + 10秒轮询，不够实时
+3. **AI 真正语义分类** — 当前 `classifyStrategy="ai"` 是占位（降级为扩展名分类）。可让 LLM 读文件名/内容前N字返回分类
+4. **更强的中文 embedding** — 接 Ollama nomic-embed-text 或云端 embedding，提升中文语义区分度（需重新索引）
+5. **增量索引优化** — 当前 `seen` 去重表在重启后丢失，每次启动重扫全部目录。可改用 DB 里的 `content_hash` 判断文件是否变更
+6. **文件监听改用 FSEvents 全树** — 当前 DispatchSource 只监听目录描述符 + 10秒轮询，不够实时
 
 ### P2（功能扩展）
-8. **图片多模态** — 用视觉模型给图片打标签后向量化
-9. **打包上架** — 配置正式签名、App图标、沙盒 entitlements 审计、公证
-10. **撤销/历史** — OrganizerService 移动文件后记录 undo，支持还原
-11. **多目录监听** — 设置里已支持添加目录，但 UI 交互和实际监听需验证
+7. **图片多模态** — 用视觉模型给图片打标签后向量化
+8. **打包上架** — 配置正式签名、App图标、沙盒 entitlements 审计、公证
+9. **撤销/历史** — OrganizerService 移动文件后记录 undo，支持还原
+10. **多目录监听** — 设置里已支持添加目录，但 UI 交互和实际监听需验证
 
 ---
 
@@ -257,9 +256,9 @@ watcher 有两个并发来源：每个目录一个 DispatchSource + 一个全局
 接手后建议按这个顺序操作：
 
 ```
-□ 1. git init && git add . && git commit -m "init: FileNest MVP"
-□ 2. xcodegen generate  （确认工程能生成）
-□ 3. xcodebuild ... build （确认能编译）
+☑ 1. Git 仓库和原始 MVP 基线提交已建立
+☑ 2. xcodegen generate  （工程可以重新生成）
+☑ 3. xcodebuild ... test （App 构建和单元测试通过）
 □ 4. open ...FileNest.app （确认能运行，菜单栏出现图标）
 □ 5. 往 ~/Downloads 放个 .txt，等10秒，查 ~/FileNestLogs/watcher.log 确认被扫到
 □ 6. 查 DB：sqlite3 ~/Library/Application\ Support/filenest.sqlite "SELECT name,category FROM files"

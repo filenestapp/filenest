@@ -7,9 +7,9 @@ final class SQLiteStore {
 
     let dbPool: DatabasePool
 
-    private init() {
+    init(path: String? = nil) {
         do {
-            let url = SQLiteStore.databaseURL()
+            let url = path.map { URL(fileURLWithPath: $0) } ?? SQLiteStore.databaseURL()
             var config = Configuration()
             config.prepareDatabase { db in
                 // WAL 模式，并发友好
@@ -155,7 +155,7 @@ final class SQLiteStore {
     func upsertRule(_ rule: Rule) throws -> Int64 {
         try dbPool.write { db in
             if let id = rule.id {
-                var r = rule
+                let r = rule
                 try r.update(db, columns: ["name", "type", "pattern", "target_folder", "priority", "enabled"])
                 return id
             } else {

@@ -51,19 +51,21 @@ final class IndexerService {
         texts.append(contentsOf: chunks)
 
         Self.log("vectorizing \(file.name): \(texts.count) segments, textLen=\(extracted.text.count)")
-        var embeddedCount = 0
+        var embeddings: [EmbeddingChunk] = []
         for (i, text) in texts.enumerated() {
             // NLEmbedding 句向量在中文长文本上表现一般，取每段前若干句
             let piece = String(text.prefix(800))
             if let vec = try? await embedder.embed(piece), !vec.isEmpty {
-                await vectorStore.upsert(fileId: id, vector: vec, chunkText: text)
-                embeddedCount += 1
+                embeddings.append(EmbeddingChunk(vector: vec, text: text))
                 Self.log("  segment \(i): embedded dim=\(vec.count)")
             } else {
                 Self.log("  segment \(i): embed FAILED/empty for piece(\(piece.count) chars)")
             }
         }
-        Self.log("done \(file.name): \(embeddedCount)/\(texts.count) embedded")
+        if !embeddings.isEmpty {
+            await vectorStore.replace(fileId: id, chunks: embeddings, model: embedder.name)
+        }
+        Self.log("done \(file.name): \(embeddings.count)/\(texts.count) embedded")
     }
 
     /// 重新索引全部文件

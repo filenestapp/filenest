@@ -38,6 +38,10 @@ xcodebuild -project FileNest.xcodeproj -scheme FileNest -configuration Debug \
 
 # 3. 运行（构建产物）
 open ~/Library/Developer/Xcode/DerivedData/FileNest-*/Build/Products/Debug/FileNest.app
+
+# 4. 运行单元测试
+xcodebuild -project FileNest.xcodeproj -scheme FileNest \
+  -configuration Debug -destination 'platform=macOS' test
 ```
 
 或直接用 Xcode 打开 `FileNest.xcodeproj` 运行。

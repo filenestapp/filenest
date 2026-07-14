@@ -40,6 +40,8 @@ final class AppState: ObservableObject {
         self.settings.attach(store: store, organizer: organizer, indexer: indexer, chat: chat, watcher: watcher)
         // 让 ChatService 能访问向量库
         AppStateIndexerProxy.shared.indexer = indexer
+        // XCTest 会启动宿主 App；测试期间不得扫描或移动用户真实文件。
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
         // 首次启动注入默认规则
         try? store.seedDefaultRulesIfNeeded()
         // 预热向量索引

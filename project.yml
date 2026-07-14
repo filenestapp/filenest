@@ -37,6 +37,20 @@ targets:
       - package: GRDB
         product: GRDB
 
+  FileNestTests:
+    type: bundle.unit-test
+    platform: macOS
+    settings:
+      base:
+        # 当前 Xcode 附带的 XCTest runtime 最低为 macOS 14；不改变 App 的 13.0 部署目标。
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+    sources:
+      - path: FileNestTests
+    dependencies:
+      - target: FileNest
+      - package: GRDB
+        product: GRDB
+
 packages:
   GRDB:
     url: https://github.com/groue/GRDB.swift

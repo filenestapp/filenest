@@ -4,22 +4,21 @@ import GRDB
 
 /// 基于 Accelerate (vDSP) 的内存向量检索：向量以 BLOB 持久化于 SQLite，启动时载入内存做暴力 cosine。
 /// 完全 App Sandbox 友好，零依赖。规模到几十万向量内足够快（M 系列 chip）。
-final class AccelerateVectorStore: VectorStore {
+final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
     private let store: SQLiteStore
-    private let queue = DispatchQueue(label: "filenest.vectorstore", attributes: .concurrent)
+    /// SQLite 与内存索引必须按相同顺序更新，因此所有状态变更都在同一串行队列执行。
+    private let queue = DispatchQueue(label: "filenest.vectorstore")
 
     /// 内存索引：fileId -> (向量 Float 数组，块文本)
     private struct Entry {
         let fileId: Int64
         let vector: [Float]
+        let model: String
+        let chunkIndex: Int
         let chunkText: String?
     }
     private var entries: [Entry] = []
-    /// 扁平化的连续 Float 矩阵 + 每条记录在其中的起始/长度，便于 vDSP 批量点积
-    private var matrix: [Float] = []
-    private var spans: [(start: Int, count: Int)] = []
-    private(set) var count: Int = 0
-    private var dim: Int = 0
+    var count: Int { queue.sync { entries.count } }
 
     init(store: SQLiteStore) { self.store = store }
 
@@ -29,124 +28,126 @@ final class AccelerateVectorStore: VectorStore {
         let fileId: Int64
         let vector: Data
         let dim: Int
+        let model: String
+        let chunkIndex: Int
         let chunkText: String?
         init(row: Row) {
             id = row["id"]
             fileId = row["file_id"]
             vector = row["vector"]
             dim = row["dim"]
+            model = row["model"]
+            chunkIndex = row["chunk_idx"]
             chunkText = row["chunk_text"]
         }
     }
 
     func loadAll() async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            queue.async(flags: .barrier) { [store] in
-                let rows: [EmbeddingRow] = (try? store.dbPool.read { db in
+            queue.async {
+                let rows: [EmbeddingRow] = (try? self.store.dbPool.read { db in
                     try EmbeddingRow.fetchAll(db, sql: "SELECT * FROM embeddings")
                 }) ?? []
                 var entries: [Entry] = []
-                var matrix: [Float] = []
-                var spans: [(start: Int, count: Int)] = []
-                var dim = 0
+                var expectedSpace: (model: String, dim: Int)?
                 for r in rows {
                     let vec = Self.decode(r.vector)
-                    if vec.isEmpty { continue }
-                    if dim == 0 { dim = vec.count }
-                    guard vec.count == dim else { continue } // 维度一致才纳入
-                    let start = matrix.count
-                    matrix.append(contentsOf: vec)
-                    spans.append((start, vec.count))
-                    entries.append(Entry(fileId: r.fileId, vector: vec, chunkText: r.chunkText))
+                    guard !vec.isEmpty, vec.count == r.dim else { continue }
+                    if expectedSpace == nil { expectedSpace = (r.model, r.dim) }
+                    guard expectedSpace?.model == r.model, expectedSpace?.dim == r.dim else { continue }
+                    entries.append(Entry(fileId: r.fileId,
+                                         vector: Self.normalize(vec),
+                                         model: r.model,
+                                         chunkIndex: r.chunkIndex,
+                                         chunkText: r.chunkText))
                 }
                 self.entries = entries
-                self.matrix = matrix
-                self.spans = spans
-                self.dim = dim
-                self.count = entries.count
                 cont.resume()
             }
         }
     }
 
-    func upsert(fileId: Int64, vector: [Float], chunkText: String?) async {
-        guard !vector.isEmpty else { return }
-        // 先删后插（同一文件可能多块）
-        removeFromDB(fileId: fileId)
-        insertToDB(fileId: fileId, vector: vector, chunkText: chunkText)
-        // 更新内存索引（无需全部重载）
-        queue.sync(flags: .barrier) {
-            if dim == 0 { dim = vector.count }
-            guard vector.count == dim else { return } // 维度不一致跳过
-            let start = matrix.count
-            matrix.append(contentsOf: vector)
-            spans.append((start, vector.count))
-            entries.append(Entry(fileId: fileId, vector: vector, chunkText: chunkText))
-            count = entries.count
+    func replace(fileId: Int64, chunks: [EmbeddingChunk], model: String) async {
+        let normalized = chunks.compactMap { chunk -> EmbeddingChunk? in
+            guard !chunk.vector.isEmpty else { return nil }
+            return EmbeddingChunk(vector: Self.normalize(chunk.vector), text: chunk.text)
         }
-    }
 
-    private func insertToDB(fileId: Int64, vector: [Float], chunkText: String?) {
-        let blob = Self.encode(vector)
-        let model = "nlembedding"
-        do {
-            _ = try store.dbPool.writeWithoutTransaction { db in
-                try db.execute(
-                    sql: "INSERT INTO embeddings(file_id, vector, dim, model, chunk_idx, chunk_text) VALUES(?,?,?,?,?,?)",
-                    arguments: [fileId, blob, vector.count, model, 0, chunkText]
-                )
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            queue.async {
+                let dimensions = Set(normalized.map { $0.vector.count })
+                guard dimensions.count <= 1 else {
+                    NSLog("[VectorStore] replace rejected: mixed dimensions for file \(fileId)")
+                    cont.resume()
+                    return
+                }
+
+                if let first = normalized.first,
+                   let existing = self.entries.first(where: { $0.fileId != fileId }),
+                   (existing.vector.count != first.vector.count || existing.model != model) {
+                    NSLog("[VectorStore] replace rejected: vector space mismatch for file \(fileId)")
+                    cont.resume()
+                    return
+                }
+
+                do {
+                    try self.store.dbPool.write { db in
+                        try db.execute(sql: "DELETE FROM embeddings WHERE file_id = ?", arguments: [fileId])
+                        for (index, chunk) in normalized.enumerated() {
+                            try db.execute(
+                                sql: "INSERT INTO embeddings(file_id, vector, dim, model, chunk_idx, chunk_text) VALUES(?,?,?,?,?,?)",
+                                arguments: [fileId, Self.encode(chunk.vector), chunk.vector.count,
+                                            model, index, chunk.text]
+                            )
+                        }
+                    }
+
+                    self.entries.removeAll { $0.fileId == fileId }
+                    self.entries.append(contentsOf: normalized.enumerated().map { index, chunk in
+                        Entry(fileId: fileId, vector: chunk.vector, model: model,
+                              chunkIndex: index, chunkText: chunk.text)
+                    })
+                } catch {
+                    NSLog("[VectorStore] replace failed: \(error)")
+                }
+                cont.resume()
             }
-        } catch {
-            NSLog("[VectorStore] insert failed: \(error)")
         }
     }
 
     func remove(fileId: Int64) async {
-        removeFromDB(fileId: fileId)
-        queue.sync(flags: .barrier) {
-            // 重建内存索引（删除不频繁）
-            entries.removeAll { $0.fileId == fileId }
-            rebuildMatrixLocked()
-            count = entries.count
-        }
-    }
-
-    private func removeFromDB(fileId: Int64) {
-        do {
-            _ = try store.dbPool.writeWithoutTransaction { db in
-                try db.execute(sql: "DELETE FROM embeddings WHERE file_id = ?", arguments: [fileId])
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            queue.async {
+                do {
+                    try self.store.dbPool.write { db in
+                        try db.execute(sql: "DELETE FROM embeddings WHERE file_id = ?", arguments: [fileId])
+                    }
+                    self.entries.removeAll { $0.fileId == fileId }
+                } catch {
+                    NSLog("[VectorStore] delete failed: \(error)")
+                }
+                cont.resume()
             }
-        } catch {
-            NSLog("[VectorStore] delete failed: \(error)")
-        }
-    }
-
-    private func rebuildMatrixLocked() {
-        matrix.removeAll(keepingCapacity: true)
-        spans.removeAll(keepingCapacity: true)
-        for v in entries.map(\.vector) {
-            spans.append((matrix.count, v.count))
-            matrix.append(contentsOf: v)
         }
     }
 
     // MARK: - 检索
     func search(_ query: [Float], k: Int) async -> [(fileId: Int64, score: Float)] {
-        guard !entries.isEmpty, !query.isEmpty else { return [] }
-        let dim = self.dim
-        guard query.count == dim else { return [] }
-
-        // 归一化 query
-        let q = Self.normalize(query)
-
         return await withCheckedContinuation { (cont: CheckedContinuation<[(Int64, Float)], Never>) in
-            queue.async { [entries] in
+            queue.async {
+                guard let first = self.entries.first,
+                      !query.isEmpty,
+                      query.count == first.vector.count else {
+                    cont.resume(returning: [])
+                    return
+                }
+
+                let q = Self.normalize(query)
                 // 逐条点积（vectors 已在入库时归一化；这里再做一次防御性归一化）
                 var scored: [(Int64, Float)] = []
-                scored.reserveCapacity(entries.count)
-                for e in entries {
-                    let v = Self.normalize(e.vector)
-                    let dot = Self.dot(q, v)
+                scored.reserveCapacity(self.entries.count)
+                for e in self.entries {
+                    let dot = Self.dot(q, e.vector)
                     scored.append((e.fileId, dot))
                 }
                 scored.sort { $0.1 > $1.1 }
