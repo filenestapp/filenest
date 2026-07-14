@@ -1,4 +1,5 @@
 import XCTest
+import CoreText
 @testable import FileNest
 
 final class ContentExtractorTests: XCTestCase {
@@ -42,5 +43,46 @@ final class ContentExtractorTests: XCTestCase {
 
         XCTAssertEqual(extracted.title, "summer-photo")
         XCTAssertEqual(extracted.text, "summer-photo.jpg")
+    }
+
+    func testPDFExtractionReadsTextAndMetadataTitle() throws {
+        let url = temporaryDirectory.appendingPathComponent("contract.pdf")
+        try writePDF(text: "Annual contract body", title: "Contract 2026", to: url)
+
+        let extracted = ContentExtractor.extract(url: url, ext: "PDF")
+
+        XCTAssertEqual(extracted.title, "Contract 2026")
+        XCTAssertTrue(extracted.text.contains("Annual contract body"))
+    }
+
+    func testPDFExtractionFallsBackToFilenameForBlankMetadataTitle() throws {
+        let url = temporaryDirectory.appendingPathComponent("untitled.pdf")
+        try writePDF(text: "Searchable PDF text", title: "   ", to: url)
+
+        let extracted = ContentExtractor.extract(url: url, ext: "pdf")
+
+        XCTAssertEqual(extracted.title, "untitled")
+        XCTAssertTrue(extracted.text.contains("Searchable PDF text"))
+    }
+
+    private func writePDF(text: String, title: String, to url: URL) throws {
+        var mediaBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let metadata = [kCGPDFContextTitle as String: title] as CFDictionary
+        guard let context = CGContext(url as CFURL, mediaBox: &mediaBox, metadata) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        context.beginPDFPage(nil)
+        context.textPosition = CGPoint(x: 72, y: 720)
+        let font = CTFontCreateWithName("Helvetica" as CFString, 14, nil)
+        let attributes = [
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+        ]
+        let line = CTLineCreateWithAttributedString(
+            NSAttributedString(string: text, attributes: attributes)
+        )
+        CTLineDraw(line, context)
+        context.endPDFPage()
+        context.closePDF()
     }
 }

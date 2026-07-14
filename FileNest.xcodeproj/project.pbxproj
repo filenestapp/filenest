@@ -37,6 +37,7 @@
 		CFEF238FB153D24FC6A03282 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27303B439066A29084763669 /* ChatView.swift */; };
 		D468979A8C879103497D34A7 /* ContentExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B290655B42F0B0722076C1D9 /* ContentExtractor.swift */; };
 		D9D9DE504E105FFD9A319390 /* OrganizationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AF71E1C61D599A9EC1771B /* OrganizationPolicy.swift */; };
+		E7FA958F6DBE15D13D2B9355 /* SQLiteStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05F3FDF12A0309FE2F98566C /* SQLiteStoreTests.swift */; };
 		E89F38010375D2AAFDA93164 /* RuleClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C17548A0C41EE3AB803FFF /* RuleClassifierTests.swift */; };
 		F3756EEC872DD311665B8684 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B384135AFF13CA8C8B35647 /* Protocols.swift */; };
 		F483106C890A5D06AC88546F /* FileStabilityTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6593BF0E6103F8909253FADE /* FileStabilityTracker.swift */; };
@@ -53,6 +54,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		05F3FDF12A0309FE2F98566C /* SQLiteStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteStoreTests.swift; sourceTree = "<group>"; };
 		07F627F75F60ECBD269437A6 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		0A8A793C6CFB7D4E6B507F3E /* FileNestApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNestApp.swift; sourceTree = "<group>"; };
 		0B1E54077AA4314A64BF946B /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
@@ -223,6 +225,7 @@
 				D279A11830E6026464167E5D /* IndexerServiceTests.swift */,
 				3852187AB6DFCAF137FE021B /* OrganizerServiceTests.swift */,
 				E5C17548A0C41EE3AB803FFF /* RuleClassifierTests.swift */,
+				05F3FDF12A0309FE2F98566C /* SQLiteStoreTests.swift */,
 			);
 			path = FileNestTests;
 			sourceTree = "<group>";
@@ -352,6 +355,7 @@
 				750134831B313854FDD639B1 /* IndexerServiceTests.swift in Sources */,
 				58C60715E5958EC742B4C465 /* OrganizerServiceTests.swift in Sources */,
 				E89F38010375D2AAFDA93164 /* RuleClassifierTests.swift in Sources */,
+				E7FA958F6DBE15D13D2B9355 /* SQLiteStoreTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

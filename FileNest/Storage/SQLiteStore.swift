@@ -149,10 +149,14 @@ final class SQLiteStore {
 
     func files(matching keyword: String) throws -> [FileRecord] {
         try dbPool.read { db in
-            let pattern = "%\(keyword)%"
+            let escapedKeyword = keyword
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "%", with: "\\%")
+                .replacingOccurrences(of: "_", with: "\\_")
+            let pattern = "%\(escapedKeyword)%"
             return try FileRecord.fetchAll(
                 db,
-                sql: "SELECT * FROM files WHERE name LIKE ? OR title LIKE ? OR content_text LIKE ? ORDER BY mtime DESC LIMIT 200",
+                sql: "SELECT * FROM files WHERE name LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR content_text LIKE ? ESCAPE '\\' ORDER BY mtime DESC LIMIT 200",
                 arguments: [pattern, pattern, pattern]
             )
         }

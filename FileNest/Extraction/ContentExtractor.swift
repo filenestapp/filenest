@@ -44,7 +44,9 @@ enum ContentExtractor {
             }
         }
         if text.count > maxChars { text = String(text.prefix(maxChars)) }
-        let title = doc.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String
+        let metadataTitle = (doc.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = metadataTitle.flatMap { $0.isEmpty ? nil : $0 }
             ?? url.deletingPathExtension().lastPathComponent
         return Extracted(title: title, text: text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
