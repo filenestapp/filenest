@@ -1,97 +1,159 @@
 import SwiftUI
 
-/// 规则视图：查看/编辑分类规则
+/// Organization rules list, strategy selection, and native edit sheet.
 struct RulesView: View {
-    @EnvironmentObject var appState: AppState
-    @State private var editingRule: Rule?
-    @State private var showAdd = false
+    @EnvironmentObject private var appState: AppState
+    @State private var presentedSheet: PresentedSheet? = FileNestEnvironment.isAIRulePreview ? .aiGenerator : nil
+    var embeddedInSettings = false
+
+    private enum PresentedSheet: Identifiable {
+        case editor(Rule)
+        case aiGenerator
+
+        var id: String {
+            switch self {
+            case let .editor(rule): return "editor-\(rule.id.map(String.init) ?? "new")"
+            case .aiGenerator: return "ai-generator"
+            }
+        }
+    }
+
+    private var newRule: Rule {
+        Rule(
+            id: nil,
+            name: "",
+            type: RuleType.rule.rawValue,
+            pattern: "",
+            targetFolder: "Other",
+            priority: 50,
+            enabled: true
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            // 说明
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("整理规则").font(.title2.bold())
-                    Text(appState.settings.classifyStrategy == ClassificationStrategy.rule.rawValue
-                         ? "仅规则：未命中的文件保留在原位。"
-                         : "混合：优先匹配规则，未命中时按扩展名自动归类。")
-                        .font(.caption).foregroundStyle(.secondary)
+            HStack(alignment: .center, spacing: 18) {
+                VStack(alignment: .leading, spacing: embeddedInSettings ? 3 : 6) {
+                    Text("Organization Rules")
+                        .font(.system(size: embeddedInSettings ? 18 : 24, weight: .semibold))
+                    Text("Automatically organize and classify files with rules.")
+                        .font(.system(size: embeddedInSettings ? 11 : 13))
+                        .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Picker("策略", selection: Binding(
-                    get: { appState.settings.classifyStrategy },
-                    set: { appState.settings.setClassifyStrategy($0) }
-                )) {
-                    Text("混合").tag(ClassificationStrategy.hybrid.rawValue)
-                    Text("仅规则").tag(ClassificationStrategy.rule.rawValue)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 160)
-                Button { showAdd = true } label: { Label("新增规则", systemImage: "plus") }
-            }
-            .padding(12)
-            Divider()
-
-            // 规则列表
-            Table(appState.rules) {
-                TableColumn("启用") { r in
-                    Toggle("", isOn: Binding(
-                        get: { r.enabled },
-                        set: { newVal in update(r, enabled: newVal) }
-                    )).labelsHidden().disabled(r.typeEnum == .ai)
-                }.width(50)
-                TableColumn("规则名") { r in Text(r.name) }
-                TableColumn("类型") { r in Text(r.typeEnum == .rule ? "规则" : "AI（停用）") }.width(80)
-                TableColumn("匹配模式") { r in
-                    Text(r.pattern).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                }
-                TableColumn("目标文件夹") { r in Text(r.targetFolder) }.width(120)
-                TableColumn("优先级") { r in Text("\(r.priority)") }.width(60)
-                TableColumn("") { r in
-                    HStack {
-                        Button { editingRule = r } label: { Image(systemName: "pencil") }
-                            .buttonStyle(.borderless)
-                        Button { delete(r) } label: { Image(systemName: "trash") }
-                            .buttonStyle(.borderless)
+                Spacer(minLength: 20)
+                HStack(spacing: 12) {
+                    Picker("Strategy", selection: Binding(
+                        get: { appState.settings.classifyStrategy },
+                        set: { appState.settings.setClassifyStrategy($0) }
+                    )) {
+                        Text("Hybrid").tag(ClassificationStrategy.hybrid.rawValue)
+                        Text("Rules Only").tag(ClassificationStrategy.rule.rawValue)
                     }
-                }.width(64)
+                    .pickerStyle(.segmented)
+                    .frame(width: 150)
+
+                    Button {
+                        presentedSheet = .aiGenerator
+                    } label: {
+                        Label("Generate with AI", systemImage: "sparkles")
+                    }
+                    .buttonStyle(.bordered)
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .simultaneousGesture(TapGesture().onEnded {
+                        presentedSheet = .aiGenerator
+                    })
+
+                    Button {
+                        presentedSheet = .editor(newRule)
+                    } label: {
+                        Label("New Rule", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(FileNestTheme.accent)
+                    .keyboardShortcut("n", modifiers: [.command])
+                    .simultaneousGesture(TapGesture().onEnded {
+                        presentedSheet = .editor(newRule)
+                    })
+                }
+            }
+            .padding(.horizontal, 28)
+            .frame(height: embeddedInSettings ? 72 : 96)
+            .background(FileNestTheme.surface)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(FileNestTheme.border).frame(height: 1)
             }
 
-            Divider()
+            VStack(spacing: 0) {
+                RuleColumnHeader()
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(appState.rules) { rule in
+                            RuleRow(
+                                rule: rule,
+                                setEnabled: { update(rule, enabled: $0) },
+                                edit: {
+                                    presentedSheet = .editor(rule)
+                                },
+                                delete: { delete(rule) }
+                            )
+                            Divider().padding(.leading, 26)
+                        }
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 18)
+                }
 
-            // 归类目标说明
-            VStack(alignment: .leading, spacing: 4) {
-                Label("整理目标目录", systemImage: "folder")
-                    .font(.headline)
-                Text(appState.organizer.organizeRoot.path)
-                    .font(.caption).foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                Text("归类后的文件会移动到该目录下按分类命名的子文件夹中。")
-                    .font(.caption2).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Image(systemName: "folder")
+                        .foregroundStyle(FileNestTheme.accent)
+                    Text("Organization Destination")
+                        .font(.system(size: 11, weight: .medium))
+                    Text(appState.organizer.organizeRoot.tildeAbbreviatedPath)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Spacer()
+                    Text(LocalizedStringKey(
+                        appState.settings.classifyStrategy == ClassificationStrategy.rule.rawValue
+                            ? "Unmatched files remain in place"
+                            : "Unmatched files are classified by extension"
+                    ))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 28)
+                .frame(height: 54)
+                .background(FileNestTheme.elevatedSurface.opacity(0.45))
+                .overlay(alignment: .top) {
+                    Rectangle().fill(FileNestTheme.border).frame(height: 1)
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
         }
-        .sheet(item: $editingRule) { rule in
-            RuleEditor(rule: rule) { saved in
-                _ = try? appState.store.upsertRule(saved)
-                appState.rules = (try? appState.store.allRules()) ?? []
-                editingRule = nil
-            }
-        }
-        .sheet(isPresented: $showAdd) {
-            RuleEditor(rule: Rule(id: nil, name: "", type: "rule", pattern: "", targetFolder: "其他", priority: 0, enabled: true)) { saved in
-                _ = try? appState.store.upsertRule(saved)
-                appState.rules = (try? appState.store.allRules()) ?? []
-                showAdd = false
+        .background(FileNestTheme.surface)
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case let .editor(rule):
+                RuleEditor(rule: rule) { saved in
+                    _ = try? appState.store.upsertRule(saved)
+                    appState.rules = (try? appState.store.allRules()) ?? []
+                    presentedSheet = nil
+                }
+            case .aiGenerator:
+                AIRuleGeneratorSheet { rule, applyImmediately in
+                    _ = try? appState.store.upsertRule(rule)
+                    appState.rules = (try? appState.store.allRules()) ?? []
+                    presentedSheet = nil
+                    if applyImmediately { appState.organizeNow() }
+                }
+                .environmentObject(appState)
             }
         }
     }
 
     private func update(_ rule: Rule, enabled: Bool) {
-        var r = rule
-        r.enabled = enabled
-        _ = try? appState.store.upsertRule(r)
+        var updated = rule
+        updated.enabled = enabled
+        _ = try? appState.store.upsertRule(updated)
         appState.rules = (try? appState.store.allRules()) ?? []
     }
 
@@ -102,10 +164,100 @@ struct RulesView: View {
     }
 }
 
+private struct RuleColumnHeader: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Rule Name").frame(maxWidth: .infinity, alignment: .leading)
+            Text("Type").frame(width: 110, alignment: .leading)
+            Text("Condition").frame(width: 220, alignment: .leading)
+            Text("Action").frame(width: 130, alignment: .leading)
+            Text("Priority").frame(width: 62, alignment: .center)
+            Text("Enabled").frame(width: 54, alignment: .center)
+            Text("Actions").frame(width: 54, alignment: .center)
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 28)
+        .frame(height: 48)
+        .background(FileNestTheme.elevatedSurface.opacity(0.42))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(FileNestTheme.border).frame(height: 1)
+        }
+    }
+}
+
+private struct RuleRow: View {
+    let rule: Rule
+    let setEnabled: (Bool) -> Void
+    let edit: () -> Void
+    let delete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(rule.name)
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(LocalizedStringKey(rule.typeEnum == .rule ? "Rule (by extension)" : "AI Generated"))
+                .frame(width: 110, alignment: .leading)
+
+            Text(rule.pattern)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 220, alignment: .leading)
+
+            Label {
+                if rule.actionEnum == .ignore {
+                    Text("Do Not Process")
+                } else {
+                    Text(rule.targetFolder)
+                }
+            } icon: {
+                Image(systemName: rule.actionEnum == .ignore ? "hand.raised.fill" : "folder")
+            }
+                .foregroundStyle(rule.actionEnum == .ignore ? FileNestTheme.warning : FileNestTheme.accent)
+                .frame(width: 130, alignment: .leading)
+
+            Text("\(rule.priority)")
+                .frame(width: 62, alignment: .center)
+
+            Toggle("", isOn: Binding(
+                get: { rule.enabled },
+                set: setEnabled
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .labelsHidden()
+            .frame(width: 54)
+
+            Menu {
+                Button("Edit", action: edit)
+                Divider()
+                Button("Delete", role: .destructive, action: delete)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 30, height: 30)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 54)
+        }
+        .font(.system(size: 11))
+        .frame(minHeight: 58)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button("Edit", action: edit)
+            Button("Delete", role: .destructive, action: delete)
+        }
+    }
+}
+
 struct RuleEditor: View {
+    @EnvironmentObject private var appState: AppState
     @State var rule: Rule
     let onSave: (Rule) -> Void
-    @Environment(\.dismiss) var dismiss
+    @Environment(\.dismiss) private var dismiss
 
     private var validatedTargetFolder: String? {
         OrganizationTarget.folderName(from: rule.targetFolder)
@@ -114,52 +266,251 @@ struct RuleEditor: View {
     private var canSave: Bool {
         !rule.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !rule.pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        validatedTargetFolder != nil &&
-        rule.type == RuleType.rule.rawValue
+        (rule.actionEnum == .ignore || validatedTargetFolder != nil) &&
+        RuleType(rawValue: rule.type) != nil
+    }
+
+    private var normalizedExtensions: String {
+        rule.pattern
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
+            .filter { !$0.isEmpty }
+            .joined(separator: "、")
     }
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text(rule.id == nil ? "新增规则" : "编辑规则").font(.headline)
+        VStack(spacing: 0) {
+            HStack {
+                Text(LocalizedStringKey(rule.id == nil ? "New Organization Rule" : "Edit Organization Rule"))
+                    .font(.system(size: 20, weight: .semibold))
+                Spacer()
+            }
+            .padding(.horizontal, 24)
+            .frame(height: 72)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(FileNestTheme.border).frame(height: 1)
+            }
+
             Form {
-                TextField("规则名", text: $rule.name)
-                if rule.type == RuleType.ai.rawValue {
-                    Picker("类型", selection: $rule.type) {
-                        Text("规则（按扩展名）").tag(RuleType.rule.rawValue)
-                        Text("AI（尚未实现）").tag(RuleType.ai.rawValue)
+                TextField("Rule Name", text: $rule.name)
+
+                LabeledContent("Type") {
+                    Text(LocalizedStringKey(rule.type == RuleType.rule.rawValue ? "Rule (by extension)" : "AI Generated (Deterministic Rule)"))
+                        .foregroundStyle(.secondary)
+                }
+
+                TextField("Matching Extensions", text: $rule.pattern)
+                Text("Separate extensions with commas; higher-priority rules match first.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+
+                Picker("When Matched", selection: $rule.action) {
+                    Text("Organize into Folder").tag(RuleAction.organize.rawValue)
+                    Text("Do Not Process").tag(RuleAction.ignore.rawValue)
+                }
+                .pickerStyle(.segmented)
+
+                if rule.actionEnum == .organize {
+                    TextField("Destination Folder", text: $rule.targetFolder)
+                    if !rule.targetFolder.isEmpty && validatedTargetFolder == nil {
+                        Text("The destination must be one folder name and cannot contain /, \\, :, . or ...")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red)
                     }
-                    Text("AI 规则当前不会执行。请改为扩展名规则后再保存。")
-                        .font(.caption2).foregroundStyle(.orange)
                 } else {
-                    LabeledContent("类型", value: "规则（按扩展名）")
+                    Text("Matched files stay in their original location and are excluded from automatic organization.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
                 }
-                TextField("匹配模式（逗号分隔扩展名，如 pdf,doc,md）", text: $rule.pattern, axis: .vertical)
-                    .lineLimit(2...4)
-                TextField("目标文件夹（如 文档 / 合同 / 发票）", text: $rule.targetFolder)
-                if !rule.targetFolder.isEmpty && validatedTargetFolder == nil {
-                    Text("目标文件夹必须是单个名称，不能包含 /、\\、:，也不能是 . 或 ..")
-                        .font(.caption2).foregroundStyle(.red)
-                }
-                Stepper("优先级：\(rule.priority)", value: $rule.priority, in: 0...100)
-                Toggle("启用", isOn: $rule.enabled)
+
+                Stepper(
+                    appState.settings.localizedFormat("Priority %d", rule.priority),
+                    value: $rule.priority,
+                    in: 0...100
+                )
+                Toggle("Enabled", isOn: $rule.enabled)
             }
             .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
 
-            HStack {
-                Button("取消") { dismiss() }
+            HStack(spacing: 10) {
+                Image(systemName: canSave ? "checkmark.circle" : "info.circle")
+                    .foregroundStyle(canSave ? FileNestTheme.success : .secondary)
+                if canSave {
+                    Text(rule.actionEnum == .ignore
+                         ? appState.settings.localizedFormat("%@ files will stay in their original location", normalizedExtensions)
+                         : appState.settings.localizedFormat(
+                            "%@ files will be moved to “%@”",
+                            normalizedExtensions,
+                            validatedTargetFolder ?? rule.targetFolder
+                         ))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text("Enter a rule name, extensions, and a valid destination folder to save.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
-                Button("保存") {
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 54)
+            .background(FileNestTheme.elevatedSurface.opacity(0.52))
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(FileNestTheme.border, lineWidth: 1)
+            }
+            .padding(.horizontal, 24)
+
+            HStack(spacing: 12) {
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(QuietButtonStyle())
+                Spacer()
+                Button("Save Rule") {
                     var saved = rule
                     saved.name = saved.name.trimmingCharacters(in: .whitespacesAndNewlines)
                     saved.targetFolder = validatedTargetFolder ?? saved.targetFolder
                     onSave(saved)
                     dismiss()
                 }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canSave)
+                .buttonStyle(GradientButtonStyle())
+                .disabled(!canSave)
+                .opacity(canSave ? 1 : 0.5)
             }
-            .padding()
+            .padding(24)
         }
-        .frame(width: 460, height: 460)
+        .frame(width: 520, height: 590)
+        .background(FileNestTheme.surface)
+    }
+}
+
+private struct AIRuleGeneratorSheet: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var request = ""
+    @State private var draft: Rule?
+    @State private var isGenerating = false
+    @State private var errorMessage: String?
+    @State private var applyImmediately = true
+    let onSave: (Rule, Bool) -> Void
+
+    private var canSave: Bool {
+        guard let draft else { return false }
+        return !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !draft.pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            OrganizationTarget.folderName(from: draft.targetFolder) != nil
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(FileNestTheme.accent)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("AI Organization Rule")
+                        .font(.system(size: 20, weight: .semibold))
+                    Text("Describe your organization habits and AI will create a reviewable extension rule that runs automatically.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 24)
+            .frame(height: 76)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(FileNestTheme.border).frame(height: 1)
+            }
+
+            Form {
+                Section("Rule Description") {
+                    TextEditor(text: $request)
+                        .font(.system(size: 12))
+                        .frame(minHeight: 74)
+                    Text("Example: Move PDF, Word, and Excel contracts to ‘Client Contracts’ with priority 90.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+
+                    Button {
+                        Task { await generate() }
+                    } label: {
+                        if isGenerating {
+                            HStack(spacing: 7) {
+                                ProgressView().controlSize(.small)
+                                Text("Generating")
+                            }
+                        } else {
+                            Label {
+                                Text(LocalizedStringKey(draft == nil ? "Generate Rule" : "Regenerate"))
+                            } icon: {
+                                Image(systemName: "sparkles")
+                            }
+                        }
+                    }
+                    .disabled(isGenerating || request.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                if let draftBinding = Binding($draft) {
+                    Section("Generated Result (editable before saving)") {
+                        TextField("Rule Name", text: draftBinding.name)
+                        TextField("Extensions (comma-separated)", text: draftBinding.pattern)
+                        TextField("Destination Folder", text: draftBinding.targetFolder)
+                        Stepper(
+                            appState.settings.localizedFormat(
+                                "Priority %d",
+                                draftBinding.wrappedValue.priority
+                            ),
+                            value: draftBinding.priority,
+                            in: 0...100
+                        )
+                        Toggle("Enable Rule", isOn: draftBinding.enabled)
+                        Toggle("Organize Existing Files After Saving", isOn: $applyImmediately)
+                    }
+                }
+
+                if let errorMessage {
+                    Label(
+                        appState.settings.localizedRuntimeMessage(errorMessage),
+                        systemImage: "exclamationmark.triangle"
+                    )
+                        .font(.system(size: 10))
+                        .foregroundStyle(FileNestTheme.warning)
+                }
+            }
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(QuietButtonStyle())
+                Spacer()
+                Button("Save & Enable") {
+                    guard var draft else { return }
+                    draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    draft.targetFolder = OrganizationTarget.folderName(from: draft.targetFolder) ?? draft.targetFolder
+                    onSave(draft, applyImmediately)
+                    dismiss()
+                }
+                .buttonStyle(GradientButtonStyle())
+                .disabled(!canSave)
+                .opacity(canSave ? 1 : 0.5)
+            }
+            .padding(24)
+        }
+        .frame(width: 580, height: 650)
+        .background(FileNestTheme.surface)
+    }
+
+    private func generate() async {
+        isGenerating = true
+        errorMessage = nil
+        defer { isGenerating = false }
+        do {
+            draft = try await AIRuleGenerator(provider: appState.settings.makeLLMProvider())
+                .generate(from: request)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }

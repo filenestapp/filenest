@@ -42,4 +42,30 @@ final class FileStabilityTrackerTests: XCTestCase {
         XCTAssertFalse(tracker.isStable(path: "/tmp/file.pdf", snapshot: snapshot,
                                         observedAt: start.addingTimeInterval(3), minimumStableDuration: 2))
     }
+
+    func testChangingDirectoryTreeRestartsStableDuration() {
+        var tracker = DirectoryStabilityTracker()
+        let start = Date(timeIntervalSince1970: 1_000)
+        let cloning = DirectorySnapshot(
+            fileCount: 10,
+            totalSize: 1_000,
+            latestModificationDate: start,
+            signature: "clone-in-progress"
+        )
+        let completed = DirectorySnapshot(
+            fileCount: 20,
+            totalSize: 2_000,
+            latestModificationDate: start.addingTimeInterval(5),
+            signature: "clone-complete"
+        )
+
+        XCTAssertFalse(tracker.isStable(path: "/tmp/repo", snapshot: cloning,
+                                        observedAt: start, minimumStableDuration: 10))
+        XCTAssertFalse(tracker.isStable(path: "/tmp/repo", snapshot: completed,
+                                        observedAt: start.addingTimeInterval(5), minimumStableDuration: 10))
+        XCTAssertFalse(tracker.isStable(path: "/tmp/repo", snapshot: completed,
+                                        observedAt: start.addingTimeInterval(14), minimumStableDuration: 10))
+        XCTAssertTrue(tracker.isStable(path: "/tmp/repo", snapshot: completed,
+                                       observedAt: start.addingTimeInterval(15), minimumStableDuration: 10))
+    }
 }

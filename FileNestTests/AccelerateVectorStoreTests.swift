@@ -44,6 +44,56 @@ final class AccelerateVectorStoreTests: XCTestCase {
         XCTAssertEqual(hits.first?.score ?? 0, 1, accuracy: 0.0001)
     }
 
+    func testSQLiteVecSearchPreservesStructuredMetadataAndFindsNeighbors() async throws {
+        let fileId = try insertFile(named: "manual.pdf")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let replaced = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [
+                EmbeddingChunk(
+                    vector: [1, 0, 0],
+                    text: "Installation overview",
+                    sectionPath: ["Guide", "Installation"],
+                    pageStart: 4,
+                    pageEnd: 4,
+                    kind: .title
+                ),
+                EmbeddingChunk(
+                    vector: [0.98, 0.02, 0],
+                    text: "Run the installer",
+                    sectionPath: ["Guide", "Installation"],
+                    pageStart: 5,
+                    pageEnd: 5,
+                    kind: .text
+                ),
+                EmbeddingChunk(
+                    vector: [0, 1, 0],
+                    text: "Configuration table",
+                    sectionPath: ["Guide", "Configuration"],
+                    pageStart: 8,
+                    pageEnd: 9,
+                    kind: .table
+                ),
+            ],
+            model: "test-model"
+        )
+        XCTAssertTrue(replaced)
+
+        let version = try await store.dbPool.read { db in try String.fetchOne(db, sql: "SELECT vec_version()") }
+        XCTAssertNotNil(version)
+        let hits = await vectorStore.searchChunks([1, 0, 0], k: 1)
+        let hit = try XCTUnwrap(hits.first)
+        XCTAssertEqual(hit.fileId, fileId)
+        XCTAssertEqual(hit.chunkIndex, 0)
+        XCTAssertEqual(hit.sectionPath, ["Guide", "Installation"])
+        XCTAssertEqual(hit.pageStart, 4)
+        XCTAssertEqual(hit.kind, .title)
+
+        let neighbors = await vectorStore.neighboringChunks(fileId: fileId, around: 1, radius: 1)
+        XCTAssertEqual(neighbors.map(\.chunkIndex), [0, 1, 2])
+        XCTAssertEqual(neighbors.last?.kind, .table)
+    }
+
     func testReplacingOneFileKeepsOtherFilesInMemoryAndSQLite() async throws {
         let firstId = try insertFile(named: "first.md")
         let secondId = try insertFile(named: "second.md")
@@ -71,6 +121,25 @@ final class AccelerateVectorStoreTests: XCTestCase {
         XCTAssertEqual(vectorStore.count, 2)
         try assertPersistedChunks(fileId: firstId, expectedIndexes: [0])
         try assertPersistedChunks(fileId: secondId, expectedIndexes: [0])
+    }
+
+    func testRemoveAllClearsPersistedAndInMemoryVectorSpace() async throws {
+        let fileId = try insertFile(named: "notes.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let replaced = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(vector: [1, 0], text: "old model")],
+            model: "old-model"
+        )
+        XCTAssertTrue(replaced)
+
+        let removed = await vectorStore.removeAll()
+        XCTAssertTrue(removed)
+
+        XCTAssertEqual(vectorStore.count, 0)
+        try assertPersistedChunks(fileId: fileId, expectedIndexes: [])
+        let hits = await vectorStore.search([1, 0], k: 1)
+        XCTAssertTrue(hits.isEmpty)
     }
 
     func testVectorEncodingRoundTripsAndRejectsMalformedData() {
@@ -127,6 +196,42 @@ final class AccelerateVectorStoreTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(hits.first).score, 1, accuracy: 0.0001)
     }
 
+    func testNoteUpdateAndRemovalPreserveBodyVectors() async throws {
+        let fileID = try insertFile(named: "brief.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let initialReplaceSucceeded = await vectorStore.replace(
+            fileId: fileID,
+            chunks: [
+                EmbeddingChunk(vector: [1, 0], text: "Brief", kind: .title),
+                EmbeddingChunk(vector: [0, 1], text: "Original body", kind: .text),
+            ],
+            model: "test-model"
+        )
+        XCTAssertTrue(initialReplaceSucceeded)
+
+        let noteUpdateSucceeded = await vectorStore.updateNote(
+            fileId: fileID,
+            chunk: EmbeddingChunk(vector: [0.7, 0.3], text: "User note: Urgent", kind: .note),
+            model: "test-model"
+        )
+        XCTAssertTrue(noteUpdateSucceeded)
+        var chunks = try store.documentChunks(fileID: fileID)
+        XCTAssertEqual(chunks.filter { $0.kind == .title }.map(\.text), ["Brief"])
+        XCTAssertEqual(chunks.filter { $0.kind == .text }.map(\.text), ["Original body"])
+        XCTAssertEqual(chunks.filter { $0.kind == .note }.map(\.text), ["User note: Urgent"])
+        XCTAssertEqual(vectorStore.count, 3)
+
+        let noteRemovalSucceeded = await vectorStore.updateNote(
+            fileId: fileID,
+            chunk: nil,
+            model: "test-model"
+        )
+        XCTAssertTrue(noteRemovalSucceeded)
+        chunks = try store.documentChunks(fileID: fileID)
+        XCTAssertEqual(chunks.map(\.kind), [.title, .text])
+        XCTAssertEqual(vectorStore.count, 2)
+    }
+
     func testSearchRejectsInvalidLimitAndQuery() async throws {
         let fileId = try insertFile(named: "notes.md")
         let vectorStore = AccelerateVectorStore(store: store)
@@ -167,6 +272,27 @@ final class AccelerateVectorStoreTests: XCTestCase {
 
         XCTAssertEqual(hits.map(\.fileId), [firstId, secondId])
         XCTAssertEqual(hits.first?.score ?? 0, 1, accuracy: 0.0001)
+    }
+
+    func testFileScopedChunkSearchNeverReturnsAnotherFilesChunks() async throws {
+        let selectedID = try insertFile(named: "selected.md")
+        let otherID = try insertFile(named: "other.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        _ = await vectorStore.replace(
+            fileId: selectedID,
+            chunks: [EmbeddingChunk(vector: [0.8, 0.2], text: "selected file answer")],
+            model: "test-model"
+        )
+        _ = await vectorStore.replace(
+            fileId: otherID,
+            chunks: [EmbeddingChunk(vector: [1, 0], text: "globally closer but wrong file")],
+            model: "test-model"
+        )
+
+        let hits = await vectorStore.searchChunks([1, 0], fileId: selectedID, k: 4)
+
+        XCTAssertEqual(hits.map(\.fileId), [selectedID])
+        XCTAssertEqual(hits.first?.chunkText, "selected file answer")
     }
 
     private func insertFile(named name: String) throws -> Int64 {

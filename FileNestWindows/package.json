@@ -1,0 +1,87 @@
+{
+  "name": "filenest-windows",
+  "version": "0.2.0",
+  "description": "FileNest for Windows - local-first intelligent file organizer and search assistant",
+  "main": "out/main/index.js",
+  "author": "FileNest",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package:win": "npm run build && electron-builder --win nsis portable --x64 --arm64 --publish never",
+    "package:dir": "npm run build && electron-builder --dir"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "chokidar": "^4.0.3",
+    "electron-updater": "^6.6.2",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.468.0",
+    "mammoth": "^1.9.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^9.0.3",
+    "remark-gfm": "^4.0.0",
+    "sql.js": "^1.12.0",
+    "tesseract.js": "^6.0.1"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.3",
+    "@types/react-dom": "^19.0.2",
+    "@types/sql.js": "^1.4.9",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^43.1.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^3.2.7"
+  },
+  "build": {
+    "appId": "com.local.filenest.windows",
+    "productName": "FileNest",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/sql.js/dist/sql-wasm.wasm",
+        "to": "sql-wasm.wasm"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "resources/app-icon.png",
+      "artifactName": "FileNest-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "artifactName": "FileNest-Setup-${version}-${arch}.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "FileNest-Portable-${version}-${arch}.${ext}"
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://updates.invalid/filenest/windows/"
+    }
+  }
+}

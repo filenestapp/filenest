@@ -12,3 +12,7 @@ xcuserdata/
 
 # Local tooling
 .zcode/
+
+# Root-level artifacts accidentally emitted by frontend and coverage tooling
+/*.js
+/default.profraw

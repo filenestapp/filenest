@@ -1,13 +1,13 @@
 import Foundation
 
-/// 规则分类器：基于 DB 规则表 + 内置扩展名大类。
-/// hybrid 模式 = 先匹配规则，无命中则回退到扩展名大类。
+/// Rule-based classifier backed by the database rule table and built-in extension categories.
+/// Hybrid mode matches rules first, then falls back to the extension category.
 final class RuleClassifier: Classifier {
     private let rules: [Rule]
     private let strategy: ClassificationStrategy
 
     init(rules: [Rule], strategy: String) {
-        // 按优先级降序
+        // Sort by descending priority.
         self.rules = rules.filter { $0.enabled }.sorted { $0.priority > $1.priority }
         self.strategy = ClassificationStrategy(storedValue: strategy)
     }
@@ -15,18 +15,19 @@ final class RuleClassifier: Classifier {
     func classify(_ file: FileRecord) -> ClassificationDecision? {
         let ext = file.ext.lowercased()
 
-        // 规则匹配（rule 类型：pattern 是逗号分隔的扩展名列表）
-        for rule in rules where rule.type == RuleType.rule.rawValue {
+        // Manual and AI-generated rules are both stored as deterministic extension conditions and use the same execution path.
+        for rule in rules where rule.type == RuleType.rule.rawValue || rule.type == RuleType.ai.rawValue {
             let extensions = rule.pattern.split(separator: ",").map {
                 let value = $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 return value.hasPrefix(".") ? String(value.dropFirst()) : value
             }
             if extensions.contains(ext),
-               let targetFolder = OrganizationTarget.folderName(from: rule.targetFolder) {
+               (rule.actionEnum == .ignore || OrganizationTarget.folderName(from: rule.targetFolder) != nil) {
                 return ClassificationDecision(
                     category: FileCategory.from(extension: ext),
-                    targetFolder: targetFolder,
-                    matchedRuleID: rule.id
+                    targetFolder: OrganizationTarget.folderName(from: rule.targetFolder) ?? "Ignored",
+                    matchedRuleID: rule.id,
+                    action: rule.actionEnum
                 )
             }
         }
@@ -41,7 +42,7 @@ final class RuleClassifier: Classifier {
     }
 }
 
-/// 整理失败类型，区分移动、数据库更新和物理回滚失败。
+/// Organization failure types distinguish move, database update, and physical rollback failures.
 enum OrganizerError: LocalizedError {
     case moveFailed(fileName: String, reason: String)
     case databaseUpdateFailed(fileName: String, reason: String)
@@ -59,20 +60,27 @@ enum OrganizerError: LocalizedError {
     }
 }
 
-/// 整理服务：执行文件移动到「目标根/分类子文件夹」，处理冲突 + 撤销记录。
+/// Organization service that moves files to the destination root and category subfolder, handling conflicts and undo records.
 final class OrganizerService {
     typealias MoveItem = (URL, URL) throws -> Void
+    typealias SubfolderResolver = (FileRecord) async -> String?
 
     private let store: SQLiteStore
     private let settings: AppSettings
     private let organizeRootOverride: URL?
     private let strategyOverride: ClassificationStrategy?
     private let moveItem: MoveItem
+    private let subfolderResolver: SubfolderResolver?
+    private let scheduleQueue = DispatchQueue(label: "filenest.organizer.schedule")
+    private var pendingFileIDs = Set<Int64>()
+    private var scheduledWorkItem: DispatchWorkItem?
+    var onLibraryChange: (() -> Void)?
 
     init(store: SQLiteStore,
          settings: AppSettings,
          organizeRoot: URL? = nil,
          strategy: ClassificationStrategy? = nil,
+         subfolderResolver: SubfolderResolver? = nil,
          moveItem: @escaping MoveItem = { source, destination in
              try FileManager.default.moveItem(at: source, to: destination)
          }) {
@@ -80,49 +88,143 @@ final class OrganizerService {
         self.settings = settings
         self.organizeRootOverride = organizeRoot
         self.strategyOverride = strategy
+        self.subfolderResolver = subfolderResolver
         self.moveItem = moveItem
     }
 
-    /// 目标根目录：默认在用户主目录建一个 FileNestOrganized 目录，按分类分子文件夹。
+    /// Destination root: creates FileNestOrganized in the user's home directory by default, with one subfolder per category.
     var organizeRoot: URL {
         organizeRootOverride
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("FileNestOrganized")
     }
 
-    /// 对一个已入 DB 的文件执行归类
+    /// Synchronous organization entry point for deterministic rules and tests; unmatched files go to the Uncategorized subfolder.
     func organize(fileId: Int64) throws {
-        guard var file = try store.file(id: fileId) else { return }
+        guard let file = try store.file(id: fileId),
+              let decision = classificationDecision(for: file) else { return }
+        guard decision.action == .organize else {
+            AppLogService.shared.write("entry ignored by rule", category: .organizeRules,
+                                       metadata: ["entry": file.name])
+            return
+        }
+        let subfolder = decision.matchedRuleID == nil ? "Uncategorized" : decision.targetFolder
+        try move(fileId: fileId, decision: decision, subfolder: subfolder)
+    }
+
+    /// Production organization entry point: the extension determines the primary folder, while rules or AI derive the secondary folder from the title, note, and body.
+    func organizeUsingAI(fileId: Int64) async throws {
+        guard let file = try store.file(id: fileId),
+              let decision = classificationDecision(for: file) else { return }
+        guard decision.action == .organize else {
+            AppLogService.shared.write("entry ignored by rule", category: .organizeRules,
+                                       metadata: ["entry": file.name])
+            return
+        }
+        let subfolder: String
+        if decision.matchedRuleID != nil {
+            subfolder = decision.targetFolder
+        } else if let resolved = await resolveSubfolder(for: file) {
+            subfolder = resolved
+        } else if let existing = file.organizationSubfolder,
+                  OrganizationTarget.folderName(from: existing) != nil {
+            subfolder = existing
+        } else {
+            subfolder = "Uncategorized"
+        }
+        try move(fileId: fileId, decision: decision, subfolder: subfolder)
+    }
+
+    private func classificationDecision(for file: FileRecord) -> ClassificationDecision? {
+        if file.isDirectory {
+            return ClassificationDecision(
+                category: file.categoryEnum,
+                targetFolder: file.categoryEnum.folderName,
+                matchedRuleID: nil
+            )
+        }
         let rules = (try? store.allRules()) ?? []
         let strategy = strategyOverride?.rawValue ?? settings.classifyStrategy
         let classifier = RuleClassifier(rules: rules, strategy: strategy)
         guard let decision = classifier.classify(file) else {
-            NSLog("[Organizer] no matching rule for \(file.name); keeping file in place")
-            return
+            AppLogService.shared.write("no matching rule; keeping entry in place",
+                                       category: .organizeRules, level: .notice,
+                                       metadata: ["entry": file.name])
+            return nil
+        }
+        // Legacy built-in rules only select the primary file-type folder; do not let a Documents-to-Documents match block the new AI secondary classification.
+        if decision.targetFolder == decision.category.folderName {
+            return ClassificationDecision(
+                category: decision.category,
+                targetFolder: decision.targetFolder,
+                matchedRuleID: nil
+            )
+        }
+        return decision
+    }
+
+    private func resolveSubfolder(for file: FileRecord) async -> String? {
+        if let subfolderResolver,
+           let value = await subfolderResolver(file),
+           let safeValue = OrganizationTarget.folderName(from: value) {
+            return safeValue
+        }
+        return await FileSubfolderClassifier(provider: settings.makeLLMProvider()).classify(file)
+    }
+
+    private func move(fileId: Int64,
+                      decision: ClassificationDecision,
+                      subfolder: String) throws {
+        guard var file = try store.file(id: fileId),
+              let safeSubfolder = OrganizationTarget.folderName(from: subfolder) else { return }
+
+        if file.isDirectory {
+            guard let current = DirectoryInspector.inspect(URL(fileURLWithPath: file.path)),
+                  current.snapshot.signature == file.contentHash else {
+                AppLogService.shared.write("directory changed after indexing; waiting for stability",
+                                           category: .organizeMove, level: .warning,
+                                           metadata: ["entry": file.name])
+                return
+            }
         }
 
-        let destDir = organizeRoot.appendingPathComponent(decision.targetFolder)
+        let destDir = organizeRoot
+            .appendingPathComponent(decision.category.folderName, isDirectory: true)
+            .appendingPathComponent(safeSubfolder, isDirectory: true)
         try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
         let src = URL(fileURLWithPath: file.path)
         let dst = destDir.appendingPathComponent(file.name)
         guard FileManager.default.fileExists(atPath: src.path) else { return }
         guard src.path != dst.path else { return }
 
-        // 冲突处理：同名则追加编号
+        // Resolve name conflicts by appending a number.
         let finalDst = resolveConflict(at: dst)
 
         do {
             try moveItem(src, finalDst)
         } catch {
             let reason = String(describing: error)
-            NSLog("[Organizer] move failed for \(file.name): \(reason)")
+            AppLogService.shared.write("move failed: \(reason)", category: .organizeMove,
+                                       level: .error, metadata: ["entry": file.name])
             throw OrganizerError.moveFailed(fileName: file.name, reason: reason)
         }
 
         file.path = finalDst.path
         file.category = decision.category.rawValue
+        file.organizedAt = Date()
+        file.organizationSubfolder = safeSubfolder
         do {
             _ = try store.upsertFile(file)
-            NSLog("[Organizer] moved \(src.lastPathComponent) → \(finalDst.path)")
+            AppLogService.shared.write(
+                "entry moved",
+                category: .organizeMove,
+                metadata: [
+                    "entry": src.lastPathComponent,
+                    "category": decision.category.rawValue,
+                    "subfolder": safeSubfolder,
+                    "destinationName": finalDst.lastPathComponent,
+                ]
+            )
+            onLibraryChange?()
         } catch {
             let databaseError = error
             do {
@@ -130,7 +232,12 @@ final class OrganizerService {
             } catch {
                 let databaseReason = String(describing: databaseError)
                 let rollbackReason = String(describing: error)
-                NSLog("[Organizer] database update failed for \(file.name): \(databaseReason); rollback failed: \(rollbackReason)")
+                AppLogService.shared.write(
+                    "database update and move rollback failed: \(databaseReason); \(rollbackReason)",
+                    category: .organizeMove,
+                    level: .error,
+                    metadata: ["entry": file.name]
+                )
                 throw OrganizerError.rollbackFailed(
                     fileName: file.name,
                     databaseReason: databaseReason,
@@ -138,13 +245,103 @@ final class OrganizerService {
                 )
             }
             let reason = String(describing: databaseError)
-            NSLog("[Organizer] database update failed for \(file.name); move rolled back: \(reason)")
+            AppLogService.shared.write("database update failed; move rolled back: \(reason)",
+                                       category: .organizeMove, level: .error,
+                                       metadata: ["entry": file.name])
             throw OrganizerError.databaseUpdateFailed(fileName: file.name, reason: reason)
         }
     }
 
-    /// 手动触发：扫描所有监听目录下的文件入 DB 并归类一次
+    /// Called after the watcher finishes indexing. Batched mode runs when either the item threshold or maximum wait is reached.
+    func enqueue(fileId: Int64) {
+        guard settings.autoOrganize else { return }
+        if AppSettings.AutoOrganizeMode(rawValue: settings.autoOrganizeMode) == .immediate {
+            AppLogService.shared.write("immediate organization queued", category: .organizeQueue,
+                                       level: .debug, metadata: ["fileID": "\(fileId)"])
+            process([fileId])
+            return
+        }
+        scheduleQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingFileIDs.insert(fileId)
+            if self.pendingFileIDs.count >= self.settings.autoOrganizeBatchSize {
+                self.drainPendingLocked()
+            } else {
+                self.armTimerLocked()
+            }
+        }
+    }
+
+    func reschedulePending() {
+        scheduleQueue.async { [weak self] in
+            guard let self else { return }
+            self.scheduledWorkItem?.cancel()
+            self.scheduledWorkItem = nil
+            guard self.settings.autoOrganize else {
+                self.pendingFileIDs.removeAll()
+                return
+            }
+            if AppSettings.AutoOrganizeMode(rawValue: self.settings.autoOrganizeMode) == .immediate {
+                self.drainPendingLocked()
+            } else if !self.pendingFileIDs.isEmpty {
+                self.armTimerLocked()
+            }
+        }
+    }
+
+    private func armTimerLocked() {
+        scheduledWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.drainPendingLocked() }
+        scheduledWorkItem = work
+        let delay = max(30, settings.autoOrganizeIntervalSeconds)
+        scheduleQueue.asyncAfter(deadline: .now() + .seconds(delay), execute: work)
+    }
+
+    private func drainPendingLocked() {
+        scheduledWorkItem?.cancel()
+        scheduledWorkItem = nil
+        let ids = pendingFileIDs.sorted()
+        pendingFileIDs.removeAll()
+        AppLogService.shared.write("organization batch started", category: .organizeQueue,
+                                   metadata: ["files": "\(ids.count)"])
+        process(ids)
+    }
+
+    private func process(_ ids: [Int64]) {
+        guard !ids.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            for id in ids {
+                do {
+                    try await self.organizeUsingAI(fileId: id)
+                } catch {
+                    AppLogService.shared.write("scheduled organization failed: \(error)",
+                                               category: .organizeQueue, level: .error,
+                                               metadata: ["fileID": "\(id)"])
+                }
+            }
+        }
+    }
+
+    /// Manual trigger: scans files from every watched folder into the database and classifies them once.
     func runOnce() {
+        AppLogService.shared.write("manual organization scan started", category: .organizeQueue,
+                                   level: .notice,
+                                   metadata: ["directories": "\(settings.watchDirs.count)"])
+        let managedFiles = reconcileManagedFiles()
+        Task { [weak self] in
+            guard let self else { return }
+            for file in managedFiles {
+                guard let id = file.id else { continue }
+                do {
+                    try await self.organizeUsingAI(fileId: id)
+                } catch {
+                    AppLogService.shared.write("managed entry reclassification failed: \(error)",
+                                               category: .organizeQueue, level: .error,
+                                               metadata: ["entry": file.name])
+                }
+            }
+        }
         for dir in settings.watchDirs {
             let url = URL(fileURLWithPath: dir)
             guard let entries = try? FileManager.default.contentsOfDirectory(
@@ -176,20 +373,148 @@ final class OrganizerService {
                     title: existing?.title, contentText: existing?.contentText
                 )
                 if let id = try? store.upsertFile(record) {
-                    // 先索引（文件在原位），再整理移动
+                    // Index the file in place before organizing and moving it.
                     Task {
                         guard await AppStateIndexerProxy.shared.indexer?.indexFile(id: id, overridePath: entry) == true else {
                             return
                         }
                         do {
-                            try self.organize(fileId: id)
+                            try await self.organizeUsingAI(fileId: id)
                         } catch {
-                            NSLog("[Organizer] background organize failed for \(entry.lastPathComponent): \(error)")
+                            AppLogService.shared.write("background organization failed: \(error)",
+                                                       category: .organizeQueue, level: .error,
+                                                       metadata: ["entry": entry.lastPathComponent])
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Treats FileNestOrganized as the library source of truth: recursively imports new files and removes stale records.
+    func reconcileManagedFiles() -> [FileRecord] {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: organizeRoot, withIntermediateDirectories: true)
+        let rootPath = organizeRoot.standardizedFileURL.path
+        let keys: [URLResourceKey] = [
+            .isDirectoryKey, .isRegularFileKey, .contentModificationDateKey, .fileSizeKey
+        ]
+        let enumerator = fm.enumerator(
+            at: organizeRoot,
+            includingPropertiesForKeys: keys,
+            options: settings.excludeHidden ? [.skipsHiddenFiles] : []
+        )
+        let storedBeforeReconciliation = (try? store.allFiles()) ?? []
+        let storedByCanonicalPath = Dictionary(
+            storedBeforeReconciliation.map { (Self.canonicalPath($0.path), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var diskPaths = Set<String>()
+        while let url = enumerator?.nextObject() as? URL {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
+            let path = url.standardizedFileURL.path
+            let existing = (try? store.file(path: path))
+                ?? storedByCanonicalPath[Self.canonicalPath(path)]
+            if values.isDirectory == true {
+                if let existing, existing.isDirectory {
+                    diskPaths.insert(existing.path)
+                    enumerator?.skipDescendants()
+                }
+                continue
+            }
+            guard values.isRegularFile == true else { continue }
+            diskPaths.insert(existing?.path ?? path)
+            let ext = url.pathExtension.lowercased()
+            let size = Int64(values.fileSize ?? 0)
+            let modificationDate = values.contentModificationDate ?? Date()
+            let metadataChanged = existing.map {
+                $0.size != size || abs($0.mtime.timeIntervalSince(modificationDate)) >= 0.001
+            } ?? false
+            let relative = String(path.dropFirst(min(path.count, rootPath.count)))
+                .split(separator: "/")
+                .map(String.init)
+            let subfolder = relative.count >= 3 ? relative[1] : existing?.organizationSubfolder
+            let record = FileRecord(
+                id: existing?.id,
+                path: existing?.path ?? path,
+                name: url.lastPathComponent,
+                ext: ext,
+                size: size,
+                mtime: modificationDate,
+                category: FileCategory.from(extension: ext).rawValue,
+                sourceDir: existing?.sourceDir ?? url.deletingLastPathComponent().path,
+                indexedAt: existing?.indexedAt,
+                contentHash: existing?.contentHash,
+                title: existing?.title,
+                contentText: existing?.contentText,
+                discoveredAt: existing?.discoveredAt,
+                organizedAt: existing?.organizedAt ?? Date(),
+                note: existing?.note,
+                organizationSubfolder: subfolder
+            )
+            if let id = try? store.upsertFile(record), metadataChanged {
+                try? store.markFileIndexStale(id: id)
+            }
+        }
+
+        let stored = (try? store.allFiles()) ?? []
+        for record in stored where Self.isInside(record.path, rootPath: rootPath) && !diskPaths.contains(record.path) {
+            if let id = record.id { try? store.deleteFile(id: id) }
+        }
+        return ((try? store.allFiles()) ?? []).filter {
+            Self.isInside($0.path, rootPath: rootPath) && fm.fileExists(atPath: $0.path)
+        }
+    }
+
+    /// A low-priority startup audit catches tools that overwrite content while preserving
+    /// both file size and modification time. Only RAG-eligible files and managed directories
+    /// are hashed so large unrelated media does not slow launch.
+    func invalidateChangedManagedFileIndexes() async -> Int {
+        let rootPath = organizeRoot.standardizedFileURL.path
+        let candidates = ((try? store.allFiles()) ?? []).filter { record in
+            guard record.indexedAt != nil,
+                  record.contentHash != nil,
+                  Self.isInside(record.path, rootPath: rootPath),
+                  FileManager.default.fileExists(atPath: record.path) else { return false }
+            return record.isDirectory || AppSettings.defaultVectorizeExtensions.contains(record.ext.lowercased())
+        }
+        let changedIDs = await Task.detached(priority: .utility) {
+            candidates.compactMap { record -> Int64? in
+                guard let id = record.id, let expectedHash = record.contentHash else { return nil }
+                let currentHash: String?
+                if record.isDirectory {
+                    currentHash = DirectoryInspector.inspect(URL(fileURLWithPath: record.path))?.snapshot.signature
+                } else {
+                    currentHash = try? FileContentHasher.sha256(of: URL(fileURLWithPath: record.path))
+                }
+                guard let currentHash, currentHash != expectedHash else { return nil }
+                return id
+            }
+        }.value
+        for id in changedIDs {
+            try? store.markFileIndexStale(id: id)
+        }
+        if !changedIDs.isEmpty {
+            AppLogService.shared.write(
+                "startup content audit invalidated managed indexes",
+                category: .indexPipeline,
+                level: .notice,
+                metadata: ["files": "\(changedIDs.count)"]
+            )
+        }
+        return changedIDs.count
+    }
+
+    func isManagedPath(_ path: String) -> Bool {
+        Self.isInside(path, rootPath: organizeRoot.standardizedFileURL.path)
+    }
+
+    private static func isInside(_ path: String, rootPath: String) -> Bool {
+        canonicalPath(path).hasPrefix(canonicalPath(rootPath) + "/")
+    }
+
+    private static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
     private func resolveConflict(at url: URL) -> URL {
@@ -198,9 +523,9 @@ final class OrganizerService {
         let ext = url.pathExtension
         var i = 2
         while true {
-            let candidate = url.deletingLastPathComponent()
+            var candidate = url.deletingLastPathComponent()
                 .appendingPathComponent("\(baseName) (\(i))")
-                .appendingPathExtension(ext)
+            if !ext.isEmpty { candidate.appendPathExtension(ext) }
             if !FileManager.default.fileExists(atPath: candidate.path) { return candidate }
             i += 1
         }

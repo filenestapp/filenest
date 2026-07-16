@@ -56,6 +56,23 @@ final class FileWatcherServiceTests: XCTestCase {
         }
     }
 
+    private final class DirectoryStatusRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedStatuses: [WatchDirectoryStatus] = []
+
+        var statuses: [WatchDirectoryStatus] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedStatuses
+        }
+
+        func record(_ statuses: [WatchDirectoryStatus]) {
+            lock.lock()
+            storedStatuses = statuses
+            lock.unlock()
+        }
+    }
+
     private var temporaryDirectory: URL!
     private var sourceDirectory: URL!
     private var organizedDirectory: URL!
@@ -108,6 +125,32 @@ final class FileWatcherServiceTests: XCTestCase {
         XCTAssertEqual(try store.allFiles().count, 1)
     }
 
+    func testOfficeLockFilesAreIgnoredBeforeIndexing() async throws {
+        let lockFile = try createFile(named: "~$notes.txt")
+        let embedder = CountingEmbedder(result: [1, 0])
+        settings.setAutoOrganize(false)
+        let watcher = makeWatcher(embedder: embedder, pollingInterval: 0.05)
+        watcher.start()
+        defer { watcher.stop() }
+
+        watcher.scanNow()
+        try await Task.sleep(nanoseconds: 160_000_000)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockFile.path))
+        XCTAssertNil(try store.file(path: lockFile.path))
+        XCTAssertEqual(embedder.callCount, 0)
+    }
+
+    func testTransientFilePolicyCoversEditorAndDownloadIntermediateStates() {
+        ["~$contract.docx", "._resource.pdf", "draft.txt~", "movie.part", "archive.crdownload",
+         "notes.swp", "report.tmp", ".DS_Store"].forEach {
+            XCTAssertTrue(FileEligibilityPolicy.shouldIgnoreFile(named: $0), $0)
+        }
+        ["contract.docx", "report.final.pdf", "notes.txt"].forEach {
+            XCTAssertFalse(FileEligibilityPolicy.shouldIgnoreFile(named: $0), $0)
+        }
+    }
+
     func testFailedIndexingIsRetriedOnLaterScans() async throws {
         let file = try createFile(named: "retry.txt")
         let embedder = CountingEmbedder(result: [])
@@ -153,6 +196,7 @@ final class FileWatcherServiceTests: XCTestCase {
 
         let destination = organizedDirectory
             .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
+            .appendingPathComponent("Uncategorized", isDirectory: true)
             .appendingPathComponent(file.lastPathComponent)
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
@@ -209,6 +253,189 @@ final class FileWatcherServiceTests: XCTestCase {
 
         XCTAssertTrue(bothIndexed)
         XCTAssertEqual(embedder.callCount, 4)
+    }
+
+    func testRestartReindexesOfflineOverwriteWithPreservedSizeAndModificationDate() async throws {
+        let file = try createFile(named: "offline-overwrite.txt")
+        let embedder = CountingEmbedder(result: [1, 0])
+        settings.setAutoOrganize(false)
+        let watcher = makeWatcher(embedder: embedder)
+
+        watcher.start()
+        watcher.scanNow()
+        let firstIndexed = await waitUntil {
+            (try? self.store.allFiles().first { $0.name == file.lastPathComponent })?.indexedAt != nil
+        }
+        XCTAssertTrue(firstIndexed)
+        let original = try XCTUnwrap(store.allFiles().first { $0.name == file.lastPathComponent })
+        let fileID = try XCTUnwrap(original.id)
+        let originalHash = try XCTUnwrap(original.contentHash)
+        XCTAssertEqual(embedder.callCount, 2)
+        watcher.stop()
+
+        try Data("HELLO WORLD".utf8).write(to: file)
+        try FileManager.default.setAttributes(
+            [.modificationDate: original.mtime],
+            ofItemAtPath: file.path
+        )
+
+        watcher.start()
+        defer { watcher.stop() }
+        watcher.scanNow()
+        let reindexed = await waitUntil {
+            guard let updated = try? self.store.file(id: fileID) else { return false }
+            return updated.indexedAt != nil &&
+                updated.contentHash != originalHash &&
+                updated.contentText?.contains("HELLO WORLD") == true
+        }
+
+        XCTAssertTrue(reindexed)
+        XCTAssertEqual(embedder.callCount, 4)
+    }
+
+    func testRestartRemovesFileDeletedWhileWatcherWasStopped() async throws {
+        let file = try createFile(named: "deleted-offline.txt")
+        let embedder = CountingEmbedder(result: [1, 0])
+        settings.setAutoOrganize(false)
+        let watcher = makeWatcher(embedder: embedder)
+
+        watcher.start()
+        watcher.scanNow()
+        let firstIndexed = await waitUntil {
+            (try? self.store.allFiles().first { $0.name == file.lastPathComponent })?.indexedAt != nil
+        }
+        XCTAssertTrue(firstIndexed)
+        watcher.stop()
+
+        try FileManager.default.removeItem(at: file)
+        watcher.start()
+        defer { watcher.stop() }
+        watcher.scanNow()
+
+        let removed = await waitUntil {
+            (try? self.store.allFiles().contains { $0.name == file.lastPathComponent }) == false
+        }
+        XCTAssertTrue(removed)
+    }
+
+    func testPreservedExistingEntriesStayUntouchedWhileNewFilesAreIndexed() async throws {
+        let existing = try createFile(named: "existing.txt")
+        let embedder = CountingEmbedder(result: [1, 0])
+        settings.setAutoOrganize(false)
+        let watcher = makeWatcher(embedder: embedder, pollingInterval: 10)
+
+        watcher.preserveExistingEntries(in: [sourceDirectory.path])
+        watcher.start()
+        defer { watcher.stop() }
+        watcher.scanNow()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertNil(try store.file(path: existing.path))
+        XCTAssertEqual(embedder.callCount, 0)
+
+        let addedLater = try createFile(named: "added-later.txt")
+        watcher.scanNow()
+        let indexedNewFile = await waitUntil {
+            (try? self.store.allFiles())?.contains {
+                $0.name == addedLater.lastPathComponent && $0.indexedAt != nil
+            } == true
+        }
+
+        XCTAssertTrue(indexedNewFile)
+        XCTAssertNil(try store.file(path: existing.path))
+        XCTAssertEqual(embedder.callCount, 2)
+    }
+
+    func testUnavailableDirectoryDefersBaselineUntilAccessReturns() async throws {
+        _ = try createFile(named: "originally-present.txt")
+        let embedder = CountingEmbedder(result: [1, 0])
+        settings.setAutoOrganize(false)
+        let watcher = makeWatcher(embedder: embedder, pollingInterval: 10)
+
+        watcher.preserveExistingEntries(in: [sourceDirectory.path])
+        let storedEntryPath = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(
+                at: sourceDirectory,
+                includingPropertiesForKeys: nil
+            ).first?.path
+        )
+        XCTAssertTrue(store.isWatchDirectoryBaselineEntry(
+            directoryPath: sourceDirectory.path,
+            entryPath: storedEntryPath
+        ))
+
+        try FileManager.default.removeItem(at: sourceDirectory)
+        watcher.preserveExistingEntries(in: [sourceDirectory.path])
+        XCTAssertTrue(store.isWatchDirectoryBaselineEntry(
+            directoryPath: sourceDirectory.path,
+            entryPath: storedEntryPath
+        ))
+
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        let presentWhenAccessReturns = try createFile(named: "present-when-access-returns.txt")
+        watcher.start()
+        defer { watcher.stop() }
+        watcher.scanNow()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertNil(try store.file(path: presentWhenAccessReturns.path))
+        XCTAssertEqual(embedder.callCount, 0)
+
+        let addedAfterRecovery = try createFile(named: "added-after-recovery.txt")
+        watcher.scanNow()
+        let indexedNewFile = await waitUntil {
+            (try? self.store.file(path: addedAfterRecovery.path))?.indexedAt != nil
+        }
+        XCTAssertTrue(indexedNewFile)
+        XCTAssertEqual(embedder.callCount, 2)
+    }
+
+    func testDirectoryStatusReportsMissingThenWatchingAfterFolderReturns() async throws {
+        try FileManager.default.removeItem(at: sourceDirectory)
+        let recorder = DirectoryStatusRecorder()
+        let watcher = makeWatcher(
+            embedder: CountingEmbedder(result: [1, 0]),
+            pollingInterval: 0.05
+        )
+        watcher.onDirectoryStatusChange = { recorder.record($0) }
+        watcher.start()
+        defer { watcher.stop() }
+
+        let reportedMissing = await waitUntil {
+            recorder.statuses.first?.accessState == .missing &&
+                recorder.statuses.first?.isWatching == false
+        }
+        XCTAssertTrue(reportedMissing)
+
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        let reportedWatching = await waitUntil {
+            recorder.statuses.first?.accessState == .accessible &&
+                recorder.statuses.first?.isWatching == true
+        }
+        XCTAssertTrue(reportedWatching)
+    }
+
+    func testManualOrganizationClearsPreservedBaselineAndForcesExistingProcessing() async throws {
+        _ = try createFile(named: "preserved.txt")
+        let embedder = CountingEmbedder(result: [1, 0])
+        settings.setAutoOrganize(false)
+        let watcher = makeWatcher(embedder: embedder, pollingInterval: 10)
+
+        watcher.preserveExistingEntries(in: [sourceDirectory.path])
+        watcher.start()
+        defer { watcher.stop() }
+        watcher.scanNow()
+        XCTAssertTrue(try store.allFiles().isEmpty)
+
+        watcher.organizeExistingEntries(in: [sourceDirectory.path])
+        watcher.scanNow()
+        let didProcessExistingFile = await waitUntil {
+            guard let records = try? self.store.allFiles() else { return false }
+            return records.count == 1 && records[0].indexedAt != nil
+        }
+
+        XCTAssertTrue(didProcessExistingFile)
+        XCTAssertEqual(embedder.callCount, 2)
     }
 
     func testRunningWatcherReconcilesAddedAndRemovedDirectories() async throws {
@@ -285,8 +512,108 @@ final class FileWatcherServiceTests: XCTestCase {
         XCTAssertEqual(try store.allFiles().map(\.name), ["accepted.txt"])
     }
 
+    func testChangingDirectoryIsNotIndexedUntilTreeStaysStable() async throws {
+        settings.setAutoOrganize(false)
+        let repository = sourceDirectory.appendingPathComponent("cloning-repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        let readme = repository.appendingPathComponent("README.md")
+        try Data("first clone state".utf8).write(to: readme)
+        let watcher = makeWatcher(
+            embedder: CountingEmbedder(result: [1, 0]),
+            pollingInterval: 10,
+            directoryMinimumStableDuration: 0.12
+        )
+        watcher.start()
+        defer { watcher.stop() }
+        XCTAssertTrue(watcher.isRunning)
+
+        watcher.scanNow()
+        try Data("clone is still receiving objects".utf8).write(to: readme)
+        watcher.scanNow()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        watcher.scanNow()
+        XCTAssertFalse(try store.allFiles().contains { $0.name == "cloning-repo" })
+
+        try await Task.sleep(nanoseconds: 70_000_000)
+        watcher.scanNow()
+        let indexed = await waitUntil {
+            guard let records = try? self.store.allFiles() else { return false }
+            return records.contains { $0.name == "cloning-repo" && $0.indexedAt != nil }
+        }
+        XCTAssertTrue(indexed)
+    }
+
+    func testStableProjectDirectoryUsesReadmeAndMovesAsOneUnit() async throws {
+        settings.setAutoOrganize(false)
+        let repository = sourceDirectory.appendingPathComponent("sample-repo", isDirectory: true)
+        let sources = repository.appendingPathComponent("Sources", isDirectory: true)
+        let gitObjects = repository.appendingPathComponent(".git/objects", isDirectory: true)
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: gitObjects, withIntermediateDirectories: true)
+        try Data("# Sample Project\nA local semantic search engine.".utf8)
+            .write(to: repository.appendingPathComponent("README.md"))
+        try Data("print(\"hello\")".utf8)
+            .write(to: sources.appendingPathComponent("main.swift"))
+
+        let embedder = CountingEmbedder(result: [1, 0])
+        let organizer = OrganizerService(
+            store: store,
+            settings: settings,
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid,
+            subfolderResolver: { _ in "Project Materials" }
+        )
+        let indexer = IndexerService(store: store, settings: settings, embedder: embedder)
+        let watcher = FileWatcherService(
+            store: store,
+            organizer: organizer,
+            indexer: indexer,
+            settings: settings,
+            minimumStableDuration: 0,
+            directoryMinimumStableDuration: 0,
+            pollingInterval: 10
+        )
+        watcher.start()
+        defer { watcher.stop() }
+        XCTAssertTrue(watcher.isRunning)
+        watcher.scanNow()
+
+        let indexed = await waitUntil {
+            guard let records = try? self.store.allFiles() else { return false }
+            return records.contains { $0.name == "sample-repo" && $0.indexedAt != nil }
+        }
+        XCTAssertTrue(indexed)
+        let record = try XCTUnwrap(store.allFiles().first { $0.name == "sample-repo" })
+        XCTAssertTrue(record.isDirectory)
+        XCTAssertEqual(record.categoryEnum, .code)
+        XCTAssertTrue(record.contentText?.contains("A local semantic search engine") == true)
+        XCTAssertTrue(record.contentText?.contains("Reference file: README.md") == true)
+
+        try await organizer.organizeUsingAI(fileId: try XCTUnwrap(record.id))
+
+        let destination = organizedDirectory
+            .appendingPathComponent(FileCategory.code.folderName, isDirectory: true)
+            .appendingPathComponent("Project Materials", isDirectory: true)
+            .appendingPathComponent("sample-repo", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repository.path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: destination.appendingPathComponent("README.md").path
+        ))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: destination.appendingPathComponent("Sources/main.swift").path
+        ))
+        XCTAssertEqual(try store.file(id: record.id!)?.path, destination.path)
+
+        let reconciled = organizer.reconcileManagedFiles()
+        XCTAssertEqual(reconciled.count, 1)
+        XCTAssertEqual(reconciled.first?.name, "sample-repo")
+        XCTAssertTrue(reconciled.first?.isDirectory == true)
+        XCTAssertEqual(try store.allFiles().count, 1)
+    }
+
     private func makeWatcher(embedder: EmbeddingProvider,
-                             pollingInterval: TimeInterval = 10) -> FileWatcherService {
+                             pollingInterval: TimeInterval = 10,
+                             directoryMinimumStableDuration: TimeInterval = 0) -> FileWatcherService {
         let organizer = OrganizerService(
             store: store,
             settings: settings,
@@ -300,6 +627,7 @@ final class FileWatcherServiceTests: XCTestCase {
             indexer: indexer,
             settings: settings,
             minimumStableDuration: 0,
+            directoryMinimumStableDuration: directoryMinimumStableDuration,
             pollingInterval: pollingInterval
         )
     }

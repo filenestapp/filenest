@@ -3,19 +3,20 @@ options:
   bundleIdPrefix: com.local
   deploymentTarget:
     macOS: "13.0"
-  developmentLanguage: zh-Hans
+  developmentLanguage: en
   createIntermediateGroups: true
 settings:
   base:
     SWIFT_VERSION: "5.9"
     MACOSX_DEPLOYMENT_TARGET: "13.0"
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "2"
     GENERATE_INFOPLIST_FILE: "YES"
     INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright (c) 2026 FileNest"
     INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
-    CODE_SIGN_STYLE: Automatic
-    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: Apple Development
+    DEVELOPMENT_TEAM: U433596CL8
     ENABLE_HARDENED_RUNTIME: YES
     SWIFT_STRICT_CONCURRENCY: minimal
     DEAD_CODE_STRIPPING: YES
@@ -31,18 +32,40 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.local.filenest
         PRODUCT_NAME: FileNest
         INFOPLIST_KEY_CFBundleDisplayName: FileNest
-        INFOPLIST_KEY_LSUIElement: "YES"
+        INFOPLIST_KEY_LSUIElement: "NO"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_PREVIEWS: "YES"
     dependencies:
       - package: GRDB
         product: GRDB
+      - package: SQLiteVec
+        product: SQLiteVec
+      - package: ZIPFoundation
+        product: ZIPFoundation
+      - package: Sparkle
+        product: Sparkle
+      - package: MarkdownUI
+        product: MarkdownUI
+    postBuildScripts:
+      - name: Generate Build Information
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          INFO_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          INFO_FILE="${INFO_DIR}/FileNestBuildInfo.plist"
+          mkdir -p "${INFO_DIR}"
+          rm -f "${INFO_FILE}"
+          /usr/bin/plutil -create xml1 "${INFO_FILE}"
+          /usr/bin/plutil -replace BuildDate -string "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${INFO_FILE}"
+          /usr/bin/plutil -replace MarketingVersion -string "${MARKETING_VERSION}" "${INFO_FILE}"
+          /usr/bin/plutil -replace BuildNumber -string "${CURRENT_PROJECT_VERSION}" "${INFO_FILE}"
 
   FileNestTests:
     type: bundle.unit-test
     platform: macOS
     settings:
       base:
-        # 当前 Xcode 附带的 XCTest runtime 最低为 macOS 14；不改变 App 的 13.0 部署目标。
+        # Xcode's bundled XCTest runtime requires macOS 14; this does not change the app's macOS 13 deployment target.
         MACOSX_DEPLOYMENT_TARGET: "14.0"
     sources:
       - path: FileNestTests
@@ -50,8 +73,21 @@ targets:
       - target: FileNest
       - package: GRDB
         product: GRDB
+      - package: ZIPFoundation
+        product: ZIPFoundation
 
 packages:
+  SQLiteVec:
+    path: Vendor/SQLiteVec
   GRDB:
     url: https://github.com/groue/GRDB.swift
     from: "6.29.0"
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    from: "0.9.20"
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.9.3"
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui.git
+    from: "2.4.1"

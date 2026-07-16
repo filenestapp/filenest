@@ -1,163 +1,1891 @@
+import AppKit
 import SwiftUI
 
-/// 设置视图：监听目录 / 文件类型 / Provider 配置
+/// Standalone settings window that centralizes all persistent configuration.
 struct SettingsView: View {
-    @EnvironmentObject var appState: AppState
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.openWindow) private var openWindow
     @State private var newDir = ""
-    @State private var newExt = ""
-    @State private var testResult: String?
+    @State private var selectedModelProfileID = OllamaModelRecommendation.recommendedForCurrentDevice.id
+    @State private var modelPendingDeletion: OllamaModelInfo?
+    @State private var vectorExtensionsDraft = ""
+    @State private var updateFeedDraft = ""
+    @State private var isShowingClearLogsConfirmation = false
+    @State private var logStatusMessage: String?
+    @State private var isTestingAIConnectivity = false
+    @State private var aiConnectivityChecks: [AIConnectivityCheck] = []
+    @State private var pendingWatchDirectories: [String] = []
+    @State private var pendingWatchDirectoryInventories: [WatchDirectoryInventory] = []
+    @State private var isShowingNewDirectoryChoice = false
+    @State private var isShowingOrganizeExistingConfirmation = false
+    @State private var existingWatchDirectoryInventories: [WatchDirectoryInventory] = []
 
     var body: some View {
-        TabView {
-            generalSettings.tabItem { Label("通用", systemImage: "gearshape") }
-            aiSettings.tabItem { Label("AI / 模型", systemImage: "cpu") }
-        }
-        .frame(width: 560, height: 480)
-    }
+        VStack(spacing: 0) {
+            header
 
-    // MARK: 通用设置
-    private var generalSettings: some View {
-        Form {
-            Section("监听目录（文件放这里会被自动整理+索引）") {
-                ForEach(appState.settings.watchDirs, id: \.self) { dir in
-                    HStack {
-                        Image(systemName: "folder").foregroundStyle(.secondary)
-                        Text(dir).lineLimit(1).truncationMode(.middle)
-                        Spacer()
-                        Button { removeDir(dir) } label: { Image(systemName: "minus.circle") }
-                            .buttonStyle(.borderless)
+            TabView(selection: $appState.selectedSettingsSection) {
+                generalSettings
+                    .tabItem { Label("General", systemImage: "gearshape") }
+                    .tag(SettingsSection.general)
+
+                indexSettings
+                    .tabItem { Label("Index & Organize", systemImage: "externaldrive.badge.magnifyingglass") }
+                    .tag(SettingsSection.indexing)
+
+                aiSettings
+                    .tabItem { Label("AI Models", systemImage: "cpu") }
+                    .tag(SettingsSection.aiModels)
+
+                StatisticsView(embeddedInSettings: true)
+                    .tabItem { Label("Statistics", systemImage: "chart.bar.xaxis") }
+                    .tag(SettingsSection.statistics)
+
+                RulesView(embeddedInSettings: true)
+                    .tabItem { Label("Organization Rules", systemImage: "list.bullet.rectangle.portrait") }
+                    .tag(SettingsSection.rules)
+            }
+            .padding(.top, 8)
+        }
+        .frame(minWidth: 960, idealWidth: 1040, minHeight: 700, idealHeight: 760)
+        .background(FileNestTheme.surface)
+        .onAppear {
+            vectorExtensionsDraft = appState.settings.vectorizeExtensions.joined(separator: ", ")
+            updateFeedDraft = appState.updates.feedURLString
+            if FileNestEnvironment.isStatisticsPreview {
+                appState.selectSettingsSection(.statistics)
+            } else if FileNestEnvironment.isSettingsRulesPreview {
+                appState.selectSettingsSection(.rules)
+            } else if FileNestEnvironment.isSettingsModelsPreview {
+                appState.selectSettingsSection(.aiModels)
+            }
+        }
+        .task {
+            await appState.ollama.refresh(host: appState.settings.ollamaHost)
+            appState.docling.refresh()
+            appState.paddleOCR.refresh()
+            async let ollamaUpdates: Void = appState.ollama.checkForUpdates()
+            async let doclingUpdates: Void = appState.docling.checkForUpdates()
+            async let paddleUpdates: Void = appState.paddleOCR.checkForUpdates()
+            _ = await (ollamaUpdates, doclingUpdates, paddleUpdates)
+        }
+        .confirmationDialog(
+            "Delete Local Model?",
+            isPresented: Binding(
+                get: { modelPendingDeletion != nil },
+                set: { if !$0 { modelPendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: modelPendingDeletion
+        ) { model in
+            Button(appState.settings.localizedFormat("Delete %@", model.name), role: .destructive) {
+                Task {
+                    await appState.ollama.delete(model: model.name, host: appState.settings.ollamaHost)
+                    if appState.settings.ollamaModel == model.name,
+                       let replacement = appState.ollama.models.first?.name {
+                        appState.settings.setOllamaModel(replacement)
                     }
                 }
-                HStack {
-                    TextField("目录路径", text: $newDir)
-                    Button("添加") { addDir() }.disabled(newDir.isEmpty)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { model in
+            Text(appState.settings.localizedFormat(
+                "%@ will be permanently removed from this Mac. You can download it again later.",
+                model.name
+            ))
+        }
+        .confirmationDialog(
+            "Clear All Logs?",
+            isPresented: $isShowingClearLogsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Clear Logs", role: .destructive) {
+                let count = AppLogService.shared.clear()
+                logStatusMessage = appState.settings.localizedFormat("Cleared %d log files", count)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes all local diagnostic logs currently retained by FileNest and cannot be undone.")
+        }
+        .confirmationDialog(
+            "How Should Existing Files in the New Folder Be Handled?",
+            isPresented: $isShowingNewDirectoryChoice,
+            titleVisibility: .visible
+        ) {
+            Button("Organize Existing Files Now") {
+                commitPendingWatchDirectories(organizeExisting: true)
+            }
+            Button("Keep Existing Files, Process New Files Only") {
+                commitPendingWatchDirectories(organizeExisting: false)
+            }
+            Button("Cancel", role: .cancel) {
+                pendingWatchDirectories = []
+                pendingWatchDirectoryInventories = []
+            }
+        } message: {
+            Text(appState.settings.localizedFormat(
+                "Adding %d folders containing %d files and %d folders. If you keep them unchanged, only items added later will be processed.",
+                pendingWatchDirectories.count,
+                pendingWatchDirectoryInventories.reduce(0) { $0 + $1.fileCount },
+                pendingWatchDirectoryInventories.reduce(0) { $0 + $1.directoryCount }
+            ))
+        }
+        .confirmationDialog(
+            "Organize Existing Files in Watched Folders Now?",
+            isPresented: $isShowingOrganizeExistingConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Start Organizing") {
+                appState.organizeExistingWatchDirectoryEntries()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(appState.settings.localizedFormat(
+                "Process the current %d files and %d folders. Items may be moved according to your organization rules.",
+                existingWatchDirectoryInventories.reduce(0) { $0 + $1.fileCount },
+                existingWatchDirectoryInventories.reduce(0) { $0 + $1.directoryCount }
+            ))
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            BrandMark(size: 34)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("FileNest Settings")
+                    .font(.system(size: 19, weight: .semibold))
+                Text("Manage file watching, organization rules, indexing, AI models, and statistics")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Label("Changes save automatically", systemImage: "checkmark.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(FileNestTheme.success)
+        }
+        .padding(.horizontal, 24)
+        .frame(height: 76)
+        .background(FileNestTheme.surface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(FileNestTheme.border).frame(height: 1)
+        }
+    }
+
+    private var generalSettings: some View {
+        Form {
+            Section("Runtime Status") {
+                Toggle("File Watching", isOn: Binding(
+                    get: { appState.isWatching },
+                    set: { $0 ? appState.startWatching() : appState.stopWatching() }
+                ))
+
+                LabeledContent("Current Status") {
+                    Label {
+                        Text(LocalizedStringKey(appState.watchStatusTitle))
+                    } icon: {
+                        Image(systemName: watchStatusIcon)
+                    }
+                    .foregroundStyle(watchStatusColor)
+                }
+
+                if appState.hasWatchDirectoryAccessIssue {
+                    LabeledContent("Folder Access") {
+                        HStack(spacing: 8) {
+                            Text(LocalizedStringKey(appState.watchStatusSubtitle))
+                                .font(.system(size: 10))
+                                .foregroundStyle(FileNestTheme.warning)
+                            Button("Check Again") { appState.retryWatchDirectoryAccess() }
+                            Button("Restore Access…") { appState.openWatchDirectoryPrivacySettings() }
+                        }
+                        .controlSize(.small)
+                    }
                 }
             }
 
-            Section("自动整理") {
-                Toggle("监听到新文件后自动归类移动", isOn: Binding(
+            Section("Interface") {
+                Picker("Language", selection: Binding(
+                    get: { appState.settings.appLanguage },
+                    set: { appState.settings.setAppLanguage($0) }
+                )) {
+                    ForEach(AppSettings.AppLanguage.allCases) { language in
+                        Text(LocalizedStringKey(language.label)).tag(language.rawValue)
+                    }
+                }
+
+                Picker("Appearance", selection: Binding(
+                    get: { appState.settings.appearance },
+                    set: { appState.settings.setAppearance($0) }
+                )) {
+                    ForEach(AppSettings.AppAppearance.allCases) { appearance in
+                        Text(LocalizedStringKey(appearance.label)).tag(appearance.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text("Language and appearance changes apply immediately to the main window, menu bar, and settings.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    appState.presentOnboarding()
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "onboarding")
+                } label: {
+                    Label("Open Setup Assistant Again", systemImage: "wand.and.stars")
+                }
+            }
+
+            Section("Version & Updates") {
+                HStack(spacing: 12) {
+                    BrandMark(size: 42)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("FileNest \(appState.updates.buildInfo.version)")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text(appState.settings.localizedFormat(
+                            "Build %@ · %@",
+                            appState.updates.buildInfo.buildNumber,
+                            formattedBuildDate
+                        ))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Spacer()
+                    updateStatusLabel
+                }
+
+                LabeledContent("Update Source") {
+                    TextField(
+                        "",
+                        text: $updateFeedDraft,
+                        prompt: Text("https://example.com/appcast.xml")
+                    )
+                        .labelsHidden()
+                        .accessibilityLabel("Update Source")
+                        .textFieldStyle(.roundedBorder)
+                        .frame(minWidth: 360)
+                }
+
+                HStack {
+                    Text("Only HTTPS Sparkle appcast URLs are supported")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Save URL") {
+                        appState.updates.setFeedURL(updateFeedDraft)
+                        updateFeedDraft = appState.updates.feedURLString
+                    }
+                    .disabled(
+                        updateFeedDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                            == appState.updates.feedURLString
+                    )
+                }
+
+                Toggle("Automatically check for updates", isOn: Binding(
+                    get: { appState.settings.automaticUpdateChecks },
+                    set: { appState.updates.setAutomaticChecks($0) }
+                ))
+
+                Toggle("Automatically download available updates", isOn: Binding(
+                    get: { appState.settings.automaticallyDownloadsUpdates },
+                    set: { appState.updates.setAutomaticallyDownloadsUpdates($0) }
+                ))
+                .disabled(!appState.settings.automaticUpdateChecks)
+
+                HStack(spacing: 10) {
+                    Button {
+                        appState.updates.checkForUpdates()
+                    } label: {
+                        if appState.updates.status == .checking {
+                            Label {
+                                Text("Checking for updates…")
+                            } icon: {
+                                ProgressView().controlSize(.small)
+                            }
+                        } else {
+                            Label("Check for Updates…", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                    }
+                    .disabled(!appState.updates.canCheckForUpdates)
+
+                    if let lastCheckedAt = appState.updates.lastCheckedAt {
+                        Text(appState.settings.localizedFormat(
+                            "Last checked: %@",
+                            formattedDate(lastCheckedAt)
+                        ))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text("Sparkle verifies update packages and asks before installation. Production releases require Developer ID, an EdDSA public key, and a signed appcast.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Logs") {
+                LabeledContent("Log Folder") {
+                    Text(AppLogService.shared.directoryURL.tildeAbbreviatedPath)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                Text("Logs are written daily and kept for the latest 3 days by default. Expired logs are removed automatically while the app is running.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+
+                DisclosureGroup("Log Categories & Filtering") {
+                    VStack(alignment: .leading, spacing: 5) {
+                        logCategoryRow("app.*", description: "App startup and configuration changes")
+                        logCategoryRow("watch.*", description: "Folder watching, scans, baselines, and file discovery")
+                        logCategoryRow("index.*", description: "Extraction, chunking, embeddings, and index persistence")
+                        logCategoryRow("organize.*", description: "Rule matching, organization queue, and file moves")
+                        logCategoryRow("vector.*", description: "Vector store lifecycle, writes, and searches")
+                    }
+                    .padding(.top, 6)
+                }
+                .font(.system(size: 11))
+
+                HStack(spacing: 10) {
+                    Button(role: .destructive) {
+                        isShowingClearLogsConfirmation = true
+                    } label: {
+                        Label("Clear Logs", systemImage: "trash")
+                    }
+
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([AppLogService.shared.directoryURL])
+                    } label: {
+                        Label("Open Log Folder", systemImage: "folder")
+                    }
+
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(
+                            AppLogService.unifiedLogStreamCommand,
+                            forType: .string
+                        )
+                        logStatusMessage = appState.settings.localized("Live log filter command copied")
+                    } label: {
+                        Label("Copy Live Log Command", systemImage: "terminal")
+                    }
+
+                    Spacer()
+                    if let logStatusMessage {
+                        Label(logStatusMessage, systemImage: "checkmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(FileNestTheme.success)
+                    }
+                }
+            }
+
+            Section("Automatic Organization") {
+                Toggle("Automatically classify and move new files", isOn: Binding(
                     get: { appState.settings.autoOrganize },
                     set: { appState.settings.setAutoOrganize($0) }
                 ))
-                Toggle("跳过隐藏文件（以 . 开头）", isOn: Binding(
+
+                if appState.settings.autoOrganize {
+                    Picker("Trigger", selection: Binding(
+                        get: { appState.settings.autoOrganizeMode },
+                        set: { appState.settings.setAutoOrganizeMode($0) }
+                    )) {
+                        ForEach(AppSettings.AutoOrganizeMode.allCases) { mode in
+                            Text(LocalizedStringKey(mode.label)).tag(mode.rawValue)
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+
+                    if appState.settings.autoOrganizeMode == AppSettings.AutoOrganizeMode.batched.rawValue {
+                        Stepper(value: Binding(
+                            get: { appState.settings.autoOrganizeIntervalSeconds },
+                            set: { appState.settings.setAutoOrganizeIntervalSeconds($0) }
+                        ), in: 30...3_600, step: 30) {
+                            LabeledContent("Maximum wait") {
+                                Text(appState.settings.localizedFormat(
+                                    "%d sec",
+                                    appState.settings.autoOrganizeIntervalSeconds
+                                ))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Stepper(value: Binding(
+                            get: { appState.settings.autoOrganizeBatchSize },
+                            set: { appState.settings.setAutoOrganizeBatchSize($0) }
+                        ), in: 2...100) {
+                            LabeledContent("File threshold") {
+                                Text(appState.settings.localizedFormat(
+                                    "%d files",
+                                    appState.settings.autoOrganizeBatchSize
+                                ))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Text("Organize early when the file threshold is reached; otherwise organize at the maximum wait time. The minimum interval is 30 seconds.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Toggle("Skip hidden files (starting with .)", isOn: Binding(
                     get: { appState.settings.excludeHidden },
                     set: { appState.settings.setExcludeHidden($0) }
                 ))
+
+                Picker("Classification Strategy", selection: Binding(
+                    get: { appState.settings.classifyStrategy },
+                    set: { appState.settings.setClassifyStrategy($0) }
+                )) {
+                    Text("Rules first, with automatic fallback").tag(ClassificationStrategy.hybrid.rawValue)
+                    Text("Organization rules only").tag(ClassificationStrategy.rule.rawValue)
+                }
+                .pickerStyle(.radioGroup)
+
+                Text("Folder structure: file type / AI topic / file. AI considers the title, note, and extractable content.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
             }
 
-            Section("索引文件类型") {
-                Text("启用的扩展名（逗号分隔）").font(.caption).foregroundStyle(.secondary)
-                TextEditor(text: Binding(
-                    get: { appState.settings.enabledExtensions.joined(separator: ", ") },
-                    set: { appState.settings.setEnabledExtensions($0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }) }
-                ))
-                .font(.caption)
-                .frame(minHeight: 60, maxHeight: 100)
-            }
+            Section("Organization Location") {
+                LabeledContent("Destination Folder") {
+                    Text(appState.organizer.organizeRoot.tildeAbbreviatedPath)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
 
-            Section("数据") {
-                Text("数据库位置").font(.caption).foregroundStyle(.secondary)
-                Text(SQLiteStore.databaseURL().path).font(.caption2).textSelection(.enabled)
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([appState.organizer.organizeRoot])
+                } label: {
+                    Label("Show in Finder", systemImage: "folder")
+                }
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
 
-    private func addDir() {
-        let dir = newDir.trimmingCharacters(in: .whitespaces)
-        guard !dir.isEmpty, !appState.settings.watchDirs.contains(dir) else { return }
-        var dirs = appState.settings.watchDirs
-        dirs.append(dir)
-        appState.settings.setWatchDirs(dirs)
-        newDir = ""
-        // 重启监听
-        appState.stopWatching()
-        appState.startWatching()
-    }
-    private func removeDir(_ dir: String) {
-        var dirs = appState.settings.watchDirs
-        dirs.removeAll { $0 == dir }
-        appState.settings.setWatchDirs(dirs)
-        appState.stopWatching()
-        appState.startWatching()
+    @ViewBuilder
+    private var updateStatusLabel: some View {
+        switch appState.updates.status {
+        case .notConfigured:
+            Label("Update source not configured", systemImage: "link.badge.plus")
+                .foregroundStyle(.secondary)
+        case .ready:
+            Label("Update service ready", systemImage: "checkmark.shield")
+                .foregroundStyle(FileNestTheme.success)
+        case .checking:
+            Label("Checking", systemImage: "arrow.triangle.2.circlepath")
+                .foregroundStyle(FileNestTheme.accent)
+        case .upToDate:
+            Label("You're up to date", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(FileNestTheme.success)
+        case let .updateAvailable(version, _):
+            Label(appState.settings.localizedFormat("Version %@ available", version), systemImage: "arrow.down.circle.fill")
+                .foregroundStyle(FileNestTheme.accent)
+        case let .failed(message):
+            Label(appState.settings.localizedRuntimeMessage(message), systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(FileNestTheme.warning)
+                .lineLimit(2)
+        }
     }
 
-    // MARK: AI 设置
+    private var formattedBuildDate: String {
+        guard let date = appState.updates.buildInfo.buildDate else { return "—" }
+        return formattedDate(date)
+    }
+
+    private func formattedDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = appState.settings.selectedLocale
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    private var indexSettings: some View {
+        Form {
+            Section("Watched Folders") {
+                if appState.settings.watchDirs.isEmpty {
+                    Label("No watched folders added", systemImage: "folder.badge.questionmark")
+                        .foregroundStyle(.secondary)
+                }
+
+                ForEach(appState.settings.watchDirs, id: \.self) { directory in
+                    let status = appState.watchDirectoryStatus(for: directory)
+                    HStack(spacing: 10) {
+                        Image(systemName: directoryStatusIcon(status))
+                            .foregroundStyle(directoryStatusColor(status))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(URL(fileURLWithPath: directory).tildeAbbreviatedPath)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(LocalizedStringKey(directoryStatusLabel(status)))
+                                .font(.system(size: 9))
+                                .foregroundStyle(directoryStatusColor(status))
+                        }
+                        Spacer()
+                        if status?.accessState == .permissionDenied {
+                            Button("Restore Access…") { appState.openWatchDirectoryPrivacySettings() }
+                                .controlSize(.small)
+                        } else if status?.accessState == .missing || status?.accessState == .unavailable {
+                            Button("Check Again") { appState.retryWatchDirectoryAccess() }
+                                .controlSize(.small)
+                        }
+                        Button {
+                            removeDirectory(directory)
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove watched folder")
+                    }
+                }
+
+                Button(action: chooseDirectories) {
+                    Label("Add Watched Folder…", systemImage: "plus")
+                }
+
+                DisclosureGroup("Enter Path Manually") {
+                    HStack {
+                        TextField("/Users/name/Folder", text: $newDir)
+                        Button("Add") { addDirectory() }
+                            .disabled(newDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+
+                Button {
+                    existingWatchDirectoryInventories = appState.watchDirectoryInventories()
+                    isShowingOrganizeExistingConfirmation = true
+                } label: {
+                    Label("Organize Existing Files in Watched Folders…", systemImage: "wand.and.stars")
+                }
+                .disabled(appState.settings.watchDirs.isEmpty)
+
+                Text("Process previously preserved, unorganized files at any time.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Watched File Types") {
+                HStack {
+                    Text("Enabled extensions, separated by commas")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    (Text("Total") + Text(" \(appState.settings.enabledExtensions.count) ") + Text("types"))
+                        .foregroundStyle(.secondary)
+                }
+                .font(.system(size: 11))
+
+                TextEditor(text: Binding(
+                    get: { appState.settings.enabledExtensions.joined(separator: ", ") },
+                    set: {
+                        appState.settings.setEnabledExtensions(
+                            $0.split(separator: ",").map {
+                                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                            }.filter { !$0.isEmpty }
+                        )
+                    }
+                ))
+                .font(.system(size: 11))
+                .frame(minHeight: 74, maxHeight: 100)
+            }
+
+            Section("Automatic Vectorization") {
+                Toggle("Automatically vectorize supported files", isOn: Binding(
+                    get: { appState.settings.autoVectorize },
+                    set: { appState.settings.setAutoVectorize($0) }
+                ))
+
+                if appState.settings.autoVectorize {
+                    LabeledContent("Extensions to vectorize") {
+                        TextField("pdf, docx, txt, md, png, jpg", text: $vectorExtensionsDraft)
+                            .frame(minWidth: 360)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button("Documents") {
+                            vectorExtensionsDraft = AppSettings.documentVectorizeExtensions.joined(separator: ", ")
+                        }
+                        .buttonStyle(QuietButtonStyle(compact: true))
+
+                        Button("Documents + Images") {
+                            vectorExtensionsDraft = AppSettings.defaultVectorizeExtensions.joined(separator: ", ")
+                        }
+                        .buttonStyle(QuietButtonStyle(compact: true))
+
+                        Spacer()
+
+                        Button {
+                            let extensions = vectorExtensionsDraft
+                                .split(separator: ",")
+                                .map(String.init)
+                            appState.settings.setVectorizeExtensions(extensions)
+                            vectorExtensionsDraft = appState.settings.vectorizeExtensions.joined(separator: ", ")
+                            appState.reindexAll()
+                        } label: {
+                            IndexingButtonLabel(defaultTitle: "Apply & Reindex", appState: appState)
+                        }
+                        .buttonStyle(GradientButtonStyle(compact: true))
+                        .disabled(appState.reindexButtonsDisabled)
+                    }
+
+                    Stepper(value: Binding(
+                        get: { appState.settings.vectorChunkWords },
+                        set: { appState.settings.setVectorChunkWords($0) }
+                    ), in: 600...1_000, step: 50) {
+                        LabeledContent("Chunk size") {
+                            Text(appState.settings.localizedFormat(
+                                "%d tokens",
+                                appState.settings.vectorChunkWords
+                            ))
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Stepper(value: Binding(
+                        get: { appState.settings.vectorChunkOverlap },
+                        set: { appState.settings.setVectorChunkOverlap($0) }
+                    ), in: 0...max(0, appState.settings.vectorChunkWords - 1), step: 10) {
+                        LabeledContent("Chunk overlap") {
+                            Text(appState.settings.localizedFormat(
+                                "%d tokens",
+                                appState.settings.vectorChunkOverlap
+                            ))
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Stepper(value: Binding(
+                        get: { appState.settings.ragResultLimit },
+                        set: { appState.settings.setRAGResultLimit($0) }
+                    ), in: 1...30) {
+                        LabeledContent("Chat retrieval files") {
+                            Text(appState.settings.localizedFormat(
+                                "%d files",
+                                appState.settings.ragResultLimit
+                            ))
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Text("The maximum number of related files returned and analyzed by AI per question. The default is 10; higher values increase recall and context usage.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+
+                    Text("Long documents are split with overlapping sliding windows to reduce information loss from context limits. Images add dimensions, camera details, and non-location EXIF metadata to the index.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+
+                    DisclosureGroup("Local Document Parsing") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Full text: PDF, DOCX, XLSX, PPTX, EPUB, OpenDocument, RTF, and plain text", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                            Label("Best-effort: legacy DOC/XLS/PPT and iWork (uses local macOS text metadata)", systemImage: "info.circle")
+                                .foregroundStyle(.secondary)
+                            if appState.settings.embeddingSource == AppSettings.EmbeddingSource.cloud.rawValue
+                                || appState.settings.ocrSource == AppSettings.OCRSource.cloud.rawValue {
+                                Label("Cloud processing is enabled: chunks or page images are sent to the configured services; vector storage remains local", systemImage: "exclamationmark.shield")
+                                    .foregroundStyle(FileNestTheme.warning)
+                            } else {
+                                Label("Parsing, chunking, embeddings, OCR, and vector storage all stay on this Mac", systemImage: "lock.shield")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .font(.system(size: 10))
+                        .padding(.top, 4)
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                }
+            }
+
+            Section("Index Maintenance") {
+                LabeledContent("Indexed Files") {
+                    Text("\(appState.indexedCount) ") + Text("items")
+                }
+
+                LabeledContent("Database Location") {
+                    Text(SQLiteStore.databaseURL().tildeAbbreviatedPath)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        appState.reindexAll()
+                    } label: {
+                        IndexingButtonLabel(defaultTitle: "Reindex All Files", appState: appState)
+                    }
+                    .disabled(appState.reindexButtonsDisabled)
+
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([SQLiteStore.databaseURL()])
+                    } label: {
+                        Label("Show Database", systemImage: "externaldrive")
+                    }
+                }
+
+                if appState.indexingState != .idle {
+                    IndexingStatusProgressView(appState: appState)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+    }
+
     private var aiSettings: some View {
         Form {
-            Section("聊天模型（LLM）") {
-                Picker("来源", selection: Binding(
+            Section("Chat Model") {
+                Picker("Source", selection: Binding(
                     get: { appState.settings.llmChoice },
                     set: { appState.settings.setLLMChoice($0) }
                 )) {
-                    ForEach(AppSettings.LLMChoice.allCases) { c in
-                        Text(c.label).tag(c.rawValue)
+                    ForEach(AppSettings.LLMChoice.allCases) { choice in
+                        Text(LocalizedStringKey(choice.label)).tag(choice.rawValue)
                     }
+                }
+                .pickerStyle(.segmented)
+
+                Toggle("Thinking Mode", isOn: Binding(
+                    get: { appState.settings.thinkingMode },
+                    set: { appState.settings.setThinkingMode($0) }
+                ))
+                Text("Requests deeper reasoning from the model when the selected model and API support it.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+
+                if appState.settings.llmChoice == AppSettings.LLMChoice.none.rawValue {
+                    Label("Chat summaries are off; semantic file search remains available.", systemImage: "info.circle")
+                        .foregroundStyle(.secondary)
                 }
 
                 if appState.settings.llmChoice == AppSettings.LLMChoice.ollama.rawValue {
-                    TextField("Ollama 地址", text: Binding(
+                    TextField("Ollama Address", text: Binding(
                         get: { appState.settings.ollamaHost },
                         set: { appState.settings.setOllamaHost($0) }
                     ))
-                    TextField("模型（如 qwen2.5:7b / llama3.1:8b）", text: Binding(
-                        get: { appState.settings.ollamaModel },
-                        set: { appState.settings.setOllamaModel($0) }
-                    ))
-                    HStack {
-                        Button("测试连接") { Task { await testOllama() } }
-                        Text(testResult ?? "").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Text("安装：brew install ollama && ollama serve；拉模型：ollama pull \(appState.settings.ollamaModel)")
-                        .font(.caption2).foregroundStyle(.secondary)
                 }
 
                 if appState.settings.llmChoice == AppSettings.LLMChoice.cloud.rawValue {
+                    Toggle("Detect Context Window Automatically", isOn: Binding(
+                        get: { appState.settings.cloudContextWindowTokens == 0 },
+                        set: { enabled in
+                            appState.settings.setCloudContextWindowTokens(enabled ? 0 : 612_000)
+                        }
+                    ))
+                    if appState.settings.cloudContextWindowTokens == 0 {
+                        Text("Reads the current model context window automatically; unknown cloud-compatible models default to 612K tokens.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        LabeledContent("Context Size") {
+                            HStack(spacing: 6) {
+                                TextField("612000", value: Binding(
+                                    get: { appState.settings.cloudContextWindowTokens },
+                                    set: { appState.settings.setCloudContextWindowTokens($0) }
+                                ), format: .number.grouping(.never))
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 110)
+                                Text("tokens")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Text("The manual value overrides automatic detection for cloud models.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Picker("API Format", selection: Binding(
+                        get: { appState.settings.cloudAPIFormat },
+                        set: { appState.settings.setCloudAPIFormat($0) }
+                    )) {
+                        ForEach(AppSettings.CloudAPIFormat.allCases) { format in
+                            Text(LocalizedStringKey(format.label)).tag(format.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
                     SecureField("API Key", text: Binding(
                         get: { appState.settings.cloudAPIKey },
                         set: { appState.settings.setCloudKey($0) }
-                    ))
+                    ), prompt: Text("sk-…"))
                     TextField("Base URL", text: Binding(
                         get: { appState.settings.cloudBaseURL },
                         set: { appState.settings.setCloudBaseURL($0) }
-                    ))
-                    TextField("模型", text: Binding(
+                    ), prompt: Text(cloudBaseURLPlaceholder))
+                    TextField("Model", text: Binding(
                         get: { appState.settings.cloudModel },
                         set: { appState.settings.setCloudModel($0) }
                     ))
-                    Text("兼容 OpenAI Chat Completions 接口（OpenAI / DeepSeek / 智谱等）。文件内容会发送到云端，注意隐私。")
-                        .font(.caption2).foregroundStyle(.secondary)
+                    Label("File excerpts will be sent to the configured cloud service. Review its privacy policy.", systemImage: "exclamationmark.shield")
+                        .font(.system(size: 10))
+                        .foregroundStyle(FileNestTheme.warning)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 10) {
+                            Button {
+                                Task { await testAIConnectivity() }
+                            } label: {
+                                Label("Test AI Connectivity", systemImage: "network")
+                            }
+                            .disabled(isTestingAIConnectivity)
+
+                            if isTestingAIConnectivity {
+                                ProgressView().controlSize(.small)
+                                Text("Testing cloud services…")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        ForEach(aiConnectivityChecks) { check in
+                            aiConnectivityRow(check)
+                        }
+
+                        Text("Tests the chat model and any currently selected cloud Embedding and OCR services.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
-            Section("向量化（Embedding）") {
-                Text("默认使用 Apple 内置 NLEmbedding（离线、隐私、零配置）").font(.caption)
-                Text("向量维度与检索均在本地完成，不上传任何文件内容。").font(.caption2).foregroundStyle(.secondary)
-                Text("已加载向量数：\(AppStateIndexerProxy.shared.indexer?.vectorStore.count ?? 0)")
-                    .font(.caption2).foregroundStyle(.secondary)
+            if usesOllama {
+                ollamaServiceSettings
             }
+            if appState.settings.llmChoice == AppSettings.LLMChoice.ollama.rawValue {
+                localModelSettings
+            }
+
+            Section("Embedding Model") {
+                Picker("Source", selection: Binding(
+                    get: { appState.settings.embeddingSource },
+                    set: { appState.settings.setEmbeddingSource($0) }
+                )) {
+                    ForEach(AppSettings.EmbeddingSource.allCases) { source in
+                        Text(LocalizedStringKey(source.label)).tag(source.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if appState.settings.embeddingSource == AppSettings.EmbeddingSource.ollama.rawValue {
+                    LabeledContent("Ollama Model") {
+                        TextField("qwen3-embedding:0.6b", text: Binding(
+                            get: { appState.settings.ollamaEmbeddingModel },
+                            set: { appState.settings.setOllamaEmbeddingModel($0) }
+                        ))
+                    }
+                    HStack {
+                        Label("Prefer qwen3-embedding; download the model in Ollama first.", systemImage: "externaldrive")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if appState.ollama.isModelInstalled(appState.settings.ollamaEmbeddingModel) {
+                            InstalledModelLabel()
+                        } else {
+                            Button {
+                                Task {
+                                    await appState.ollama.pull(
+                                        model: appState.settings.ollamaEmbeddingModel,
+                                        host: appState.settings.ollamaHost
+                                    )
+                                }
+                            } label: {
+                                Label("Download Embedding Model", systemImage: "arrow.down.circle")
+                            }
+                            .disabled(appState.ollama.state != .running || appState.ollama.pullingModel != nil)
+                        }
+                    }
+                    if appState.ollama.pullingModel == appState.settings.ollamaEmbeddingModel {
+                        SettingsOperationProgress(
+                            status: appState.ollama.pullStatus,
+                            progress: appState.ollama.pullProgress
+                        )
+                    }
+                } else if appState.settings.embeddingSource == AppSettings.EmbeddingSource.cloud.rawValue {
+                    Toggle("Reuse chat model API Key and Base URL", isOn: Binding(
+                        get: { appState.settings.cloudEmbeddingReuseChatCredentials },
+                        set: { appState.settings.setCloudEmbeddingReuseChatCredentials($0) }
+                    ))
+                    .toggleStyle(.checkbox)
+                    if appState.settings.cloudEmbeddingReuseChatCredentials {
+                        reusedCloudCredentialsSummary(
+                            baseURL: appState.settings.effectiveCloudEmbeddingBaseURL
+                        )
+                    } else {
+                        SecureField("Embedding API Key", text: Binding(
+                            get: { appState.settings.cloudEmbeddingAPIKey },
+                            set: { appState.settings.setCloudEmbeddingAPIKey($0) }
+                        ), prompt: Text("sk-…"))
+                        TextField("Embedding Base URL", text: Binding(
+                            get: { appState.settings.cloudEmbeddingBaseURL },
+                            set: { appState.settings.setCloudEmbeddingBaseURL($0) }
+                        ), prompt: Text("https://api.openai.com/v1"))
+                    }
+                    TextField("Embedding Model", text: Binding(
+                        get: { appState.settings.cloudEmbeddingModel },
+                        set: { appState.settings.setCloudEmbeddingModel($0) }
+                    ))
+                    Label("Uses an OpenAI-compatible /embeddings endpoint. Document chunks are sent to this service.", systemImage: "exclamationmark.shield")
+                        .font(.system(size: 10))
+                        .foregroundStyle(FileNestTheme.warning)
+                } else {
+                    Label("Uses the built-in macOS NLEmbedding model with no download required.", systemImage: "apple.logo")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+
+                Button {
+                    appState.rebuildVectorIndex()
+                } label: {
+                    IndexingButtonLabel(defaultTitle: "Apply & Rebuild Vector Index", appState: appState)
+                }
+                .disabled(appState.reindexButtonsDisabled)
+
+                if appState.indexingKind == .vectorRebuild,
+                   let progress = appState.vectorIndexRebuildProgress {
+                    VectorIndexRebuildProgressView(progress: progress)
+                }
+
+                LabeledContent("Loaded Vectors") {
+                    Text("\(AppStateIndexerProxy.shared.indexer?.vectorStore.count ?? 0)")
+                }
+            }
+
+            Section("OCR Model") {
+                Picker("Source", selection: Binding(
+                    get: { appState.settings.ocrSource },
+                    set: { appState.settings.setOCRSource($0) }
+                )) {
+                    ForEach(AppSettings.OCRSource.allCases) { source in
+                        Text(LocalizedStringKey(source.label)).tag(source.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if appState.settings.ocrSource == AppSettings.OCRSource.local.rawValue {
+                    LabeledContent("Recognition Engine") {
+                        HStack(spacing: 7) {
+                            if appState.paddleOCR.isInstalling {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: paddleOCRReady ? "checkmark.circle.fill" : "circle.dashed")
+                                    .foregroundStyle(paddleOCRReady ? FileNestTheme.success : .secondary)
+                            }
+                            Text(LocalizedStringKey(paddleOCRStatusText))
+                        }
+                    }
+                    if paddleOCRReady {
+                        ManagedServiceUpdateControls(
+                            installedVersion: appState.paddleOCR.installedVersion,
+                            status: appState.paddleOCR.updateStatus,
+                            isInstalling: appState.paddleOCR.isInstalling,
+                            onCheck: { Task { await appState.paddleOCR.checkForUpdates() } },
+                            onUpdate: { Task { await appState.paddleOCR.update() } }
+                        )
+                    }
+                    if !paddleOCRReady {
+                        Button {
+                            Task { await appState.paddleOCR.install() }
+                        } label: {
+                            Label("Install PaddleOCR", systemImage: "arrow.down.circle")
+                        }
+                        .disabled(appState.paddleOCR.isInstalling)
+                    }
+                    if appState.paddleOCR.isInstalling {
+                        SettingsOperationProgress(
+                            status: appState.paddleOCR.installStatus,
+                            progress: appState.paddleOCR.installProgress
+                        )
+                    } else if let error = appState.paddleOCR.lastError {
+                        Label(LocalizedStringKey(error), systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(FileNestTheme.warning)
+                    }
+                    LabeledContent("Fallback Model") {
+                        TextField("glm-ocr", text: Binding(
+                            get: { appState.settings.ollamaOCRModel },
+                            set: { appState.settings.setOllamaOCRModel($0) }
+                        ))
+                    }
+                    HStack {
+                        Label("Use this local model automatically when PaddleOCR is unavailable.", systemImage: "arrow.triangle.branch")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if appState.ollama.isModelInstalled(appState.settings.ollamaOCRModel) {
+                            InstalledModelLabel()
+                        } else {
+                            Button {
+                                Task {
+                                    await appState.ollama.pull(
+                                        model: appState.settings.ollamaOCRModel,
+                                        host: appState.settings.ollamaHost
+                                    )
+                                }
+                            } label: {
+                                Label("Download Fallback OCR Model", systemImage: "arrow.down.circle")
+                            }
+                            .disabled(appState.ollama.state != .running || appState.ollama.pullingModel != nil)
+                        }
+                    }
+                    if appState.ollama.pullingModel == appState.settings.ollamaOCRModel {
+                        SettingsOperationProgress(
+                            status: appState.ollama.pullStatus,
+                            progress: appState.ollama.pullProgress
+                        )
+                    }
+                    Label("Use PaddleOCR locally first; fall back to GLM-OCR when it is unavailable or recognition fails.", systemImage: "arrow.triangle.branch")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                } else if appState.settings.ocrSource == AppSettings.OCRSource.cloud.rawValue {
+                    Picker("API Format", selection: Binding(
+                        get: { appState.settings.cloudOCRFormat },
+                        set: { appState.settings.setCloudOCRFormat($0) }
+                    )) {
+                        ForEach(AppSettings.CloudAPIFormat.allCases) { format in
+                            Text(LocalizedStringKey(format.label)).tag(format.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Toggle("Reuse chat model API Key and Base URL", isOn: Binding(
+                        get: { appState.settings.cloudOCRReuseChatCredentials },
+                        set: { appState.settings.setCloudOCRReuseChatCredentials($0) }
+                    ))
+                    .toggleStyle(.checkbox)
+                    if appState.settings.cloudOCRReuseChatCredentials {
+                        reusedCloudCredentialsSummary(baseURL: appState.settings.effectiveCloudOCRBaseURL)
+                    } else {
+                        SecureField("OCR API Key", text: Binding(
+                            get: { appState.settings.cloudOCRAPIKey },
+                            set: { appState.settings.setCloudOCRAPIKey($0) }
+                        ), prompt: Text("sk-…"))
+                        TextField("OCR Base URL", text: Binding(
+                            get: { appState.settings.cloudOCRBaseURL },
+                            set: { appState.settings.setCloudOCRBaseURL($0) }
+                        ), prompt: Text(cloudOCRBaseURLPlaceholder))
+                    }
+                    TextField("OCR Model", text: Binding(
+                        get: { appState.settings.cloudOCRModel },
+                        set: { appState.settings.setCloudOCRModel($0) }
+                    ))
+                    Label("Images or scanned PDF pages are sent to the configured OCR service.", systemImage: "exclamationmark.shield")
+                        .font(.system(size: 10))
+                        .foregroundStyle(FileNestTheme.warning)
+                } else {
+                    Text("OCR is disabled; text PDFs and regular documents can still be parsed.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            doclingServiceSettings
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
 
-    private func testOllama() async {
-        guard let url = URL(string: "\(appState.settings.ollamaHost)/api/tags") else {
-            testResult = "地址无效"; return
+    private var doclingServiceSettings: some View {
+        Section("Docling Document Parsing") {
+            Toggle("Prefer Docling for parsing and chunking", isOn: Binding(
+                get: { appState.settings.doclingEnabled },
+                set: { appState.settings.setDoclingEnabled($0) }
+            ))
+
+            LabeledContent("Docling Status") {
+                HStack(spacing: 7) {
+                    if appState.docling.isInstalling {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: appState.docling.executablePath == nil
+                              ? "circle.dashed"
+                              : "checkmark.circle.fill")
+                            .foregroundStyle(appState.docling.executablePath == nil
+                                             ? Color.secondary
+                                             : FileNestTheme.success)
+                    }
+                    Text(appState.settings.localizedRuntimeMessage(doclingStatusText))
+                }
+            }
+
+            LabeledContent("Executable") {
+                Text(appState.docling.executablePath.map {
+                    URL(fileURLWithPath: $0).tildeAbbreviatedPath
+                } ?? "Docling not detected")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
+            if appState.docling.installedVersion != nil {
+                ManagedServiceUpdateControls(
+                    installedVersion: appState.docling.installedVersion,
+                    status: appState.docling.updateStatus,
+                    isInstalling: appState.docling.isInstalling,
+                    onCheck: { Task { await appState.docling.checkForUpdates() } },
+                    onUpdate: { Task { await appState.docling.update() } }
+                )
+            }
+
+            if appState.docling.executablePath == nil {
+                Button {
+                    Task { await appState.docling.install() }
+                } label: {
+                    Label("Install Docling", systemImage: "arrow.down.circle")
+                }
+                .disabled(appState.docling.isInstalling)
+            }
+
+            if appState.docling.isInstalling {
+                SettingsOperationProgress(
+                    status: appState.docling.installStatus,
+                    progress: appState.docling.installProgress
+                )
+            } else if let error = appState.docling.lastError {
+                Label(appState.settings.localizedRuntimeMessage(error), systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(FileNestTheme.warning)
+            }
+
+            Text("Docling is installed in an isolated Python environment under FileNest’s user data. Its Hybrid Chunker is preferred when available; failures fall back automatically without blocking indexing.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
         }
-        do {
-            let (data, resp) = try await URLSession.shared.data(from: url)
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-                testResult = "连接失败（确认 ollama serve 已启动）"; return
+    }
+
+    private var doclingStatusText: String {
+        switch appState.docling.state {
+        case let .ready(version): return version
+        case .installing: return "Installing Docling…"
+        case .unavailable: return "Not installed"
+        case let .failed(message): return message
+        }
+    }
+
+    private var cloudBaseURLPlaceholder: String {
+        appState.settings.cloudAPIFormat == AppSettings.CloudAPIFormat.anthropic.rawValue
+            ? "https://api.anthropic.com/v1"
+            : "https://api.openai.com/v1"
+    }
+
+    private var paddleOCRReady: Bool {
+        if case .ready = appState.paddleOCR.state { return true }
+        return false
+    }
+
+    private var paddleOCRStatusText: String {
+        switch appState.paddleOCR.state {
+        case .ready(let version): return version
+        case .installing: return "Installing PaddleOCR…"
+        case .unavailable: return "Not installed"
+        case .failed(let message): return message
+        }
+    }
+
+    private var cloudOCRBaseURLPlaceholder: String {
+        appState.settings.cloudOCRFormat == AppSettings.CloudAPIFormat.anthropic.rawValue
+            ? "https://api.anthropic.com/v1"
+            : "https://api.openai.com/v1"
+    }
+
+    @ViewBuilder
+    private func reusedCloudCredentialsSummary(baseURL: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Using chat model credentials", systemImage: "link")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(FileNestTheme.success)
+            Text(baseURL.isEmpty ? appState.settings.localized("The chat model Base URL is not configured") : baseURL)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+    }
+
+    @ViewBuilder
+    private func aiConnectivityRow(_ check: AIConnectivityCheck) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Image(systemName: check.succeeded ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundStyle(check.succeeded ? FileNestTheme.success : Color.red)
+            Text(LocalizedStringKey(aiConnectivityLabel(for: check.kind)))
+                .font(.system(size: 11, weight: .medium))
+            Text(LocalizedStringKey(check.succeeded ? "Connected" : "Connection failed"))
+                .font(.system(size: 10))
+                .foregroundStyle(check.succeeded ? FileNestTheme.success : Color.red)
+            if let detail = check.detail, !detail.isEmpty {
+                Text(appState.settings.localizedRuntimeMessage(detail))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
             }
-            if let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let models = obj["models"] as? [[String: Any]] {
-                let names = models.compactMap { $0["name"] as? String }
-                testResult = names.isEmpty ? "无已安装模型" : "可用模型：\(names.joined(separator: ", "))"
+        }
+    }
+
+    private func aiConnectivityLabel(for kind: AIConnectivityCheck.Kind) -> String {
+        switch kind {
+        case .chat: return "Chat Model"
+        case .embedding: return "Embedding Model"
+        case .ocr: return "OCR Model"
+        }
+    }
+
+    @MainActor
+    private func testAIConnectivity() async {
+        guard !isTestingAIConnectivity else { return }
+        isTestingAIConnectivity = true
+        aiConnectivityChecks = []
+        let embedding = appState.settings.embeddingSource == AppSettings.EmbeddingSource.cloud.rawValue
+            ? appState.settings.makeEmbeddingProvider()
+            : nil
+        let ocr = appState.settings.ocrSource == AppSettings.OCRSource.cloud.rawValue
+            ? appState.settings.makeOCRProvider()
+            : nil
+        aiConnectivityChecks = await AIConnectivityTester.run(
+            llm: appState.settings.makeLLMProvider(),
+            embedding: embedding,
+            ocr: ocr
+        )
+        isTestingAIConnectivity = false
+    }
+
+    private var ollamaServiceSettings: some View {
+        Section("Ollama Service") {
+            LabeledContent("Status") {
+                HStack(spacing: 7) {
+                    if appState.ollama.state == .starting || appState.ollama.isRefreshing {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Circle()
+                            .fill(appState.ollama.state == .running ? FileNestTheme.success : Color.secondary)
+                            .frame(width: 7, height: 7)
+                    }
+                    Text(LocalizedStringKey(appState.ollama.state.label))
+                        .foregroundStyle(appState.ollama.state == .running ? FileNestTheme.success : .secondary)
+                }
+            }
+
+            LabeledContent("Executable") {
+                Text(appState.ollama.executablePath.map { URL(fileURLWithPath: $0).tildeAbbreviatedPath }
+                     ?? "Ollama Not Detected")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
+            if appState.ollama.isManagedInstall {
+                ManagedServiceUpdateControls(
+                    installedVersion: appState.ollama.installedVersion,
+                    status: appState.ollama.updateStatus,
+                    isInstalling: appState.ollama.isInstalling,
+                    onCheck: { Task { await appState.ollama.checkForUpdates() } },
+                    onUpdate: {
+                        Task {
+                            await appState.ollama.update(
+                                host: appState.settings.ollamaHost,
+                                flashAttentionEnabled: appState.settings.ollamaFlashAttentionEnabled
+                            )
+                        }
+                    }
+                )
+            }
+
+            Toggle("Enable Flash Attention", isOn: Binding(
+                get: { appState.settings.ollamaFlashAttentionEnabled },
+                set: { appState.settings.setOllamaFlashAttentionEnabled($0) }
+            ))
+            .toggleStyle(.checkbox)
+
+            Text("Enabled by default. Restart the Ollama service after changing this setting.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                if appState.ollama.executablePath == nil {
+                    Button {
+                        Task {
+                            await appState.ollama.installAndStart(
+                                host: appState.settings.ollamaHost,
+                                flashAttentionEnabled: appState.settings.ollamaFlashAttentionEnabled
+                            )
+                        }
+                    } label: {
+                        Label("Download, Install & Start", systemImage: "arrow.down.app.fill")
+                    }
+                    .disabled(appState.ollama.isInstalling)
+                } else {
+                    Button {
+                        Task {
+                            await appState.ollama.start(
+                                host: appState.settings.ollamaHost,
+                                flashAttentionEnabled: appState.settings.ollamaFlashAttentionEnabled
+                            )
+                        }
+                    } label: {
+                        Label("Start Service", systemImage: "play.fill")
+                    }
+                    .disabled(
+                        appState.ollama.state == .running ||
+                        appState.ollama.state == .starting ||
+                        appState.ollama.isInstalling
+                    )
+                }
+
+                Button {
+                    Task { await appState.ollama.stop(host: appState.settings.ollamaHost) }
+                } label: {
+                    Label("Stop Service", systemImage: "stop.fill")
+                }
+                .disabled(!appState.ollama.canStopManagedService)
+
+                Button {
+                    Task { await appState.ollama.refresh(host: appState.settings.ollamaHost) }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(appState.ollama.isRefreshing)
+            }
+
+            if appState.ollama.isInstalling {
+                SettingsOperationProgress(
+                    status: appState.ollama.installStatus,
+                    progress: appState.ollama.installProgress
+                )
+            } else if !appState.ollama.installStatus.isEmpty {
+                Text(LocalizedStringKey(appState.ollama.installStatus))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            if appState.ollama.executablePath == nil {
+                Text("Downloads from Ollama's official site and installs in FileNest's user folder; no administrator access required.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            if appState.ollama.state == .running && !appState.ollama.canStopManagedService {
+                Text("The service was started elsewhere. FileNest can use it but will not force it to stop.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            if let error = appState.ollama.lastError {
+                Label(appState.settings.localizedRuntimeMessage(error), systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(FileNestTheme.warning)
+            }
+        }
+    }
+
+    private var localModelSettings: some View {
+        Section("Local Models") {
+            HStack(spacing: 10) {
+                Picker("Model Profile", selection: $selectedModelProfileID) {
+                    ForEach(recommendedModelProfiles) { profile in
+                        if profile.id == recommendedModelProfile.id {
+                            (Text("Recommended · ") + Text(LocalizedStringKey(profile.memoryLabel))
+                                + Text(" — \(profile.generationModel)"))
+                                .tag(profile.id)
+                        } else {
+                            (Text(LocalizedStringKey(profile.memoryLabel))
+                                + Text(" — \(profile.generationModel)"))
+                                .tag(profile.id)
+                        }
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity)
+
+                Button {
+                    Task {
+                        await appState.ollama.pull(
+                            model: selectedModelProfile.generationModel,
+                            host: appState.settings.ollamaHost
+                        )
+                    }
+                } label: {
+                    Label("Download Model", systemImage: "arrow.down.circle")
+                }
+                .disabled(
+                    appState.ollama.state != .running ||
+                    appState.ollama.pullingModel != nil
+                )
+            }
+
+            HStack(spacing: 14) {
+                Label {
+                    (Text("This Mac") + Text(" \(OllamaModelRecommendation.currentMemoryGB)GB"))
+                } icon: {
+                    Image(systemName: "memorychip")
+                }
+                    .foregroundStyle(FileNestTheme.accent)
+                Divider().frame(height: 14)
+                (Text("Generation") + Text(" \(selectedModelProfile.generationModel)"))
+                Divider().frame(height: 14)
+                Text("Embedding \(selectedModelProfile.embeddingSize)")
+                Divider().frame(height: 14)
+                (Text("Suggested Context") + Text(" \(selectedModelProfile.contextRange)"))
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.secondary)
+
+            if selectedModelProfile.id == recommendedModelProfile.id {
+                Label("Recommended for this Mac's memory and placed first in the menu.", systemImage: "sparkles")
+                    .font(.system(size: 10))
+                    .foregroundStyle(FileNestTheme.success)
+            }
+
+            if let pulling = appState.ollama.pullingModel {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        (Text("Downloading") + Text(" \(pulling)"))
+                        Spacer()
+                        Text(LocalizedStringKey(appState.ollama.pullStatus))
+                            .foregroundStyle(.secondary)
+                        if let progress = appState.ollama.pullProgress {
+                            Text(progress, format: .percent.precision(.fractionLength(0)))
+                                .fontDesign(.monospaced)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.system(size: 10))
+                    if let progress = appState.ollama.pullProgress {
+                        ProgressView(value: progress)
+                    } else {
+                        ProgressView()
+                    }
+                }
+            }
+
+            if appState.ollama.models.isEmpty {
+                Text(LocalizedStringKey(
+                    appState.ollama.state == .running
+                        ? "No models installed"
+                        : "Start the service to download and manage models"
+                ))
+                    .foregroundStyle(.secondary)
             } else {
-                testResult = "已连接"
+                ForEach(appState.ollama.models) { model in
+                    HStack(spacing: 10) {
+                        Button {
+                            appState.settings.setOllamaModel(model.name)
+                        } label: {
+                            Image(systemName: appState.settings.ollamaModel == model.name
+                                  ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(appState.settings.ollamaModel == model.name
+                                                 ? FileNestTheme.accent : .secondary)
+                        }
+                        .buttonStyle(.plain)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model.name)
+                                .font(.system(size: 11, weight: .medium))
+                            Text(localModelSummary(model))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        if appState.settings.ollamaModel == model.name {
+                            Text("Current Model")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(FileNestTheme.accent)
+                        }
+                        Button {
+                            modelPendingDeletion = model
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Delete Model")
+                    }
+                }
             }
-        } catch {
-            testResult = "连接失败：\(error.localizedDescription)"
+        }
+    }
+
+    private var recommendedModelProfile: OllamaModelProfile {
+        OllamaModelRecommendation.recommendedForCurrentDevice
+    }
+
+    private func localModelSummary(_ model: OllamaModelInfo) -> String {
+        var items = [ByteCountFormatter.string(fromByteCount: model.size, countStyle: .file)]
+        if let parameterSize = model.details?.parameterSize {
+            items.append(appState.settings.localizedFormat("Parameters %@", parameterSize))
+        }
+        if let contextLength = model.details?.contextLength {
+            items.append(appState.settings.localizedFormat("Context %@", compactTokenCount(contextLength)))
+        }
+        if let architecture = model.details?.architecture ?? model.details?.family {
+            items.append(architecture)
+        }
+        if let quantization = model.details?.quantizationLevel {
+            items.append(quantization)
+        }
+        if let embeddingLength = model.details?.embeddingLength {
+            items.append(appState.settings.localizedFormat("Embedding dimensions %d", embeddingLength))
+        }
+        return items.joined(separator: " · ")
+    }
+
+    private func compactTokenCount(_ value: Int) -> String {
+        if value >= 1_048_576, value.isMultiple(of: 1_048_576) {
+            return "\(value / 1_048_576)M"
+        }
+        if value >= 1_024, value.isMultiple(of: 1_024) {
+            return "\(value / 1_024)K"
+        }
+        return value.formatted()
+    }
+
+    private var recommendedModelProfiles: [OllamaModelProfile] {
+        OllamaModelRecommendation.orderedProfiles(
+            forMemoryGB: OllamaModelRecommendation.currentMemoryGB
+        )
+    }
+
+    private var selectedModelProfile: OllamaModelProfile {
+        recommendedModelProfiles.first(where: { $0.id == selectedModelProfileID })
+            ?? recommendedModelProfile
+    }
+
+    private var usesOllama: Bool {
+        appState.settings.llmChoice == AppSettings.LLMChoice.ollama.rawValue
+            || appState.settings.embeddingSource == AppSettings.EmbeddingSource.ollama.rawValue
+            || appState.settings.ocrSource == AppSettings.OCRSource.local.rawValue
+    }
+
+    private func chooseDirectories() {
+        let panel = NSOpenPanel()
+        panel.title = appState.settings.localized("Choose Folders to Watch")
+        panel.prompt = appState.settings.localized("Add")
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = true
+
+        panel.begin { response in
+            guard response == .OK else { return }
+            let paths = panel.urls.map(\.path)
+            Task { @MainActor in
+                addDirectories(paths)
+            }
+        }
+    }
+
+    private func addDirectory() {
+        let directory = NSString(
+            string: newDir.trimmingCharacters(in: .whitespacesAndNewlines)
+        ).expandingTildeInPath
+        guard !directory.isEmpty else { return }
+        addDirectories([directory])
+        newDir = ""
+    }
+
+    private func addDirectories(_ directories: [String]) {
+        let existing = Set(appState.settings.watchDirs.map {
+            URL(fileURLWithPath: $0).standardizedFileURL.path
+        })
+        let normalized = directories.map {
+            URL(fileURLWithPath: $0).standardizedFileURL.path
+        }
+        pendingWatchDirectories = Array(Set(normalized).subtracting(existing)).sorted()
+        guard !pendingWatchDirectories.isEmpty else { return }
+        pendingWatchDirectoryInventories = appState.watchDirectoryInventories(
+            for: pendingWatchDirectories
+        )
+        isShowingNewDirectoryChoice = true
+    }
+
+    private func commitPendingWatchDirectories(organizeExisting: Bool) {
+        let directories = pendingWatchDirectories
+        guard !directories.isEmpty else { return }
+        if organizeExisting {
+            appState.clearPreservedWatchDirectoryEntries(in: directories)
+        } else {
+            // Record the baseline before adding the folder to watcher configuration so the first scan cannot process existing files early.
+            appState.preserveExistingWatchDirectoryEntries(in: directories)
+        }
+        let merged = Array(Set(appState.settings.watchDirs + directories)).sorted()
+        appState.settings.setWatchDirs(merged)
+        restartWatcher()
+        if organizeExisting {
+            appState.organizeExistingWatchDirectoryEntries(in: directories)
+        }
+        pendingWatchDirectories = []
+        pendingWatchDirectoryInventories = []
+    }
+
+    private func removeDirectory(_ directory: String) {
+        appState.clearPreservedWatchDirectoryEntries(in: [directory])
+        appState.settings.setWatchDirs(appState.settings.watchDirs.filter { $0 != directory })
+        restartWatcher()
+    }
+
+    private func restartWatcher() {
+        appState.stopWatching()
+        appState.startWatching()
+    }
+
+    private var watchStatusIcon: String {
+        if appState.hasActiveWatchDirectories { return "checkmark.circle.fill" }
+        if appState.isWatching { return "exclamationmark.triangle.fill" }
+        return "pause.circle.fill"
+    }
+
+    private var watchStatusColor: Color {
+        if appState.hasActiveWatchDirectories { return FileNestTheme.success }
+        if appState.isWatching { return FileNestTheme.warning }
+        return .secondary
+    }
+
+    private func directoryStatusLabel(_ status: WatchDirectoryStatus?) -> String {
+        guard let status else { return "Checking folder access" }
+        switch status.accessState {
+        case .accessible:
+            return status.isWatching ? "Watching" : (appState.isWatching ? "Connecting to watched folders…" : "Accessible")
+        case .permissionDenied: return "Access Denied"
+        case .missing: return "Folder Missing"
+        case .unavailable: return "Temporarily Unavailable"
+        }
+    }
+
+    private func directoryStatusIcon(_ status: WatchDirectoryStatus?) -> String {
+        guard let status else { return "folder.badge.questionmark" }
+        switch status.accessState {
+        case .accessible: return status.isWatching ? "folder.badge.checkmark" : "folder.fill"
+        case .permissionDenied: return "folder.badge.questionmark"
+        case .missing: return "folder.badge.minus"
+        case .unavailable: return "exclamationmark.triangle"
+        }
+    }
+
+    private func directoryStatusColor(_ status: WatchDirectoryStatus?) -> Color {
+        guard let status else { return .secondary }
+        switch status.accessState {
+        case .accessible: return status.isWatching ? FileNestTheme.success : FileNestTheme.accent
+        case .permissionDenied, .missing, .unavailable: return FileNestTheme.warning
+        }
+    }
+
+    private func logCategoryRow(_ category: String, description: LocalizedStringKey) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(category)
+                .font(.system(size: 10, design: .monospaced))
+                .frame(width: 72, alignment: .leading)
+            Text(description)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+}
+
+private struct ManagedServiceUpdateControls: View {
+    @EnvironmentObject private var appState: AppState
+
+    let installedVersion: String?
+    let status: ManagedServiceUpdateStatus
+    let isInstalling: Bool
+    let onCheck: () -> Void
+    let onUpdate: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if let installedVersion {
+                Text("Current Version")
+                    .foregroundStyle(.secondary)
+                Text(installedVersion)
+                    .fontDesign(.monospaced)
+                    .textSelection(.enabled)
+            }
+
+            statusView
+            Spacer(minLength: 8)
+
+            Button {
+                onCheck()
+            } label: {
+                Label("Check for Updates", systemImage: "arrow.clockwise")
+            }
+            .disabled(status.isBusy || isInstalling)
+
+            if case .updateAvailable = status {
+                Button {
+                    onUpdate()
+                } label: {
+                    Label("Update Service", systemImage: "arrow.down.app")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isInstalling)
+            }
+        }
+        .font(.system(size: 10))
+    }
+
+    @ViewBuilder
+    private var statusView: some View {
+        switch status {
+        case .idle:
+            EmptyView()
+        case .checking:
+            Label {
+                Text("Checking for updates…")
+            } icon: {
+                ProgressView().controlSize(.small)
+            }
+            .foregroundStyle(.secondary)
+        case .upToDate:
+            Label("You're up to date", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(FileNestTheme.success)
+        case let .updateAvailable(version):
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.down.circle.fill")
+                Text("Update available:")
+                Text(version).fontDesign(.monospaced)
+            }
+            .foregroundStyle(FileNestTheme.accent)
+        case .updating:
+            Label {
+                Text("Updating…")
+            } icon: {
+                ProgressView().controlSize(.small)
+            }
+            .foregroundStyle(FileNestTheme.accent)
+        case let .failed(message):
+            Label {
+                Text(appState.settings.localizedRuntimeMessage(message))
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill")
+            }
+                .foregroundStyle(FileNestTheme.warning)
+                .lineLimit(2)
+        }
+    }
+}
+
+private struct SettingsOperationProgress: View {
+    let status: String
+    let progress: Double?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if progress == nil {
+                    ProgressView().controlSize(.small)
+                }
+                Text(LocalizedStringKey(status))
+                    .lineLimit(1)
+                Spacer()
+                if let progress {
+                    Text(progress, format: .percent.precision(.fractionLength(0)))
+                        .fontDesign(.monospaced)
+                }
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.secondary)
+
+            if let progress {
+                ProgressView(value: progress)
+                    .tint(FileNestTheme.accent)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Download progress")
+    }
+}
+
+private struct InstalledModelLabel: View {
+    var body: some View {
+        Label("Installed", systemImage: "checkmark.circle.fill")
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(FileNestTheme.success)
+            .accessibilityLabel("Model installed")
+    }
+}
+
+private struct VectorIndexRebuildProgressView: View {
+    let progress: VectorIndexRebuildProgress
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if progress.phase == .completed || progress.phase == .failed ||
+                    progress.phase == .paused || progress.phase == .stopped {
+                    Image(systemName: phaseSymbol)
+                        .foregroundStyle(phaseColor)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+
+                Text(LocalizedStringKey(statusText))
+                    .lineLimit(1)
+                if let stage = progress.stage {
+                    Text(stageText(stage))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                if let fileName = progress.currentFileName, progress.phase == .indexing {
+                    Text(fileName)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                Text("\(progress.completed)/\(progress.total)")
+                    .fontDesign(.monospaced)
+            }
+            .font(.system(size: 10, weight: .medium))
+
+            ProgressView(value: progress.fraction)
+                .tint(phaseColor)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Indexing progress")
+    }
+
+    private var statusText: String {
+        switch progress.phase {
+        case .preparing: return "Preparing to rebuild vector index"
+        case .clearing: return "Clearing old vectors"
+        case .indexing: return "Indexing files"
+        case .paused: return "Vector Index Rebuild Paused"
+        case .stopping: return "Stopping Vector Index Rebuild"
+        case .stopped: return "Vector Index Rebuild Stopped"
+        case .completed:
+            return progress.failed == 0 ? "Vector index rebuild complete" : "Vector index rebuilt with some failed files"
+        case .failed: return "Vector index rebuild failed"
+        }
+    }
+
+    private var phaseSymbol: String {
+        switch progress.phase {
+        case .completed: return progress.failed == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+        case .paused: return "pause.circle.fill"
+        case .stopped: return "stop.circle.fill"
+        case .failed: return "exclamationmark.circle.fill"
+        default: return "arrow.triangle.2.circlepath"
+        }
+    }
+
+    private func stageText(_ stage: IndexingStage) -> String {
+        if case let .embedding(completed, total) = stage {
+            return String(
+                format: NSLocalizedString("Generating vectors %d/%d", comment: ""),
+                completed,
+                total
+            )
+        }
+        return NSLocalizedString(stage.statusText, comment: "")
+    }
+
+    private var phaseColor: Color {
+        switch progress.phase {
+        case .completed: return progress.failed == 0 ? FileNestTheme.success : FileNestTheme.warning
+        case .failed: return FileNestTheme.warning
+        case .paused, .stopped: return .secondary
+        default: return FileNestTheme.accent
         }
     }
 }

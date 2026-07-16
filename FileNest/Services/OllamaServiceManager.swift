@@ -1,0 +1,960 @@
+import Foundation
+import Darwin
+
+struct OllamaModelDetails: Equatable, Sendable, Decodable {
+    let format: String?
+    let family: String?
+    let parameterSize: String?
+    let quantizationLevel: String?
+    let architecture: String?
+    let contextLength: Int?
+    let embeddingLength: Int?
+    let contextLengthIsExplicit: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case format, family
+        case parameterSize = "parameter_size"
+        case quantizationLevel = "quantization_level"
+    }
+
+    init(format: String? = nil,
+         family: String? = nil,
+         parameterSize: String? = nil,
+         quantizationLevel: String? = nil,
+         architecture: String? = nil,
+         contextLength: Int? = nil,
+         embeddingLength: Int? = nil,
+         contextLengthIsExplicit: Bool = false) {
+        self.format = format
+        self.family = family
+        self.parameterSize = parameterSize
+        self.quantizationLevel = quantizationLevel
+        self.architecture = architecture
+        self.contextLength = contextLength
+        self.embeddingLength = embeddingLength
+        self.contextLengthIsExplicit = contextLengthIsExplicit
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            format: try container.decodeIfPresent(String.self, forKey: .format),
+            family: try container.decodeIfPresent(String.self, forKey: .family),
+            parameterSize: try container.decodeIfPresent(String.self, forKey: .parameterSize),
+            quantizationLevel: try container.decodeIfPresent(String.self, forKey: .quantizationLevel)
+        )
+    }
+
+    func merging(_ newer: OllamaModelDetails) -> OllamaModelDetails {
+        OllamaModelDetails(
+            format: newer.format ?? format,
+            family: newer.family ?? family,
+            parameterSize: newer.parameterSize ?? parameterSize,
+            quantizationLevel: newer.quantizationLevel ?? quantizationLevel,
+            architecture: newer.architecture ?? architecture,
+            contextLength: newer.contextLength ?? contextLength,
+            embeddingLength: newer.embeddingLength ?? embeddingLength,
+            contextLengthIsExplicit: newer.contextLengthIsExplicit || contextLengthIsExplicit
+        )
+    }
+}
+
+struct OllamaModelInfo: Identifiable, Equatable, Decodable {
+    let name: String
+    let size: Int64
+    let modifiedAt: String?
+    let details: OllamaModelDetails?
+
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name, size, details
+        case modifiedAt = "modified_at"
+    }
+
+    func withDetails(_ value: OllamaModelDetails) -> OllamaModelInfo {
+        OllamaModelInfo(
+            name: name,
+            size: size,
+            modifiedAt: modifiedAt,
+            details: details?.merging(value) ?? value
+        )
+    }
+}
+
+enum OllamaModelMetadataParser {
+    static func details(from data: Data) -> OllamaModelDetails? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let rawDetails = object["details"] as? [String: Any]
+        let modelInfo = object["model_info"] as? [String: Any]
+        let parameters = object["parameters"] as? String
+        let explicitContext = parameters.flatMap { parameter(named: "num_ctx", in: $0) }
+        let modelContext = integerValue(in: modelInfo, keySuffix: ".context_length")
+        let embeddingLength = integerValue(in: modelInfo, keySuffix: ".embedding_length")
+        let parameterSize = rawDetails?["parameter_size"] as? String
+            ?? formattedParameterCount(modelInfo?["general.parameter_count"] as? NSNumber)
+
+        return OllamaModelDetails(
+            format: rawDetails?["format"] as? String,
+            family: rawDetails?["family"] as? String,
+            parameterSize: parameterSize,
+            quantizationLevel: rawDetails?["quantization_level"] as? String,
+            architecture: modelInfo?["general.architecture"] as? String,
+            contextLength: explicitContext ?? modelContext,
+            embeddingLength: embeddingLength,
+            contextLengthIsExplicit: explicitContext != nil
+        )
+    }
+
+    private static func integerValue(in values: [String: Any]?, keySuffix: String) -> Int? {
+        values?.first { key, value in
+            key.hasSuffix(keySuffix) && ((value as? NSNumber)?.intValue ?? 0) > 0
+        }.flatMap { ($0.value as? NSNumber)?.intValue }
+    }
+
+    private static func parameter(named name: String, in parameters: String) -> Int? {
+        for line in parameters.components(separatedBy: .newlines) {
+            let parts = line.split(whereSeparator: \.isWhitespace)
+            if parts.count >= 2, parts[0] == Substring(name), let value = Int(parts[1]) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func formattedParameterCount(_ count: NSNumber?) -> String? {
+        guard let count else { return nil }
+        let value = count.doubleValue
+        if value >= 1_000_000_000 { return String(format: "%.1fB", value / 1_000_000_000) }
+        if value >= 1_000_000 { return String(format: "%.0fM", value / 1_000_000) }
+        return count.stringValue
+    }
+}
+
+actor OllamaModelMetadataCache {
+    static let shared = OllamaModelMetadataCache()
+
+    private struct Entry {
+        let modifiedAt: String?
+        let details: OllamaModelDetails
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    func details(host: String, model: String, modifiedAt: String? = nil) -> OllamaModelDetails? {
+        guard let entry = entries[key(host: host, model: model)] else { return nil }
+        if let modifiedAt, let cachedModifiedAt = entry.modifiedAt, modifiedAt != cachedModifiedAt {
+            return nil
+        }
+        return entry.details
+    }
+
+    func store(_ details: OllamaModelDetails, host: String, model: String, modifiedAt: String? = nil) {
+        entries[key(host: host, model: model)] = Entry(modifiedAt: modifiedAt, details: details)
+    }
+
+    func remove(host: String, model: String) {
+        entries.removeValue(forKey: key(host: host, model: model))
+    }
+
+    private func key(host: String, model: String) -> String {
+        let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .lowercased()
+        return "\(normalizedHost)|\(OllamaServiceManager.canonicalModelName(model))"
+    }
+}
+
+struct OllamaModelProfile: Identifiable, Equatable {
+    let id: String
+    let minimumMemoryGB: Int
+    let memoryLabel: String
+    let generationModel: String
+    let embeddingModel: String
+    let embeddingSize: String
+    let contextRange: String
+
+    func menuTitle(isRecommended: Bool) -> String {
+        let prefix = isRecommended ? "Recommended · " : ""
+        return "\(prefix)\(memoryLabel) — \(generationModel)"
+    }
+}
+
+enum OllamaModelRecommendation {
+    static let defaultEmbeddingModel = "qwen3-embedding:0.6b"
+    static let profiles: [OllamaModelProfile] = [
+        OllamaModelProfile(
+            id: "memory-8", minimumMemoryGB: 8, memoryLabel: "8GB Memory",
+            generationModel: "qwen3.5:2b", embeddingModel: "qwen3-embedding:0.6b",
+            embeddingSize: "0.6b", contextRange: "4K–8K"
+        ),
+        OllamaModelProfile(
+            id: "memory-16", minimumMemoryGB: 16, memoryLabel: "16GB Memory",
+            generationModel: "qwen3.5:4b", embeddingModel: "qwen3-embedding:0.6b",
+            embeddingSize: "0.6b", contextRange: "8K–16K"
+        ),
+        OllamaModelProfile(
+            id: "memory-24", minimumMemoryGB: 24, memoryLabel: "24GB Memory",
+            generationModel: "qwen3.5:9b", embeddingModel: "qwen3-embedding:0.6b",
+            embeddingSize: "0.6b", contextRange: "16K–32K"
+        ),
+        OllamaModelProfile(
+            id: "memory-32", minimumMemoryGB: 32, memoryLabel: "32GB Memory",
+            generationModel: "qwen3.5:9b", embeddingModel: "qwen3-embedding:4b",
+            embeddingSize: "4b", contextRange: "16K–32K"
+        ),
+        OllamaModelProfile(
+            id: "memory-64", minimumMemoryGB: 64, memoryLabel: "64GB or More",
+            generationModel: "qwen3.5:9b", embeddingModel: "qwen3-embedding:8b",
+            embeddingSize: "8b", contextRange: "32K–64K"
+        ),
+    ]
+
+    static var currentMemoryGB: Int {
+        let bytesPerGB = Double(1_024 * 1_024 * 1_024)
+        return max(Int((Double(ProcessInfo.processInfo.physicalMemory) / bytesPerGB).rounded()), 1)
+    }
+
+    static var recommendedForCurrentDevice: OllamaModelProfile {
+        recommended(forMemoryGB: currentMemoryGB)
+    }
+
+    static func recommended(forMemoryGB memoryGB: Int) -> OllamaModelProfile {
+        profiles.last(where: { memoryGB >= $0.minimumMemoryGB }) ?? profiles[0]
+    }
+
+    static func orderedProfiles(forMemoryGB memoryGB: Int) -> [OllamaModelProfile] {
+        let recommended = recommended(forMemoryGB: memoryGB)
+        return [recommended] + profiles.filter { $0.id != recommended.id }
+    }
+}
+
+enum OllamaModelCatalog {
+    /// Download sizes of Ollama's official default tags as of July 2026, used for pre-download capacity guidance.
+    private static let downloadSizes: [String: Int64] = [
+        "qwen3.5:0.8b": 1_000_000_000,
+        "qwen3.5:2b": 2_700_000_000,
+        "qwen3.5:4b": 3_400_000_000,
+        "qwen3.5:9b": 6_600_000_000,
+        "qwen3-embedding:0.6b": 639_000_000,
+        "qwen3-embedding:4b": 2_500_000_000,
+        "qwen3-embedding:8b": 4_700_000_000,
+        "glm-ocr": 2_200_000_000,
+        "glm-ocr:latest": 2_200_000_000,
+        "glm-ocr:q8_0": 1_600_000_000,
+    ]
+
+    static func estimatedDownloadBytes(for model: String) -> Int64? {
+        downloadSizes[model.lowercased()]
+    }
+}
+
+enum OllamaServiceState: Equatable {
+    case stopped
+    case starting
+    case running
+    case failed(String)
+
+    var label: String {
+        switch self {
+        case .stopped: return "Stopped"
+        case .starting: return "Starting"
+        case .running: return "Running"
+        case .failed: return "Failed to Start"
+        }
+    }
+}
+
+@MainActor
+final class OllamaServiceManager: ObservableObject {
+    @Published private(set) var state: OllamaServiceState = .stopped
+    @Published private(set) var models: [OllamaModelInfo] = []
+    @Published private(set) var executablePath: String?
+    @Published private(set) var isRefreshing = false
+    @Published private(set) var pullingModel: String?
+    @Published private(set) var pullProgress: Double?
+    @Published private(set) var pullStatus = ""
+    @Published private(set) var isInstalling = false
+    @Published private(set) var installProgress: Double?
+    @Published private(set) var installStatus = ""
+    @Published private(set) var lastError: String?
+    @Published private(set) var managedServiceProcessIDs: [Int32] = []
+    @Published private(set) var installedVersion: String?
+    @Published private(set) var latestVersion: String?
+    @Published private(set) var updateStatus: ManagedServiceUpdateStatus = .idle
+
+    private let session: URLSession
+    private var launchedProcess: Process?
+
+    init(session: URLSession = .shared) {
+        self.session = session
+        let executable = Self.resolveExecutable()
+        executablePath = executable?.path
+        installedVersion = executable.flatMap(Self.installedVersion(for:))
+    }
+
+    var canStopManagedService: Bool {
+        launchedProcess?.isRunning == true || !managedServiceProcessIDs.isEmpty
+    }
+
+    var isManagedInstall: Bool {
+        guard let executablePath else { return false }
+        return Self.isFileNestManagedExecutable(URL(fileURLWithPath: executablePath))
+    }
+
+    func isModelInstalled(_ model: String) -> Bool {
+        models.contains { Self.modelNamesMatch($0.name, model) }
+    }
+
+    func chatModels(embeddingModel: String, ocrModel: String) -> [OllamaModelInfo] {
+        models.filter {
+            Self.isChatModel($0.name, embeddingModel: embeddingModel, ocrModel: ocrModel)
+        }
+    }
+
+    nonisolated static func isChatModel(_ model: String,
+                                        embeddingModel: String,
+                                        ocrModel: String) -> Bool {
+        if modelNamesMatch(model, embeddingModel) || modelNamesMatch(model, ocrModel) { return false }
+        let normalized = model.lowercased()
+        let auxiliaryMarkers = [
+            "embedding", "-embed", "_embed", "nomic-embed", "mxbai-embed",
+            "bge-", "bge_", "e5-", "e5_", "glm-ocr", "-ocr", "_ocr",
+        ]
+        return !auxiliaryMarkers.contains(where: normalized.contains)
+    }
+
+    nonisolated static func modelNamesMatch(_ lhs: String, _ rhs: String) -> Bool {
+        canonicalModelName(lhs) == canonicalModelName(rhs)
+    }
+
+    nonisolated static func canonicalModelName(_ rawName: String) -> String {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return name.hasSuffix(":latest") ? String(name.dropLast(":latest".count)) : name
+    }
+
+    static let officialDownloadURL = URL(string: "https://ollama.com/download/Ollama.dmg")!
+
+    nonisolated static var localApplicationURL: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        return support
+            .appendingPathComponent("FileNest", isDirectory: true)
+            .appendingPathComponent("Ollama", isDirectory: true)
+            .appendingPathComponent("Ollama.app", isDirectory: true)
+    }
+
+    func refresh(host: String) async {
+        isRefreshing = true
+        defer { isRefreshing = false }
+        let executable = Self.resolveExecutable()
+        executablePath = executable?.path
+        installedVersion = executable.flatMap(Self.installedVersion(for:))
+        let discoveredProcessIDs = await Self.discoverManagedServiceProcessIDs()
+        if discoveredProcessIDs != managedServiceProcessIDs {
+            Self.log(
+                discoveredProcessIDs.isEmpty
+                    ? "FileNest-managed Ollama service not detected"
+                    : "FileNest-managed Ollama service detected pids=\(discoveredProcessIDs)"
+            )
+        }
+        managedServiceProcessIDs = discoveredProcessIDs
+
+        do {
+            let listedModels = try await fetchModels(host: host)
+            models = await hydrateModelDetails(listedModels, host: host)
+            state = .running
+            lastError = nil
+        } catch {
+            models = []
+            if launchedProcess?.isRunning == true {
+                state = .starting
+            } else {
+                state = .stopped
+            }
+        }
+    }
+
+    func checkForUpdates() async {
+        guard isManagedInstall else {
+            updateStatus = .idle
+            latestVersion = nil
+            return
+        }
+        guard !updateStatus.isBusy else { return }
+
+        updateStatus = .checking
+        do {
+            let latest = try await ManagedServiceReleaseAPI.latestGitHubVersion(session: session)
+            latestVersion = latest
+            guard let installedVersion else {
+                updateStatus = .failed("Could not read the installed version")
+                return
+            }
+            updateStatus = ManagedServiceReleaseAPI.isNewer(latest, than: installedVersion)
+                ? .updateAvailable(latest)
+                : .upToDate
+        } catch {
+            updateStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    func update(host: String, flashAttentionEnabled: Bool = true) async {
+        guard isManagedInstall, !updateStatus.isBusy else { return }
+        if state == .running, !canStopManagedService {
+            updateStatus = .failed("The running Ollama service is not managed by FileNest. Stop it before updating.")
+            return
+        }
+        updateStatus = .updating
+        if canStopManagedService {
+            await stop(host: host)
+            guard !canStopManagedService else {
+                updateStatus = .failed(lastError ?? "Ollama update failed")
+                return
+            }
+        }
+        await installAndStart(host: host, flashAttentionEnabled: flashAttentionEnabled)
+        guard lastError == nil else {
+            updateStatus = .failed(lastError ?? "Ollama update failed")
+            return
+        }
+        installStatus = "Ollama update complete and running"
+        updateStatus = .idle
+        await checkForUpdates()
+    }
+
+    /// Downloads the official Ollama DMG into FileNest's user-level directory and starts the service after installation.
+    /// Does not write to /Applications or create a /usr/local/bin link, so administrator privileges are unnecessary.
+    func installAndStart(host: String, flashAttentionEnabled: Bool = true) async {
+        guard !isInstalling else { return }
+        guard #available(macOS 14.0, *) else {
+            let message = "This version of Ollama requires macOS 14 Sonoma or later."
+            state = .failed(message)
+            lastError = message
+            return
+        }
+
+        isInstalling = true
+        installProgress = 0
+        installStatus = "Downloading from Ollama’s official site…"
+        lastError = nil
+        defer { isInstalling = false }
+
+        let retainedDMG = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileNest-Ollama-\(UUID().uuidString).dmg")
+        defer { try? FileManager.default.removeItem(at: retainedDMG) }
+
+        do {
+            var request = URLRequest(url: Self.officialDownloadURL)
+            request.timeoutInterval = 900
+            let response = try await downloadOfficialDMG(request: request, to: retainedDMG)
+            try Self.validate(response)
+
+            installProgress = 0.76
+            installStatus = "Verifying and installing in your user directory…"
+            let executable = try await Task.detached(priority: .userInitiated) {
+                try Self.installDownloadedDMG(at: retainedDMG)
+            }.value
+            executablePath = executable.path
+            installedVersion = Self.installedVersion(for: executable)
+            installProgress = 0.94
+            installStatus = "Installation complete. Starting the service…"
+            await start(host: host, flashAttentionEnabled: flashAttentionEnabled)
+            if state == .running {
+                installProgress = 1
+                installStatus = "Ollama is installed and running"
+            }
+        } catch {
+            let message = "Ollama Installation Failed：\(error.localizedDescription)"
+            installStatus = "Installation Failed"
+            state = .failed(message)
+            lastError = message
+        }
+    }
+
+    private func downloadOfficialDMG(request: URLRequest, to destination: URL) async throws -> URLResponse {
+        var progressObservation: NSKeyValueObservation?
+        defer { progressObservation?.invalidate() }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let task = session.downloadTask(with: request) { [weak self] temporaryURL, response, error in
+                do {
+                    if let error { throw error }
+                    guard let temporaryURL, let response else { throw OllamaManagerError.badResponse }
+                    try FileManager.default.copyItem(at: temporaryURL, to: destination)
+                    Task { @MainActor [weak self] in
+                        self?.installProgress = 0.72
+                    }
+                    continuation.resume(returning: response)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+            progressObservation = task.progress.observe(\.fractionCompleted, options: [.initial, .new]) {
+                [weak self] progress, _ in
+                let fraction = min(max(progress.fractionCompleted, 0), 1)
+                Task { @MainActor [weak self] in
+                    self?.installProgress = fraction * 0.72
+                }
+            }
+            task.resume()
+        }
+    }
+
+    func start(host: String, flashAttentionEnabled: Bool = true) async {
+        if !isInstalling { installProgress = nil }
+        if (try? await fetchModels(host: host)) != nil {
+            await refresh(host: host)
+            return
+        }
+
+        guard let executable = Self.resolveExecutable() else {
+            let message = "Ollama was not found. Install Ollama first."
+            state = .failed(message)
+            lastError = message
+            return
+        }
+
+        state = .starting
+        lastError = nil
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["serve"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        var environment = ProcessInfo.processInfo.environment
+        if let serviceHost = Self.ollamaHostEnvironment(from: host) {
+            environment["OLLAMA_HOST"] = serviceHost
+        }
+        environment["OLLAMA_FLASH_ATTENTION"] = flashAttentionEnabled ? "true" : "false"
+        process.environment = environment
+
+        do {
+            Self.log("Ollama start requested flashAttention=\(flashAttentionEnabled)")
+            try process.run()
+            launchedProcess = process
+            if Self.isFileNestManagedExecutable(executable) {
+                managedServiceProcessIDs = [process.processIdentifier]
+            }
+            process.terminationHandler = { [weak self] terminated in
+                Task { @MainActor in
+                    guard let self, self.launchedProcess === terminated else { return }
+                    self.launchedProcess = nil
+                    self.managedServiceProcessIDs.removeAll { $0 == terminated.processIdentifier }
+                    if case .starting = self.state {
+                        let message = "The Ollama service exited immediately after launch."
+                        self.state = .failed(message)
+                        self.lastError = message
+                    } else {
+                        self.state = .stopped
+                    }
+                }
+            }
+
+            for _ in 0..<24 {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if (try? await fetchModels(host: host)) != nil {
+                    await refresh(host: host)
+                    Self.log("Ollama started pid=\(process.processIdentifier)")
+                    return
+                }
+                if !process.isRunning { break }
+            }
+
+            let message = "The service started but could not connect to \(host)。"
+            state = .failed(message)
+            lastError = message
+            Self.log(message, level: .error)
+        } catch {
+            let message = "Unable to start Ollama: \(error.localizedDescription)"
+            state = .failed(message)
+            lastError = message
+            Self.log(message, level: .error)
+        }
+    }
+
+    func stop(host: String) async {
+        managedServiceProcessIDs = await Self.discoverManagedServiceProcessIDs()
+        var processIDs = Set(managedServiceProcessIDs)
+        if let process = launchedProcess, process.isRunning {
+            processIDs.insert(process.processIdentifier)
+        }
+        guard !processIDs.isEmpty else {
+            if state == .running {
+                lastError = "This Ollama service was started outside FileNest. Stop it from its original launcher."
+            }
+            return
+        }
+
+        Self.log("Ollama stop requested pids=\(processIDs.sorted())")
+        processIDs.forEach { _ = Darwin.kill($0, SIGTERM) }
+        for _ in 0..<12 where processIDs.contains(where: Self.processIsRunning) {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        processIDs.filter(Self.processIsRunning).forEach { _ = Darwin.kill($0, SIGINT) }
+        for _ in 0..<8 where processIDs.contains(where: Self.processIsRunning) {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        let remaining = processIDs.filter(Self.processIsRunning)
+        launchedProcess = nil
+        managedServiceProcessIDs = []
+        if remaining.isEmpty {
+            state = .stopped
+            models = []
+            lastError = nil
+            Self.log("Ollama stopped")
+        } else {
+            let message = "The Ollama service could not stop (PIDs: \(remaining.sorted().map(String.init).joined(separator: ", "))）。"
+            lastError = message
+            Self.log(message, level: .error)
+        }
+        await refresh(host: host)
+        if !remaining.isEmpty { lastError = "The Ollama service could not stop. Try again later." }
+    }
+
+    func pull(model rawName: String, host: String) async {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        guard let url = endpoint(host: host, path: "/api/pull") else {
+            lastError = "The Ollama address is invalid."
+            return
+        }
+
+        pullingModel = name
+        pullProgress = nil
+        pullStatus = "Preparing Download"
+        lastError = nil
+        defer { pullingModel = nil }
+
+        do {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.timeoutInterval = 3_600
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["name": name, "stream": true])
+
+            let (bytes, response) = try await session.bytes(for: request)
+            try Self.validate(response)
+            for try await line in bytes.lines where !line.isEmpty {
+                guard let data = line.data(using: .utf8),
+                      let update = try? JSONDecoder().decode(PullUpdate.self, from: data) else { continue }
+                if let error = update.error { throw OllamaManagerError.server(error) }
+                pullStatus = update.status ?? "Downloading"
+                if let completed = update.completed, let total = update.total, total > 0 {
+                    pullProgress = min(max(Double(completed) / Double(total), 0), 1)
+                }
+            }
+            pullProgress = 1
+            pullStatus = "Download Complete"
+            await refresh(host: host)
+        } catch {
+            lastError = "ModelDownload Failed：\(error.localizedDescription)"
+            pullStatus = "Download Failed"
+        }
+    }
+
+    func delete(model: String, host: String) async {
+        guard let url = endpoint(host: host, path: "/api/delete") else {
+            lastError = "The Ollama address is invalid."
+            return
+        }
+
+        do {
+            var request = URLRequest(url: url)
+            request.httpMethod = "DELETE"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["name": model])
+            let (_, response) = try await session.data(for: request)
+            try Self.validate(response)
+            await OllamaModelMetadataCache.shared.remove(host: host, model: model)
+            await refresh(host: host)
+        } catch {
+            lastError = "Failed to delete model: \(error.localizedDescription)"
+        }
+    }
+
+    private func fetchModels(host: String) async throws -> [OllamaModelInfo] {
+        guard let url = endpoint(host: host, path: "/api/tags") else {
+            throw OllamaManagerError.invalidHost
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        let (data, response) = try await session.data(for: request)
+        try Self.validate(response)
+        return try JSONDecoder().decode(TagsResponse.self, from: data).models
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private func hydrateModelDetails(_ listedModels: [OllamaModelInfo],
+                                     host: String) async -> [OllamaModelInfo] {
+        var hydrated = [OllamaModelInfo]()
+        hydrated.reserveCapacity(listedModels.count)
+        for model in listedModels {
+            if let cached = await OllamaModelMetadataCache.shared.details(
+                host: host,
+                model: model.name,
+                modifiedAt: model.modifiedAt
+            ) {
+                hydrated.append(model.withDetails(cached))
+                continue
+            }
+            guard let details = try? await fetchModelDetails(host: host, model: model.name) else {
+                hydrated.append(model)
+                continue
+            }
+            await OllamaModelMetadataCache.shared.store(
+                details,
+                host: host,
+                model: model.name,
+                modifiedAt: model.modifiedAt
+            )
+            hydrated.append(model.withDetails(details))
+        }
+        return hydrated
+    }
+
+    private func fetchModelDetails(host: String, model: String) async throws -> OllamaModelDetails {
+        guard let url = endpoint(host: host, path: "/api/show") else {
+            throw OllamaManagerError.invalidHost
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 3
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["model": model])
+        let (data, response) = try await session.data(for: request)
+        try Self.validate(response)
+        guard let details = OllamaModelMetadataParser.details(from: data) else {
+            throw OllamaManagerError.badResponse
+        }
+        return details
+    }
+
+    private func endpoint(host: String, path: String) -> URL? {
+        let base = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return URL(string: base + path)
+    }
+
+    private static func validate(_ response: URLResponse) throws {
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            throw OllamaManagerError.badResponse
+        }
+    }
+
+    private static func resolveExecutable() -> URL? {
+        let fileManager = FileManager.default
+        var candidates = [
+            localApplicationURL.appendingPathComponent("Contents/Resources/ollama").path,
+            "/opt/homebrew/bin/ollama",
+            "/usr/local/bin/ollama",
+            "/Applications/Ollama.app/Contents/Resources/ollama",
+        ]
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/ollama" })
+        }
+        return candidates.first(where: fileManager.isExecutableFile(atPath:)).map(URL.init(fileURLWithPath:))
+    }
+
+    nonisolated private static func installedVersion(for executable: URL) -> String? {
+        let application = executable
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        if application.pathExtension == "app",
+           let bundle = Bundle(url: application),
+           let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+            return ManagedServiceReleaseAPI.normalized(version)
+        }
+        guard let data = try? runProcess(executable: executable.path, arguments: ["--version"]),
+              let output = String(data: data, encoding: .utf8),
+              let version = output.split(whereSeparator: { !$0.isNumber && $0 != "." })
+                .first(where: { $0.contains(".") }) else { return nil }
+        return ManagedServiceReleaseAPI.normalized(String(version))
+    }
+
+    nonisolated private static func isFileNestManagedExecutable(_ executable: URL) -> Bool {
+        executable.standardizedFileURL.path == localApplicationURL
+            .appendingPathComponent("Contents/Resources/ollama")
+            .standardizedFileURL.path
+    }
+
+    nonisolated private static func discoverManagedServiceProcessIDs() async -> [Int32] {
+        await Task.detached(priority: .utility) {
+            let executable = localApplicationURL
+                .appendingPathComponent("Contents/Resources/ollama")
+                .standardizedFileURL.path
+            guard FileManager.default.isExecutableFile(atPath: executable) else { return [] }
+            let pattern = "^\(regularExpressionEscaped(executable)) serve( |$)"
+            guard let output = try? runProcess(
+                executable: "/usr/bin/pgrep",
+                arguments: ["-f", pattern]
+            ), let text = String(data: output, encoding: .utf8) else { return [] }
+            return text.split(whereSeparator: \.isNewline).compactMap { rawPID in
+                Int32(rawPID.trimmingCharacters(in: .whitespacesAndNewlines))
+            }.sorted()
+        }.value
+    }
+
+    nonisolated private static func regularExpressionEscaped(_ value: String) -> String {
+        NSRegularExpression.escapedPattern(for: value)
+    }
+
+    nonisolated static func managedServiceProcessIDs(from processList: String,
+                                                     executablePath: String) -> [Int32] {
+        let expectedCommand = executablePath + " serve"
+        return processList.split(whereSeparator: \Character.isNewline).compactMap { rawLine in
+            let line = rawLine.drop(while: \Character.isWhitespace)
+            let pidText = line.prefix(while: \Character.isNumber)
+            guard let pid = Int32(pidText) else { return nil }
+            let command = line.dropFirst(pidText.count).drop(while: \Character.isWhitespace)
+            guard command == expectedCommand || command.hasPrefix(expectedCommand + " ") else { return nil }
+            return pid
+        }
+    }
+
+    nonisolated private static func processIsRunning(_ pid: Int32) -> Bool {
+        Darwin.kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    nonisolated private static func log(_ message: String, level: AppLogLevel = .info) {
+        AppLogService.shared.write(message, category: .appLifecycle, level: level)
+    }
+
+    nonisolated private static func installDownloadedDMG(at dmgURL: URL) throws -> URL {
+        let attach = try runProcess(
+            executable: "/usr/bin/hdiutil",
+            arguments: ["attach", "-nobrowse", "-readonly", "-plist", dmgURL.path]
+        )
+        guard let plist = try PropertyListSerialization.propertyList(from: attach, format: nil) as? [String: Any],
+              let entities = plist["system-entities"] as? [[String: Any]],
+              let mountPath = entities.compactMap({ $0["mount-point"] as? String }).last else {
+            throw OllamaManagerError.invalidDiskImage
+        }
+
+        defer {
+            _ = try? runProcess(executable: "/usr/bin/hdiutil", arguments: ["detach", mountPath, "-force"])
+        }
+
+        let mountURL = URL(fileURLWithPath: mountPath, isDirectory: true)
+        let sourceApplication = mountURL.appendingPathComponent("Ollama.app", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: sourceApplication.path) else {
+            throw OllamaManagerError.applicationMissing
+        }
+
+        try verifyCodeSignature(of: sourceApplication)
+
+        let destinationApplication = localApplicationURL
+        let installRoot = destinationApplication.deletingLastPathComponent()
+        let parent = installRoot.deletingLastPathComponent()
+        let stagingRoot = parent.appendingPathComponent("Ollama.installing-\(UUID().uuidString)", isDirectory: true)
+        let stagingApplication = stagingRoot.appendingPathComponent("Ollama.app", isDirectory: true)
+        let backupRoot = parent.appendingPathComponent("Ollama.backup-\(UUID().uuidString)", isDirectory: true)
+        let fileManager = FileManager.default
+
+        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: stagingRoot) }
+        try fileManager.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+        _ = try runProcess(executable: "/usr/bin/ditto", arguments: [sourceApplication.path, stagingApplication.path])
+        try verifyCodeSignature(of: stagingApplication)
+
+        let hadExistingInstall = fileManager.fileExists(atPath: installRoot.path)
+        if hadExistingInstall {
+            try fileManager.moveItem(at: installRoot, to: backupRoot)
+        }
+        do {
+            try fileManager.moveItem(at: stagingRoot, to: installRoot)
+            if hadExistingInstall { try? fileManager.removeItem(at: backupRoot) }
+        } catch {
+            if hadExistingInstall, !fileManager.fileExists(atPath: installRoot.path) {
+                try? fileManager.moveItem(at: backupRoot, to: installRoot)
+            }
+            throw error
+        }
+
+        let executable = destinationApplication.appendingPathComponent("Contents/Resources/ollama")
+        guard fileManager.isExecutableFile(atPath: executable.path) else {
+            throw OllamaManagerError.executableMissing
+        }
+        return executable
+    }
+
+    nonisolated private static func verifyCodeSignature(of application: URL) throws {
+        do {
+            _ = try runProcess(
+                executable: "/usr/bin/codesign",
+                arguments: ["--verify", "--deep", "--strict", application.path]
+            )
+            _ = try runProcess(
+                executable: "/usr/sbin/spctl",
+                arguments: ["--assess", "--type", "execute", application.path]
+            )
+        } catch {
+            throw OllamaManagerError.invalidSignature
+        }
+    }
+
+    @discardableResult
+    nonisolated private static func runProcess(executable: String, arguments: [String]) throws -> Data {
+        let process = Process()
+        let output = Pipe()
+        let errors = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else {
+            let errorData = errors.fileHandleForReading.readDataToEndOfFile()
+            let detail = String(data: errorData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw OllamaManagerError.commandFailed(detail ?? executable)
+        }
+        return data
+    }
+
+    private static func ollamaHostEnvironment(from host: String) -> String? {
+        guard let components = URLComponents(string: host), let hostname = components.host else { return nil }
+        return components.port.map { "\(hostname):\($0)" } ?? hostname
+    }
+}
+
+private struct TagsResponse: Decodable {
+    let models: [OllamaModelInfo]
+}
+
+private struct PullUpdate: Decodable {
+    let status: String?
+    let completed: Int64?
+    let total: Int64?
+    let error: String?
+}
+
+private enum OllamaManagerError: LocalizedError {
+    case invalidHost
+    case badResponse
+    case server(String)
+    case invalidDiskImage
+    case applicationMissing
+    case executableMissing
+    case invalidSignature
+    case commandFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidHost: return "The Ollama address is invalid"
+        case .badResponse: return "Ollama returned an error response"
+        case let .server(message): return message
+        case .invalidDiskImage: return "Could not mount the Ollama installer image"
+        case .applicationMissing: return "Ollama.app was not found in the installer image"
+        case .executableMissing: return "The Ollama command was not found after installation"
+        case .invalidSignature: return "Ollama code-signature verification failed"
+        case let .commandFailed(message): return message
+        }
+    }
+}
