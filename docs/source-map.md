@@ -21,3 +21,11 @@
 | Windows library search and settings normalization live in the main process | `library-search.ts`, `settings-normalization.ts`, `parity.test.ts` | service + test | High |
 | Windows packaging targets NSIS and portable x64/ARM64 | `FileNestWindows/package.json` | manifest | High |
 | Actual Windows native behavior requires Windows runtime validation | platform constraint | inference | High |
+| Semantic chunks preserve paragraph and sentence boundaries before using an emergency lexical fallback | `FileNest/Services/IndexerService.swift`, `FileNestTests/IndexerServiceTests.swift` | implementation + test | High |
+| Parent, retrieval, and semantic-overlap defaults are 600, 300, and 80 tokens | `FileNest/App/AppSettings.swift`, `FileNestTests/AppSettingsTests.swift` | config + test | High |
+| Retrieval children retain the complete answer-time parent and contextual embedding prefix | `FileNest/Services/IndexerService.swift`, `FileNestTests/IndexerServiceTests.swift` | implementation + test | High |
+| Adjacent Docling text fragments that split a sentence are repaired before semantic chunking | `FileNest/Services/IndexerService.swift`, `FileNestTests/IndexerServiceTests.swift` | implementation + test | High |
+| Ollama runner EOF retries bisect the current segment on the strongest available boundary | `FileNest/Services/IndexerService.swift`, `FileNestTests/IndexerServiceTests.swift` | implementation + test | High |
+| Embedding-space changes rebuild automatically; other processing changes are user-selectable or skippable | `FileNest/App/AppSettings.swift`, `FileNest/App/AppState.swift`, `FileNestTests/AppStateTests.swift` | implementation + test | High |
+| Reindexing requires stage selection and a second destructive confirmation | `FileNest/App/FileNestApp.swift`, `FileNestTests/AppStateTests.swift` | UI + test | High |
+| Startup removes document parents that no retrieval child references | `FileNest/Storage/SQLiteStore.swift`, `FileNestTests/SQLiteStoreTests.swift` | migration + test | High |

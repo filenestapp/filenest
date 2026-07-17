@@ -5,7 +5,7 @@
 - Product baseline: current macOS implementation under `FileNest/`
 - Windows implementation: `FileNestWindows/`
 - Last synchronized: 2026-07-17 (Asia/Singapore)
-- Code baseline: `0cda7bf` plus the 2026-07-17 product update
+- Code baseline: `839c410`
 
 ## Reading order
 
@@ -19,8 +19,9 @@
 8. [macOS to Windows parity](08-windows-parity.md)
 9. [Verification strategy](09-verification.md)
 10. [RAG evaluation](10-rag-evaluation.md)
-11. [Source map](source-map.md)
-12. [2026-07-17 change analysis](changes/0cda7bf-to-2026-07-17.md)
+11. [Semantic chunking and reindexing](11-semantic-chunking-and-reindexing.md)
+12. [Source map](source-map.md)
+13. [2026-07-17 change analysis](changes/0cda7bf-to-2026-07-17.md)
 
 The deterministic inventory used as a starting point is retained under `_inventory/`. It includes build products and dependencies, so it is not used as primary product evidence.
 
@@ -46,5 +47,6 @@ The macOS source is the normative feature specification. Existing overview files
 
 | Date | Baseline | Documentation synchronized |
 | --- | --- | --- |
+| 2026-07-17 | `839c410` | Semantic boundary chunking, parent/child terminology, runner EOF recovery, parent-row cleanup, and selective reindex behavior |
 | 2026-07-17 | `0cda7bf` → current product update | Search and Smart Search presentation, confidence ranking, persistent chat execution, model onboarding, managed service updates, selective indexing, Windows parity, build and verification records |
 | 2026-07-16 | Initial repository analysis | Product overview, architecture, data model, integration map, onboarding, Windows parity, and verification baseline |

@@ -53,7 +53,8 @@ The final report must separate `Passed locally`, `Passed on Windows`, and `Requi
 
 | Gate | Result |
 | --- | --- |
-| macOS baseline XCTest | 314 tests passed, 0 failed |
+| macOS baseline XCTest | full suite passed on the latest rerun, 0 failed |
+| Semantic chunking and persistence regression tests | passed: paragraph/sentence boundaries, whole-word emergency fallback, semantic overlap, parent retention, table headers, Docling sentence repair, and orphan-parent cleanup |
 | Windows TypeScript type check | passed |
 | Windows Vitest | 22 tests passed, 0 failed |
 | Signed macOS Release build and launch verification | passed; installed app satisfies its designated requirement |
@@ -73,6 +74,8 @@ npm run build
 cd ..
 ./script/build_and_run.sh --verify
 ```
+
+The semantic chunking checks are concentrated in `IndexerServiceTests`, `SQLiteStoreTests`, `AppSettingsTests`, and `AppStateTests`. A 268-page financial filing was also used as a private runtime probe. The pre-repair semantic pass produced 1,424 retrieval children from 854 parents and removed the known mid-word prefixes from the earlier index. A later adjacent-Docling-fragment repair was verified by unit test; the full private fixture was not rerun after that final repair, so the 1,424 count is not presented as a final post-repair benchmark.
 
 ### Not yet passed on Windows
 

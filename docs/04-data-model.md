@@ -29,7 +29,9 @@ Both platforms persist product state in a local SQLite-compatible database. macO
 
 ## Chunk kinds
 
-The macOS schema supports `title`, `text`, `table`, `list`, `picture`, `note`, and `metadata`. Page ranges and section paths are optional. Each retrieval chunk records a parent index, extracted entity terms, `token_count`, `tokenizer_profile`, `tokenizer_version`, and `token_count_accuracy`. Parent rows preserve the larger section returned to the answer model. Exact Docling tokenizer counts take precedence; legacy estimates migrate to the shared versioned estimator in place without changing chunk boundaries or vectors. Legacy chunks migrate by treating each old chunk as its own parent. The note is independently re-embeddable so editing a note does not require reparsing the source document.
+The macOS schema supports `title`, `text`, `table`, `list`, `picture`, `note`, and `metadata`. Page ranges and section paths are optional. Each retrieval chunk records its searchable body in `text`, its actual embedding input in `contextual_text`, a parent index, extracted entity terms, `token_count`, `tokenizer_profile`, `tokenizer_version`, and `token_count_accuracy`. Parent rows preserve the larger section returned to the answer model. Exact Docling tokenizer counts take precedence; legacy estimates migrate to the shared versioned estimator in place without changing chunk boundaries or vectors. Legacy chunks migrate by treating each old chunk as its own parent. The note is independently re-embeddable so editing a note does not require reparsing the source document.
+
+`document_parents` is backfilled from legacy chunks only when the table is first created. On later starts, parent rows without a matching `(file_id, parent_idx)` child reference are deleted. This prevents obsolete parent copies from accumulating after replacement or interrupted historical rebuilds.
 
 Windows now persists the same structured chunk vocabulary and contextual text instead of treating the full extracted body as an opaque single field. Windows migrations are additive and preserve existing file, embedding, session, and message rows.
 
@@ -45,6 +47,7 @@ Windows now persists the same structured chunk vocabulary and contextual text in
 | --- | --- | --- | --- |
 | File | Document chunk | one-to-many | foreign key cascade on macOS |
 | File | Document parent | one-to-many | foreign key cascade on macOS |
+| Document parent | Document chunk | one-to-many logical | matching `file_id` and `parent_idx`; orphan parents are removed at startup |
 | File | Embedding | one-to-many | foreign key cascade |
 | Chat session | Chat message | one-to-many | session foreign key/cascade in Windows; application migration on macOS |
 | Chat message | File | many-to-many logical reference | JSON array of file IDs, not a foreign-key join table |
