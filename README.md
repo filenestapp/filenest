@@ -1,96 +1,124 @@
-# FileNest — macOS 智能文件管家
+# FileNest — 本地优先的智能文件管理器
 
-监听下载/桌面目录 → 自动归类整理 → 向量索引 → 用自然语言聊天找文件。
+FileNest 监听用户选择的目录，在文件或项目目录进入稳定态后完成内容解析、OCR、结构化切片、向量索引与自动整理，并提供普通搜索、Smart Search、Find with Chat 和 Chat with File。
 
-## 核心功能
+当前仓库包含两套桌面实现：
 
-1. **自动归类** — 监听指定目录（默认 `~/Downloads`），新文件按扩展名自动分到 `~/FileNestOrganized/{文档,图片,视频,音频,代码,压缩包}` 子文件夹。规则可自定义目标文件夹和优先级，支持「仅规则 / 混合」；混合模式在无命中规则时按扩展名归类。AI 语义分类尚未实现。
-2. **向量化索引** — 文件内容抽取（PDF/文本/代码）后用 Apple 内置 NLEmbedding 生成向量，存入本地 SQLite，用 Accelerate (vDSP) 做 cosine 相似度检索。完全离线、零隐私泄露。
-3. **聊天找文件 (RAG)** — 用自然语言描述需求（如「上周的合同」），系统向量检索相关文件，拼接上下文交给 LLM（默认本地 Ollama，可切云端 API）回答并引用文件，点击即在 Finder 定位。
+- `FileNest/`：原生 macOS 13+ SwiftUI 应用，也是当前产品行为基线。
+- `FileNestWindows/`：Electron + React + TypeScript 的 Windows 11 对齐实现。
 
-## 应用形态
+## 核心能力
 
-- **菜单栏常驻**（`MenuBarExtra`）：状态显示 + 快速操作 + 最近文件
-- **完整主窗口**（`WindowGroup`）：文件库（搜索/分类/列表）、聊天、规则管理
-- **设置**（`Settings`）：监听目录、文件类型、分类策略、AI Provider 配置
+### 监听与整理
 
-## 技术栈
+- 默认可监听 Desktop、Downloads，也支持添加多个目录。
+- 对新增文件和目录进行稳定态检测，避免处理下载中间态、锁文件或尚未完成的 `git clone`。
+- 应用退出期间产生的新增或变更内容，会在重新启动后通过增量核对发现。
+- 先索引再整理；目录会参考 README 等说明文件建立索引和分类上下文。
+- 规则支持优先级、忽略动作、AI 生成、定时/数量批处理和安全的子目录目标。
+- 默认忽略安装包、临时文件和其他不应自动移动的内容。
 
-| 领域 | 选型 | 说明 |
-|---|---|---|
-| UI | SwiftUI + MenuBarExtra (macOS 13+) | 菜单栏+窗口，最低 macOS 13 |
-| 存储 | GRDB.swift (系统 SQLite) | 元数据 + 向量 BLOB，App Store 友好 |
-| 向量检索 | Accelerate (vDSP) 内存暴力检索 | 沙盒安全、零依赖；几十万向量内够快 |
-| 文本向量 | NLEmbedding (Apple 内置) | 离线、隐私、512 维 |
-| 聊天 LLM | Ollama (默认) / OpenAI 兼容 API | 可切换，未配置则优雅降级 |
-| PDF 抽取 | PDFKit (系统) | 零依赖 |
-| 文件监听 | DispatchSource + 定时轮询 | 原生 |
+### 文档处理与本地 RAG
 
-## 构建
+```text
+PDF / Office / 图片 / 其他文档
+        ↓
+Docling 优先解析；原生解析器作为回退
+        ↓
+PaddleOCR 优先；GLM-OCR 或云端 OCR 回退
+        ↓
+清洗、结构化、按章节切片
+        ↓
+qwen3-embedding:0.6b / Apple NLEmbedding / 云端 Embedding
+        ↓
+SQLite + sqlite-vec + Accelerate 缓存
+        ↓
+本地 Ollama 或云端 LLM 问答
+```
+
+- 结构化切片保留标题、正文、表格、列表、图片、Note、章节与页码信息。
+- 默认切片目标为 600–1000 tokens，并支持 overlap 配置。
+- 已索引文件的 Note 可独立重新向量化，无需重新解析源文档。
+- 索引提交前会再次校验源文件版本，防止旧任务覆盖新内容。
+- 重建索引支持仅处理新文件、Embedding 变化、切片设置变化、OCR/解析器变化，以及暂停、恢复、停止和重新开始。
+
+### 搜索与聊天
+
+- 普通搜索融合文件名、标题、路径、Note、内容、日期意图与向量相似度。
+- 普通结果页按置信度展示，并可按需触发耗时更长的 Smart Search。
+- Smart Search 使用 AI 将自然语言转为语义查询、关键词、文件类型、日期和排序条件。
+- Find with Chat 复用智能检索规划，并流式展示检索意图、匹配和生成阶段。
+- Chat with File 仅使用目标文件已经存在的索引切片；已索引文件不会重复解析。
+- 会话和输入草稿本地持久化；切换页面不会中断正在生成的回答。
+- 模型失败时可以从云端切换到本地，或直接返回向量检索结果。
+- 回答支持 Markdown、引用文件预览、重试替换、token usage、首响与总耗时。
+
+### 本地 AI 与云端 AI
+
+- 本地模式可安装、启动、更新 Ollama，并管理生成、Embedding 和 OCR 模型。
+- 初始化向导默认选择 `qwen3.5:9b` 和 `qwen3-embedding:0.6b`，也允许用户调整。
+- Docling 与 PaddleOCR 安装在 FileNest 用户目录下的独立 Python 环境中。
+- 云端模式支持 OpenAI-compatible 与 Anthropic 格式，并可独立配置 Chat、Embedding、OCR 或复用凭据。
+- 云端模型可以手动指定上下文窗口；未知兼容模型默认按 612K tokens 规划。
+
+## 产品形态
+
+- 菜单栏/系统托盘后台运行与快捷状态操作。
+- 可收缩侧边栏、最近会话、监听/索引/AI 状态与完成提醒。
+- 文件库、右侧统一预览面板、全屏预览、Note、切片查看和回收站操作。
+- 设置页包含通用配置、AI 模型、索引、规则、统计、诊断日志与更新。
+- 英文、简体中文以及跟随系统的浅色/深色模式。
+
+## 构建与验证
+
+### macOS
+
+项目脚本默认构建 Release、保持稳定 Apple Development 签名、安装到 `~/Applications/FileNest.app` 并启动：
 
 ```bash
-# 1. 生成 Xcode 工程（已生成，仅源文件变动时需要）
-xcodegen generate
+./script/build_and_run.sh --verify
+```
 
-# 2. 命令行构建
-xcodebuild -project FileNest.xcodeproj -scheme FileNest -configuration Debug \
-  -destination 'platform=macOS' build
+调试构建：
 
-# 3. 运行（构建产物）
-open ~/Library/Developer/Xcode/DerivedData/FileNest-*/Build/Products/Debug/FileNest.app
+```bash
+./script/build_and_run.sh --debug
+```
 
-# 4. 运行单元测试
+完整测试：
+
+```bash
 xcodebuild -project FileNest.xcodeproj -scheme FileNest \
-  -configuration Debug -destination 'platform=macOS' test
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath .build/DerivedData test
 ```
 
-或直接用 Xcode 打开 `FileNest.xcodeproj` 运行。
-
-## 启用聊天功能（可选）
-
-聊天需要 LLM。默认用本地 Ollama：
+### Windows
 
 ```bash
-brew install ollama
-ollama serve                # 后台运行
-ollama pull qwen2.5:7b      # 拉取模型（也可选 llama3.1:8b 等）
+cd FileNestWindows
+npm ci
+npm run typecheck
+npm test
+npm run build
 ```
 
-不装 Ollama 也能用：在设置里切换到「云端 API」，填入 OpenAI/DeepSeek/智谱等兼容接口的 Key。两者都没配置时，聊天会优雅降级为提示信息，向量检索仍正常工作。
+Windows 安装包、Explorer/Recycle Bin、DPAPI、托盘与自动更新仍需在真实 x64/ARM64 Windows 11 环境完成发布验收。
 
-## 架构
+## 数据与隐私
 
-```
-UI 层 (SwiftUI)
-  MenuBarView · MainView · LibraryView · ChatView · RulesView · SettingsView
-        │
-服务层
-  FileWatcherService  → 监听目录，等待文件稳定后发现新文件
-  OrganizerService    → 规则分类，移动文件
-  IndexerService      → 内容抽取 + 分块 + 向量化
-  ChatService         → RAG 检索 + LLM 对话
-        │
-领域层 (可插拔协议)
-  EmbeddingProvider   → NLEmbeddingProvider / OllamaEmbeddingProvider
-  LLMProvider         → OllamaLLMProvider / OpenAICompatibleLLMProvider / NoopLLMProvider
-  VectorStore         → AccelerateVectorStore (vDSP)
-  Classifier          → RuleClassifier
-        │
-基础设施层
-  SQLiteStore (GRDB)  → files / embeddings / rules / chat_messages / settings
-```
+- 文件元数据、结构化切片、向量、Note、会话与统计默认保存在本机数据库。
+- 本地模式下文档内容不需要发送到云端。
+- 只有用户明确配置云端 Chat、Embedding 或 OCR 时，相应请求内容才会发送到配置的 API。
+- 应用以当前操作系统用户及其文件权限作为授权边界，不包含账号、RBAC 或多租户系统。
 
-**可插拔设计**：所有外部能力抽象为协议，Provider 可在设置中切换，贯彻「合理默认 + 可配置」。
+## 文档
 
-## 关键设计决策
+- [产品与工程文档索引](docs/00-index.md)
+- [产品概览](docs/01-product-overview.md)
+- [功能地图](docs/02-feature-map.md)
+- [技术架构](docs/03-technical-architecture.md)
+- [验证策略](docs/09-verification.md)
+- [Windows 对齐状态](docs/08-windows-parity.md)
 
-### 为什么不用 sqlite-vec / vec1？
-App Sandbox（上架 App Store 必需）禁止运行时加载 SQLite 扩展，系统的 SQLite 也禁用了扩展加载。sqlite-vec/vec1 必须自带整套 SQLite 源码并静态编译，构建/分发复杂度高。而在本应用规模（几万向量）下，Swift + Accelerate 暴力检索反而更快（省掉 SQL/虚拟表开销），且零依赖、完全沙盒安全。`VectorStore` 协议化保留了未来切换到 vec1 的可能。
-
-### 为什么 Embedding 用 NLEmbedding？
-零配置、离线、隐私。无需下载模型、无需联网、无 API 费用，开箱即用。代价是对中文文本的语义区分度弱于专门的多语言模型（如 nomic-embed-text）—— 想要更好效果可在设置切到 Ollama embedding。
-
-## 调试日志
-
-运行时日志写入 `~/FileNestLogs/{watcher,indexer}.log`（文件日志，绕过统一日志系统的隐私过滤）。
-数据库位于 `~/Library/Application Support/filenest.sqlite`。
+代码与自动化测试是行为的最终依据；文档记录当前提交的产品与工程解释。

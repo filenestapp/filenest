@@ -207,6 +207,30 @@ final class ChatServiceTests: XCTestCase {
         }
     }
 
+    private final class StreamingSearchIntentLLMProvider: LLMProvider, @unchecked Sendable {
+        let name = "streaming-search-intent-stub"
+
+        func chat(_ messages: [ChatTurn], context: String?) async throws -> String {
+            "answer"
+        }
+
+        func streamChat(
+            _ messages: [ChatTurn],
+            context: String?
+        ) -> AsyncThrowingStream<String, Error> {
+            let isPlanningRequest = messages.first?.content.contains(#""intent""#) == true
+            return AsyncThrowingStream { continuation in
+                if isPlanningRequest {
+                    continuation.yield(#"{"intent":"Find June "#)
+                    continuation.yield(#"invoices and prioritize the newest files","semantic_query":"invoice payment details","keywords":["INV-42"],"categories":["documents"],"date_from":"2026-06-01","date_to":"2026-06-30","sort":"newest"}"#)
+                } else {
+                    continuation.yield("answer")
+                }
+                continuation.finish()
+            }
+        }
+    }
+
     private final class StreamingLLMProvider: LLMProvider, @unchecked Sendable {
         let name = "streaming-stub"
         private let lock = NSLock()
@@ -561,6 +585,52 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertEqual(response.results.first?.file.id, matchingID)
     }
 
+    func testSmartSearchStreamsUserFacingIntentWhileBuildingPlan() async throws {
+        let chat = makeChatService(llmProvider: StreamingSearchIntentLLMProvider())
+        var intentUpdates = [String]()
+
+        let response = await chat.smartSearchLibrary(
+            "Find the June INV-42 invoice",
+            onIntentUpdate: { intentUpdates.append($0) }
+        )
+
+        XCTAssertEqual(intentUpdates, [
+            "Find June ",
+            "Find June invoices and prioritize the newest files",
+        ])
+        XCTAssertTrue(response.usedAI)
+        XCTAssertEqual(response.plan.semanticQuery, "invoice payment details")
+        XCTAssertEqual(response.plan.keywords, ["INV-42"])
+        XCTAssertTrue(response.plan.sortNewestFirst)
+    }
+
+    func testFindWithChatStreamsSearchIntentThroughPlanningProgress() async throws {
+        let chat = makeChatService(llmProvider: StreamingSearchIntentLLMProvider())
+        let session = try XCTUnwrap(chat.createSession())
+        let sessionID = try XCTUnwrap(session.id)
+        var intentUpdates = [String]()
+        var completed: ChatMessage?
+
+        for await update in chat.streamAnswer(
+            "Find the June INV-42 invoice",
+            sessionId: sessionID,
+            attachedFilePath: nil
+        ) {
+            if case let .progress(progress) = update,
+               progress.phase == .planningSearch,
+               !progress.searchIntent.isEmpty {
+                intentUpdates.append(progress.searchIntent)
+            }
+            if case let .completed(message) = update { completed = message }
+        }
+
+        XCTAssertEqual(intentUpdates, [
+            "Find June ",
+            "Find June invoices and prioritize the newest files",
+        ])
+        XCTAssertEqual(completed?.content, "answer")
+    }
+
     func testFindWithChatReusesSmartPlanForVectorQueryAndFilters() async throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -694,6 +764,34 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertEqual(results.map(\.file.id), [matchingID])
         XCTAssertEqual(results.first?.matchKind, .content)
         XCTAssertTrue(results.first?.snippet?.contains("Remittance") == true)
+    }
+
+    func testLibrarySearchConfidenceRanksContentBeforeNoteAndTitle() async throws {
+        let contentID = try insertFile(
+            named: "content-source.pdf",
+            title: "Project archive",
+            contentText: "Heliotrope launch details"
+        )
+        let noteID = try insertFile(
+            named: "note-source.pdf",
+            title: "Reference material",
+            contentText: "Unrelated body text",
+            note: "Heliotrope follow-up"
+        )
+        let titleID = try insertFile(
+            named: "title-source.pdf",
+            title: "Heliotrope overview",
+            contentText: "Unrelated body text"
+        )
+        let chat = makeChatService(embedder: FailingEmbedder())
+
+        let results = await chat.searchLibrary("heliotrope")
+
+        XCTAssertEqual(results.map(\.file.id), [contentID, noteID, titleID])
+        XCTAssertEqual(results.map(\.matchKind), [.content, .note, .title])
+        XCTAssertGreaterThan(results[0].confidence, results[1].confidence)
+        XCTAssertGreaterThan(results[1].confidence, results[2].confidence)
+        XCTAssertTrue(results.allSatisfy { (0...1).contains($0.confidence) })
     }
 
     func testLoadingSessionsDoesNotCreateOrKeepAnEmptyDraft() throws {
@@ -1177,7 +1275,8 @@ final class ChatServiceTests: XCTestCase {
         named name: String,
         title: String,
         mtime: Date = Date(),
-        contentText: String? = nil
+        contentText: String? = nil,
+        note: String? = nil
     ) throws -> Int64 {
         try store.upsertFile(FileRecord(
             id: nil,
@@ -1191,7 +1290,8 @@ final class ChatServiceTests: XCTestCase {
             indexedAt: Date(),
             contentHash: nil,
             title: title,
-            contentText: contentText ?? title
+            contentText: contentText ?? title,
+            note: note
         ))
     }
 

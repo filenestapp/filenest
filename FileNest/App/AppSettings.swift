@@ -63,7 +63,7 @@ final class AppSettings: ObservableObject {
     @Published var classifyStrategy: String = "hybrid"
     @Published var llmChoice: String = LLMChoice.ollama.rawValue
     @Published var ollamaHost: String = "http://127.0.0.1:11434"
-    @Published var ollamaModel: String = OllamaModelRecommendation.recommendedForCurrentDevice.generationModel
+    @Published var ollamaModel: String = OllamaModelRecommendation.defaultGenerationModel
     @Published var ollamaFlashAttentionEnabled: Bool = true
     @Published var cloudAPIFormat: String = CloudAPIFormat.openAI.rawValue
     @Published var cloudAPIKey: String = ""
@@ -214,7 +214,7 @@ final class AppSettings: ObservableObject {
             ?? LLMChoice.ollama.rawValue
         ollamaHost = load(.ollamaHost) ?? "http://127.0.0.1:11434"
         ollamaModel = load(.ollamaModel)
-            ?? OllamaModelRecommendation.recommendedForCurrentDevice.generationModel
+            ?? OllamaModelRecommendation.defaultGenerationModel
         ollamaFlashAttentionEnabled = load(.ollamaFlashAttentionEnabled) != "0"
         cloudAPIFormat = CloudAPIFormat(rawValue: load(.cloudAPIFormat) ?? "")?.rawValue
             ?? CloudAPIFormat.openAI.rawValue

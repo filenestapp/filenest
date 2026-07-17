@@ -18,7 +18,7 @@ export class OllamaManager {
 
   async pull(model: string, settings: Settings): Promise<void> {
     const response = await fetch(new URL('/api/pull', settings.ollamaHost.replace(/\/+$/, '') + '/'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model, stream: false }) })
-    if (!response.ok) throw new Error(`ModelDownload Failed：${response.status} ${await response.text()}`)
+    if (!response.ok) throw new Error(`Model download failed: ${response.status} ${await response.text()}`)
   }
 
   async delete(model: string, settings: Settings): Promise<void> {
@@ -26,7 +26,7 @@ export class OllamaManager {
     if (!response.ok) throw new Error(`Failed to delete model: ${response.status} ${await response.text()}`)
   }
 
-  async install(): Promise<void> {
+  async install(settings?: Settings): Promise<void> {
     if (process.platform !== 'win32') {
       await shell.openExternal('https://ollama.com/download/windows')
       return
@@ -36,7 +36,12 @@ export class OllamaManager {
       const local = process.env.LOCALAPPDATA
       const executable = local ? join(local, 'Programs', 'Ollama', 'ollama.exe') : ''
       if (executable && existsSync(executable)) {
-        const service = spawn(executable, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true })
+        const service = spawn(executable, ['serve'], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: { ...process.env, OLLAMA_FLASH_ATTENTION: settings?.ollamaFlashAttentionEnabled === false ? '0' : '1' }
+        })
         service.unref()
       }
     } catch {

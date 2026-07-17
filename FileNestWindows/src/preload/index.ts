@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { ChatStreamEvent, FileCategory, FileNestApi, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { ChatStreamEvent, FileCategory, FileNestApi, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 
 const api: FileNestApi = {
   getSnapshot: () => ipcRenderer.invoke('app:snapshot'),
@@ -11,25 +11,29 @@ const api: FileNestApi = {
   pathForDroppedFile: (file: File) => webUtils.getPathForFile(file),
   startWatching: () => ipcRenderer.invoke('watcher:start'),
   stopWatching: () => ipcRenderer.invoke('watcher:stop'),
-  scanExisting: () => ipcRenderer.invoke('watcher:scan-existing'),
+  scanExisting: (directories?: string[]) => ipcRenderer.invoke('watcher:scan-existing', directories),
+  preserveExisting: (directories?: string[]) => ipcRenderer.invoke('watcher:preserve-existing', directories),
   organizeNow: () => ipcRenderer.invoke('organizer:run'),
-  reindexAll: () => ipcRenderer.invoke('indexer:reindex-all'),
+  reindexAll: (mode?: ReindexMode) => ipcRenderer.invoke('indexer:reindex-all', mode),
   reindexFile: (id: number) => ipcRenderer.invoke('indexer:reindex-file', id),
   pauseIndexing: () => ipcRenderer.invoke('indexer:pause'),
   resumeIndexing: () => ipcRenderer.invoke('indexer:resume'),
   cancelIndexing: () => ipcRenderer.invoke('indexer:cancel'),
   searchFiles: (query: string, category?: FileCategory | null) => ipcRenderer.invoke('files:search', query, category),
+  searchLibrary: (request: LibrarySearchRequest) => ipcRenderer.invoke('files:smart-search', request),
   openFile: (path: string) => ipcRenderer.invoke('files:open', path),
   showInExplorer: (path: string) => ipcRenderer.invoke('files:show-in-explorer', path),
   trashFile: (id: number) => ipcRenderer.invoke('files:trash', id),
   saveFileNote: (id: number, note: string) => ipcRenderer.invoke('files:note', id, note),
   summarizeFile: (id: number) => ipcRenderer.invoke('files:summarize', id),
+  getDocumentChunks: (id: number) => ipcRenderer.invoke('files:chunks', id),
   getPreviewUrl: (path: string) => ipcRenderer.invoke('files:preview-url', path),
   createRule: (rule: Omit<Rule, 'id'>) => ipcRenderer.invoke('rules:create', rule),
   updateRule: (rule: Rule) => ipcRenderer.invoke('rules:update', rule),
   deleteRule: (id: number) => ipcRenderer.invoke('rules:delete', id),
   generateRules: (prompt: string) => ipcRenderer.invoke('rules:generate', prompt),
   createChat: (path?: string | null) => ipcRenderer.invoke('chat:create', path),
+  beginChat: (path?: string | null) => ipcRenderer.invoke('chat:begin', path),
   selectChat: (id: number) => ipcRenderer.invoke('chat:select', id),
   deleteChat: (id: number) => ipcRenderer.invoke('chat:delete', id),
   clearChats: () => ipcRenderer.invoke('chat:clear'),
@@ -38,11 +42,12 @@ const api: FileNestApi = {
   onChatStream: (callback: (event: ChatStreamEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, value: ChatStreamEvent): void => callback(value)
     ipcRenderer.on('chat:stream', listener)
-    return () => ipcRenderer.removeListener('chat:stream', listener)
+    return () => { ipcRenderer.removeListener('chat:stream', listener) }
   },
   refreshOllama: () => ipcRenderer.invoke('ollama:refresh'),
   pullOllamaModel: (model: string) => ipcRenderer.invoke('ollama:pull', model),
   deleteOllamaModel: (model: string) => ipcRenderer.invoke('ollama:delete', model),
+  testAiConnections: () => ipcRenderer.invoke('ai:test-connections'),
   installOllama: () => ipcRenderer.invoke('ollama:install'),
   installDocling: () => ipcRenderer.invoke('docling:install'),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
@@ -51,7 +56,7 @@ const api: FileNestApi = {
   onStateChanged: (callback: () => void) => {
     const listener = (): void => callback()
     ipcRenderer.on('state:changed', listener)
-    return () => ipcRenderer.removeListener('state:changed', listener)
+    return () => { ipcRenderer.removeListener('state:changed', listener) }
   }
 }
 

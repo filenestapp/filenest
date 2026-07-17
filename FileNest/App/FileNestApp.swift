@@ -74,8 +74,7 @@ struct FileNestApp: App {
             MenuBarStatusIcon(
                 baseImage: menuBarBaseIcon(),
                 showsWatchingBadge: appState.hasActiveWatchDirectories,
-                showsIndexingSpinner: appState.indexingState.isAnimating,
-                animationFrame: appState.indexingAnimationFrame
+                showsIndexingSpinner: appState.indexingState.isAnimating
             )
                 .accessibilityLabel("FileNest")
                 .background(MainWindowPresentationBridge())
@@ -423,7 +422,6 @@ private struct MenuBarStatusIcon: View {
     let baseImage: NSImage
     let showsWatchingBadge: Bool
     let showsIndexingSpinner: Bool
-    let animationFrame: Int
 
     var body: some View {
         Image(nsImage: baseImage)
@@ -441,12 +439,14 @@ private struct MenuBarStatusIcon: View {
             }
             .overlay(alignment: .bottomTrailing) {
                 if showsIndexingSpinner {
-                    Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90.circle.fill")
-                        .symbolRenderingMode(.hierarchical)
-                        .font(.system(size: 7.5, weight: .bold))
-                        .foregroundStyle(.primary)
-                        .rotationEffect(.degrees(Double(animationFrame) * 45))
-                        .offset(x: 1, y: 0.5)
+                    TimelineView(.periodic(from: .now, by: 0.55)) { context in
+                        Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90.circle.fill")
+                            .symbolRenderingMode(.hierarchical)
+                            .font(.system(size: 7.5, weight: .bold))
+                            .foregroundStyle(.primary)
+                            .rotationEffect(.degrees(rotationAngle(at: context.date)))
+                            .offset(x: 1, y: 0.5)
+                    }
                 }
             }
             .frame(width: 16, height: 16)
@@ -460,6 +460,11 @@ private struct MenuBarStatusIcon: View {
         case (false, true): return "Indexing"
         case (false, false): return "Paused"
         }
+    }
+
+    private func rotationAngle(at date: Date) -> Double {
+        let frame = Int(date.timeIntervalSinceReferenceDate / 0.55) % 8
+        return Double(frame) * 45
     }
 }
 

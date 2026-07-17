@@ -4,6 +4,8 @@ import JSZip from 'jszip'
 import { createHash } from 'node:crypto'
 import { basename, extname, relative } from 'node:path'
 import { readFile, readdir, stat } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import type { Settings } from '../shared/types'
 import { doclingManager } from './docling'
 
@@ -14,7 +16,9 @@ export interface ExtractedContent {
 
 const textExtensions = new Set(['txt', 'md', 'markdown', 'json', 'yaml', 'yml', 'csv', 'log', 'xml', 'html', 'swift', 'py', 'js', 'ts', 'tsx', 'jsx', 'java', 'kt', 'go', 'rs', 'c', 'cpp', 'h', 'hpp', 'cs', 'rb', 'php', 'sh', 'sql', 'css', 'vue', 'lua', 'r'])
 const imageExtensions = new Set(['png', 'jpg', 'jpeg', 'gif', 'heic', 'webp', 'bmp', 'tiff', 'tif'])
-const zipDocumentExtensions = new Set(['pptx', 'ppsx', 'epub', 'odt', 'ods', 'odp'])
+const zipDocumentExtensions = new Set(['pptx', 'ppsx', 'epub', 'odt', 'ods', 'odp', 'pages', 'numbers', 'key', 'keynote'])
+const legacyOfficeExtensions = new Set(['doc', 'xls', 'ppt'])
+const execFileAsync = promisify(execFile)
 
 export class ContentExtractor {
   private ocrWorkerPromise: ReturnType<typeof createWorker> | null = null
@@ -22,7 +26,7 @@ export class ContentExtractor {
   async extract(path: string, settings: Settings, isDirectory = false): Promise<ExtractedContent> {
     if (isDirectory) return this.extractDirectory(path)
     const ext = extname(path).slice(1).toLowerCase()
-    if (settings.doclingEnabled && ['pdf', 'docx', 'docm', 'xlsx', 'xlsm', 'pptx', 'ppsx', 'epub', 'odt', 'ods', 'odp'].includes(ext)) {
+    if (settings.doclingEnabled && ['pdf', 'doc', 'docx', 'docm', 'xls', 'xlsx', 'xlsm', 'ppt', 'pptx', 'ppsx', 'epub', 'odt', 'ods', 'odp'].includes(ext)) {
       const docling = await this.tryDocling(path, settings).catch(() => null)
       if (docling?.text.trim()) return docling
     }
@@ -32,6 +36,7 @@ export class ContentExtractor {
     if (ext === 'rtf') return this.extractRtf(path)
     if (ext === 'csv') return this.extractText(path)
     if (zipDocumentExtensions.has(ext)) return this.extractZipDocument(path)
+    if (legacyOfficeExtensions.has(ext)) return this.extractLegacyOffice(path, ext)
     if (textExtensions.has(ext)) return this.extractText(path)
     if (imageExtensions.has(ext)) return this.extractImage(path, settings)
     return { title: basename(path), text: basename(path) }
@@ -130,10 +135,25 @@ export class ContentExtractor {
       this.ocrWorkerPromise ??= createWorker(['eng', 'chi_sim'])
       const worker = await this.ocrWorkerPromise
       const result = await worker.recognize(path)
-      return { title: basename(path), text: result.data.text.trim() || basename(path) }
+      const text = result.data.text.trim() || await this.ollamaOcr(path, settings).catch(() => '')
+      return { title: basename(path), text: text || basename(path) }
     } catch {
-      return { title: basename(path), text: basename(path) }
+      const fallback = await this.ollamaOcr(path, settings).catch(() => '')
+      return { title: basename(path), text: fallback || basename(path) }
     }
+  }
+
+  private async ollamaOcr(path: string, settings: Settings): Promise<string> {
+    const image = (await readFile(path)).toString('base64')
+    const response = await fetch(new URL('/api/chat', settings.ollamaHost.replace(/\/+$/, '') + '/'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: settings.ollamaOcrModel, stream: false, messages: [{ role: 'user', content: 'Recognize all text in the image, preserve reading order, and return only the recognized text.', images: [image] }] }),
+      signal: AbortSignal.timeout(20_000)
+    })
+    if (!response.ok) throw new Error(`Ollama OCR ${response.status}`)
+    const payload = await response.json() as { message?: { content?: string } }
+    return payload.message?.content?.trim() ?? ''
   }
 
   private async remoteOcr(path: string, settings: Settings): Promise<string> {
@@ -169,6 +189,23 @@ export class ContentExtractor {
     const entries = await walkDirectory(path, 2000)
     const text = entries.map((entry) => `${entry.isDirectory ? '[Folder]' : '[File]'} ${relative(path, entry.path)} (${entry.size} bytes)`).join('\n')
     return { title: basename(path), text: `Folder: ${basename(path)}\n\n${text}` }
+  }
+
+  private async extractLegacyOffice(path: string, extension: string): Promise<ExtractedContent> {
+    if (process.platform !== 'win32') return { title: basename(path), text: basename(path) }
+    const script = legacyOfficePowerShell(extension)
+    try {
+      const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script, path], {
+        windowsHide: true,
+        timeout: 30_000,
+        maxBuffer: 2_000_000,
+        encoding: 'utf8'
+      })
+      const text = stdout.trim().slice(0, 1_000_000)
+      return { title: basename(path), text: text || basename(path) }
+    } catch {
+      return { title: basename(path), text: basename(path) }
+    }
   }
 
   private async tryDocling(path: string, settings: Settings): Promise<ExtractedContent | null> {
@@ -229,4 +266,15 @@ function parseWorksheet(xml: string, shared: string[]): string {
 function mimeFor(path: string): string {
   const ext = extname(path).slice(1).toLowerCase()
   return ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : ext === 'heic' ? 'image/heic' : ext === 'tif' || ext === 'tiff' ? 'image/tiff' : 'image/jpeg'
+}
+
+function legacyOfficePowerShell(extension: string): string {
+  const prelude = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); $path=$args[0];"
+  if (extension === 'doc') {
+    return `${prelude} $app=$null; $document=$null; try { $app=New-Object -ComObject Word.Application; $app.Visible=$false; $document=$app.Documents.Open($path,$false,$true); [Console]::Write($document.Content.Text) } finally { if($document){$document.Close($false)}; if($app){$app.Quit()} }`
+  }
+  if (extension === 'xls') {
+    return `${prelude} $app=$null; $book=$null; try { $app=New-Object -ComObject Excel.Application; $app.Visible=$false; $app.DisplayAlerts=$false; $book=$app.Workbooks.Open($path,0,$true); foreach($sheet in $book.Worksheets){ Write-Output ('# '+$sheet.Name); $range=$sheet.UsedRange; $rows=[Math]::Min($range.Rows.Count,2000); $cols=[Math]::Min($range.Columns.Count,100); for($r=1;$r -le $rows;$r++){ $line=@(); for($c=1;$c -le $cols;$c++){ $line += [string]$range.Cells.Item($r,$c).Text }; Write-Output ($line -join [char]9) } } } finally { if($book){$book.Close($false)}; if($app){$app.Quit()} }`
+  }
+  return `${prelude} $app=$null; $deck=$null; try { $app=New-Object -ComObject PowerPoint.Application; $deck=$app.Presentations.Open($path,$true,$true,$false); foreach($slide in $deck.Slides){ Write-Output ('# Slide '+$slide.SlideIndex); foreach($shape in $slide.Shapes){ if($shape.HasTextFrame -and $shape.TextFrame.HasText){ Write-Output $shape.TextFrame.TextRange.Text } } } } finally { if($deck){$deck.Close()}; if($app){$app.Quit()} }`
 }

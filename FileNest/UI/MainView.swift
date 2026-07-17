@@ -64,12 +64,15 @@ struct MainView: View {
                     .transition(.opacity)
             }
 
-            Group {
-                switch selection {
-                case .library:
+            ZStack {
+                ChatView(isActive: selection == .chat)
+                    .opacity(selection == .chat ? 1 : 0)
+                    .allowsHitTesting(selection == .chat)
+                    .disabled(selection != .chat)
+                    .accessibilityHidden(selection != .chat)
+
+                if selection == .library {
                     LibraryView(startDocumentChat: startDocumentChat)
-                case .chat:
-                    ChatView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -106,7 +109,6 @@ struct MainView: View {
             }
         }
         .onAppear {
-            appState.refresh()
             appState.refreshChatSessions()
             if appState.settings.onboardingCompleted && !appState.isWatching {
                 appState.startWatching()
@@ -334,7 +336,9 @@ private struct FileNestSidebar: View {
                             } label: {
                                 RecentChatRow(
                                     session: session,
-                                    selected: selection == .chat && id == selectedSessionID
+                                    selected: selection == .chat && id == selectedSessionID,
+                                    isRunning: appState.runningChatSessionIDs.contains(id),
+                                    hasCompletedResponse: appState.completedChatSessionIDs.contains(id)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -367,6 +371,7 @@ private struct FileNestSidebar: View {
             previewSelectionID = id
         } else {
             appState.selectChat(id)
+            appState.markChatSeen(id)
         }
     }
 
@@ -375,6 +380,8 @@ private struct FileNestSidebar: View {
 private struct RecentChatRow: View {
     let session: ChatSession
     let selected: Bool
+    let isRunning: Bool
+    let hasCompletedResponse: Bool
 
     var body: some View {
         HStack(spacing: 9) {
@@ -386,6 +393,17 @@ private struct RecentChatRow: View {
                 .font(.system(size: 12, weight: selected ? .medium : .regular))
                 .lineLimit(1)
             Spacer(minLength: 0)
+            if isRunning {
+                ProgressView()
+                    .controlSize(.mini)
+                    .frame(width: 12, height: 12)
+                    .help("Generating response")
+            } else if hasCompletedResponse {
+                Circle()
+                    .fill(FileNestTheme.accent)
+                    .frame(width: 7, height: 7)
+                    .help("New response available")
+            }
         }
         .foregroundStyle(selected ? FileNestTheme.accent : Color.primary.opacity(0.82))
         .padding(.horizontal, 10)
@@ -424,7 +442,7 @@ private struct SidebarStatusBar: View {
     private var isIndexing: Bool { appState.indexingState.isActive }
 
     private var watchIcon: String {
-        if appState.hasActiveWatchDirectories { return "dot.radiowaves.left.and.right" }
+        if appState.hasActiveWatchDirectories { return "folder.fill" }
         if appState.isWatching { return "folder.badge.questionmark" }
         return "pause.circle"
     }
@@ -443,7 +461,7 @@ private struct SidebarStatusBar: View {
         case .stopped: return "stop.circle.fill"
         case .completed: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
-        case .idle: return appState.indexedCount > 0 ? "doc.text.magnifyingglass" : "magnifyingglass"
+        case .idle: return appState.indexedCount > 0 ? "checkmark.seal.fill" : "magnifyingglass"
         }
     }
 
@@ -467,7 +485,7 @@ private struct SidebarStatusBar: View {
 
     private var aiIcon: String {
         switch aiChoice {
-        case .ollama: return appState.ollama.state == .running ? "cpu.fill" : "cpu"
+        case .ollama: return "brain.head.profile"
         case .cloud: return "cloud.fill"
         case .none: return "slash.circle.fill"
         }

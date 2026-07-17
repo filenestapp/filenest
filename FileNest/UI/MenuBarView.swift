@@ -29,10 +29,6 @@ struct MenuBarView: View {
             footer
         }
         .background(FileNestTheme.surface.opacity(0.97))
-        .onAppear {
-            appState.refresh()
-            appState.refreshChatSessions()
-        }
     }
 
     private var header: some View {
@@ -141,19 +137,20 @@ struct MenuBarView: View {
     }
 
     private var recentSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let files = recentFiles
+        return VStack(alignment: .leading, spacing: 8) {
             Text("Recently Organized")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
 
-            if recentFiles.isEmpty {
+            if files.isEmpty {
                 Text("No organized files yet")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 94)
             } else {
                 VStack(spacing: 2) {
-                    ForEach(recentFiles) { file in
+                    ForEach(files) { file in
                         MenuBarFileRow(file: file)
                     }
                 }

@@ -11,3 +11,7 @@ export function resolveLanguage(language: AppLanguage): 'zh-Hans' | 'en' {
 export function translate(value: string, language: AppLanguage): string {
   return resolveLanguage(language) === 'zh-Hans' ? chinese[value] ?? value : value
 }
+
+export function translateForDocument(value: string): string {
+  return translate(value, document.documentElement.lang.toLowerCase().startsWith('zh') ? 'zh-Hans' : 'en')
+}

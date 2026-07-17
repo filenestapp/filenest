@@ -603,6 +603,7 @@
 "Components are installed in an isolated FileNest user environment without changing system Python or requiring administrator access." = "组件安装在 FileNest 用户目录的独立环境中，不修改系统 Python，也不需要管理员权限。";
 "Download Local Models" = "下载本地模型";
 "The generation model is recommended for this Mac; embeddings use the lightweight 0.6B model by default." = "已根据当前 Mac 推荐生成模型；Embedding 固定使用轻量的 0.6B 版本。";
+"Choose the generation and embedding models FileNest downloads; Qwen 9B and 0.6B are selected by default." = "可选择 FileNest 下载的生成与向量化模型；默认选择 Qwen 9B 和 0.6B。";
 "Memory" = "内存";
 "Available Disk" = "磁盘可用";
 "Processor" = "处理器";
@@ -645,6 +646,7 @@
 "Could not read the installed version" = "无法读取当前安装版本";
 "Could not fetch the latest service version" = "无法获取服务的最新版本";
 "Ollama update failed" = "Ollama 更新失败";
+"Ollama update verification failed" = "Ollama 更新校验失败";
 "Ollama update complete and running" = "Ollama 更新完成并已启动";
 "The running Ollama service is not managed by FileNest. Stop it before updating." = "当前 Ollama 服务不由 FileNest 管理，请停止后再更新";
 "PaddleOCR update complete" = "PaddleOCR 更新完成";
@@ -848,12 +850,18 @@
 "Filter Match" = "筛选匹配";
 "Semantic Match" = "语义匹配";
 "Hybrid Match" = "混合匹配";
+"Confidence %d%%" = "置信度 %d%%";
+"Generating response" = "正在生成回答";
+"New response available" = "有新的回答";
 "Searching…" = "搜索中…";
 "Found %d Related Files" = "找到 %d 个相关文件";
 "File Keywords + Vector Semantic Ranking" = "文件级关键词 + 向量语义混合排序";
 "Time Intent + File Keywords + Vector Semantic Ranking" = "时间意图 + 文件级关键词 + 向量语义混合排序";
 "Smart Search" = "智能搜索";
 "AI analyzes the query and creates precise retrieval conditions" = "AI 分析查询并生成精确检索条件";
+"Not finding what you need?" = "对搜索结果不满意？";
+"Smart Search uses AI to understand your request more precisely and may take a little longer." = "智能搜索会使用 AI 更准确地理解你的需求，因此需要更长的处理时间。";
+"Try Smart Search" = "使用智能搜索";
 "AI Analyzing…" = "AI 分析中…";
 "AI Search Plan" = "AI 检索条件";
 "Local Fallback Plan" = "本地回退检索条件";

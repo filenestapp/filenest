@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import type { FileCategory, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { FileCategory, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 import { AppController } from './app-controller'
 
 export function registerIpc(controller: AppController): void {
@@ -11,25 +11,29 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle('dialog:chat-file', () => controller.chooseChatFile())
   ipcMain.handle('watcher:start', () => controller.startWatching())
   ipcMain.handle('watcher:stop', () => controller.stopWatching())
-  ipcMain.handle('watcher:scan-existing', () => controller.scanExisting())
+  ipcMain.handle('watcher:scan-existing', (_event, directories?: string[]) => controller.scanExisting(directories))
+  ipcMain.handle('watcher:preserve-existing', (_event, directories?: string[]) => controller.preserveExisting(directories))
   ipcMain.handle('organizer:run', () => controller.organizeNow())
-  ipcMain.handle('indexer:reindex-all', () => controller.reindexAll())
+  ipcMain.handle('indexer:reindex-all', (_event, mode?: ReindexMode) => controller.reindexAll(mode))
   ipcMain.handle('indexer:reindex-file', (_event, id: number) => controller.reindexFile(id))
   ipcMain.handle('indexer:pause', () => controller.pauseIndexing())
   ipcMain.handle('indexer:resume', () => controller.resumeIndexing())
   ipcMain.handle('indexer:cancel', () => controller.cancelIndexing())
   ipcMain.handle('files:search', (_event, query: string, category?: FileCategory | null) => controller.searchFiles(query, category))
+  ipcMain.handle('files:smart-search', (_event, request: LibrarySearchRequest) => controller.searchLibrary(request))
   ipcMain.handle('files:open', (_event, path: string) => controller.openFile(path))
   ipcMain.handle('files:show-in-explorer', (_event, path: string) => controller.showInExplorer(path))
   ipcMain.handle('files:trash', (_event, id: number) => controller.trashFile(id))
   ipcMain.handle('files:note', (_event, id: number, note: string) => controller.saveFileNote(id, note))
   ipcMain.handle('files:summarize', (_event, id: number) => controller.summarizeFile(id))
+  ipcMain.handle('files:chunks', (_event, id: number) => controller.getDocumentChunks(id))
   ipcMain.handle('files:preview-url', (_event, path: string) => controller.previewUrl(path))
   ipcMain.handle('rules:create', (_event, rule: Omit<Rule, 'id'>) => controller.createRule(rule))
   ipcMain.handle('rules:update', (_event, rule: Rule) => controller.updateRule(rule))
   ipcMain.handle('rules:delete', (_event, id: number) => controller.deleteRule(id))
   ipcMain.handle('rules:generate', (_event, prompt: string) => controller.generateRules(prompt))
   ipcMain.handle('chat:create', (_event, path?: string | null) => controller.createChat(path))
+  ipcMain.handle('chat:begin', (_event, path?: string | null) => controller.beginChat(path))
   ipcMain.handle('chat:select', (_event, id: number) => controller.selectChat(id))
   ipcMain.handle('chat:delete', (_event, id: number) => controller.deleteChat(id))
   ipcMain.handle('chat:clear', () => controller.clearChats())
@@ -38,6 +42,7 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle('ollama:refresh', () => controller.refreshOllama())
   ipcMain.handle('ollama:pull', (_event, model: string) => controller.pullOllamaModel(model))
   ipcMain.handle('ollama:delete', (_event, model: string) => controller.deleteOllamaModel(model))
+  ipcMain.handle('ai:test-connections', () => controller.testAiConnections())
   ipcMain.handle('ollama:install', () => controller.installOllama())
   ipcMain.handle('docling:install', () => controller.installDocling())
   ipcMain.handle('updates:check', () => controller.checkForUpdates())

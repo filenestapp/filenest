@@ -6,6 +6,7 @@ import { LibraryPage } from "./LibraryPage";
 import { SettingsPage } from "./SettingsPage";
 import { FileInspector } from "./components";
 import { Onboarding } from "./Onboarding";
+import { resolveLanguage } from "./i18n";
 
 export default function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
@@ -17,13 +18,13 @@ export default function App(): React.JSX.Element {
   );
   useEffect(() => {
     void window.fileNest.getSnapshot().then(setSnapshot);
-    return window.fileNest.onStateChanged(() => void refresh());
+    const unsubscribe = window.fileNest.onStateChanged(() => void refresh());
+    return () => { if (typeof unsubscribe === "function") unsubscribe(); };
   }, [refresh]);
   useEffect(() => {
     if (!snapshot) return;
     document.documentElement.dataset.theme = snapshot.settings.appearance;
-    document.documentElement.lang =
-      snapshot.settings.appLanguage === "en" ? "en" : "zh-CN";
+    document.documentElement.lang = resolveLanguage(snapshot.settings.appLanguage) === "en" ? "en" : "zh-CN";
   }, [snapshot?.settings.appearance, snapshot?.settings.appLanguage]);
   if (!snapshot)
     return (
@@ -42,7 +43,7 @@ export default function App(): React.JSX.Element {
     await refresh();
   };
   const newChat = async (): Promise<void> => {
-    await window.fileNest.createChat();
+    await window.fileNest.beginChat();
     setPage("chat");
     setInspectedFile(null);
     await refresh();
@@ -58,7 +59,7 @@ export default function App(): React.JSX.Element {
     await refresh();
   };
   const startFileChat = async (file: FileRecord): Promise<void> => {
-    await window.fileNest.createChat(file.path);
+    await window.fileNest.beginChat(file.path);
     setPage("chat");
     setInspectedFile(file);
     await refresh();

@@ -6,7 +6,8 @@ struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
     @State private var newDir = ""
-    @State private var selectedModelProfileID = OllamaModelRecommendation.recommendedForCurrentDevice.id
+    @State private var selectedSection: SettingsSection = .general
+    @State private var selectedModelProfileID = OllamaModelRecommendation.defaultProfile.id
     @State private var modelPendingDeletion: OllamaModelInfo?
     @State private var vectorExtensionsDraft = ""
     @State private var updateFeedDraft = ""
@@ -24,7 +25,7 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             header
 
-            TabView(selection: $appState.selectedSettingsSection) {
+            TabView(selection: $selectedSection) {
                 generalSettings
                     .tabItem { Label("General", systemImage: "gearshape") }
                     .tag(SettingsSection.general)
@@ -50,20 +51,25 @@ struct SettingsView: View {
         .frame(minWidth: 960, idealWidth: 1040, minHeight: 700, idealHeight: 760)
         .background(FileNestTheme.surface)
         .onAppear {
+            selectedSection = appState.selectedSettingsSection
             vectorExtensionsDraft = appState.settings.vectorizeExtensions.joined(separator: ", ")
             updateFeedDraft = appState.updates.feedURLString
             if FileNestEnvironment.isStatisticsPreview {
-                appState.selectSettingsSection(.statistics)
+                selectedSection = .statistics
             } else if FileNestEnvironment.isSettingsRulesPreview {
-                appState.selectSettingsSection(.rules)
+                selectedSection = .rules
             } else if FileNestEnvironment.isSettingsModelsPreview {
-                appState.selectSettingsSection(.aiModels)
+                selectedSection = .aiModels
             }
         }
+        .onChange(of: appState.selectedSettingsSection) { section in
+            selectedSection = section
+        }
         .task {
-            await appState.ollama.refresh(host: appState.settings.ollamaHost)
+            async let ollamaRefresh: Void = appState.ollama.refresh(host: appState.settings.ollamaHost)
+            async let paddleRefresh: Void = appState.paddleOCR.refresh()
             appState.docling.refresh()
-            appState.paddleOCR.refresh()
+            _ = await (ollamaRefresh, paddleRefresh)
             async let ollamaUpdates: Void = appState.ollama.checkForUpdates()
             async let doclingUpdates: Void = appState.docling.checkForUpdates()
             async let paddleUpdates: Void = appState.paddleOCR.checkForUpdates()

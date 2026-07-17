@@ -27,8 +27,9 @@ export function Onboarding({
   const update = (patch: Partial<Settings>): Promise<Settings> =>
     window.fileNest.updateSettings(patch);
   const finish = async (): Promise<void> => {
-    await update({ onboardingCompleted: true });
     if (organizeExisting) await window.fileNest.scanExisting();
+    else await window.fileNest.preserveExisting();
+    await update({ onboardingCompleted: true });
     await window.fileNest.startWatching();
     await onComplete();
   };
@@ -51,16 +52,16 @@ export function Onboarding({
                 ) : (
                   <span>{index + 1}</span>
                 )}
-                {label}
+                {t(label)}
               </li>
             ))}
           </ol>
           <div className="privacy-note">
             <LockKeyhole size={18} />
             <span>
-              Local First
+              {t("Local First")}
               <br />
-              Your Files Stay Under Your Control
+              {t("Your Files Stay Under Your Control")}
             </span>
           </div>
         </aside>
@@ -72,20 +73,20 @@ export function Onboarding({
               </div>
               <h1>{t("Welcome to FileNest")}</h1>
               <p>
-                Automatically organize files, build a local index, and retrieve content quickly with natural language.
+                {t("Automatically organize files, build a local index, and retrieve content quickly with natural language.")}
               </p>
               <ul>
                 <li>
                   <ShieldCheck />
-                  The index stays on this PC by default
+                  {t("The index stays on this PC by default")}
                 </li>
                 <li>
                   <Sparkles />
-                  Supports local Ollama and cloud APIs
+                  {t("Supports local Ollama and cloud APIs")}
                 </li>
                 <li>
                   <FolderPlus />
-                  The system tray continuously watches for new files
+                  {t("The system tray continuously watches for new files")}
                 </li>
               </ul>
             </div>
@@ -94,7 +95,7 @@ export function Onboarding({
             <div className="onboarding-step">
               <FolderPlus className="step-icon" />
               <h1>{t("Choose Folders to Manage")}</h1>
-              <p>Downloads is watched by default. You can add Desktop, Documents, or work folders.</p>
+              <p>{t("Downloads is watched by default. You can add Desktop, Documents, or work folders.")}</p>
               <div className="onboarding-folders">
                 {snapshot.settings.watchDirs.map((path) => (
                   <div key={path}>{path}</div>
@@ -127,7 +128,7 @@ export function Onboarding({
                   checked={organizeExisting}
                   onChange={(e) => setOrganizeExisting(e.target.checked)}
                 />
-                Index and organize existing files immediately
+                {t("Index and organize existing files immediately")}
               </label>
             </div>
           )}
@@ -136,8 +137,7 @@ export function Onboarding({
               <Bot className="step-icon" />
               <h1>{t("Configure Local AI")}</h1>
               <p>
-                A lightweight local index requiring no download is used by default. Install Ollama
-                for stronger multilingual semantic search and complete answers.
+                {t("A lightweight local index requiring no download is used by default. Install Ollama for stronger multilingual semantic search and complete answers.")}
               </p>
               <div className="choice-list">
                 <button
@@ -149,7 +149,7 @@ export function Onboarding({
                   onClick={() => void update({ embeddingSource: "local" })}
                 >
                   <strong>{t("Local Lightweight Index")}</strong>
-                  <span>Ready to use · Offline · Low resource usage</span>
+                  <span>{t("Ready to use · Offline · Low resource usage")}</span>
                 </button>
                 <button
                   className={
@@ -160,14 +160,14 @@ export function Onboarding({
                   onClick={() => void update({ embeddingSource: "ollama" })}
                 >
                   <strong>Ollama</strong>
-                  <span>Stronger semantic search and local chat</span>
+                  <span>{t("Stronger semantic search and local chat")}</span>
                 </button>
               </div>
               <button
                 className="text-action"
                 onClick={() => void window.fileNest.installOllama()}
               >
-                Download Ollama for Windows
+                {t("Download Ollama for Windows")}
               </button>
               <button
                 className="text-action"
@@ -192,7 +192,7 @@ export function Onboarding({
                 )}
                 {snapshot.docling.installed
                   ? `Docling ${snapshot.docling.version ?? ""} Installed`
-                  : "Install Docling Document Parsing (Optional)"}
+                  : t("Install Docling Document Parsing (Optional)")}
               </button>
             </div>
           )}
@@ -201,12 +201,12 @@ export function Onboarding({
               <CheckCircle2 className="step-icon success-text" />
               <h1>{t("Ready to Go")}</h1>
               <p>
-                FileNest continues running in the system tray. You can pause watching or adjust rules at any time.
+                {t("FileNest continues running in the system tray. You can pause watching or adjust rules at any time.")}
               </p>
               <div className="ready-summary">
                 <span>
                   <strong>{snapshot.settings.watchDirs.length}</strong>{" "}
-                  itemsWatched Folders
+                  {t("Watched Folders")}
                 </span>
                 <span>
                   <strong>
@@ -214,13 +214,13 @@ export function Onboarding({
                       ? "Local"
                       : "Ollama"}
                   </strong>{" "}
-                  Indexing Engine
+                  {t("Indexing Engine")}
                 </span>
                 <span>
                   <strong>
                     {snapshot.settings.autoOrganize ? "On" : "Off"}
                   </strong>{" "}
-                  Automatic Organization
+                  {t("Automatic Organization")}
                 </span>
               </div>
             </div>

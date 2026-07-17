@@ -6,12 +6,21 @@ import { CATEGORY_FOLDERS } from './defaults'
 import { matchesPattern } from './file-policy'
 import { AppLogger } from './logger'
 import { LlmService } from './llm'
+import { ContentExtractor } from './content-extractor'
+
+export class OrganizationError extends Error {
+  constructor(readonly code: 'source-changed' | 'move-failed' | 'database-failed-rolled-back' | 'database-failed-rollback-failed', message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'OrganizationError'
+  }
+}
 
 export class OrganizerService {
   constructor(
     private readonly database: FileNestDatabase,
     private readonly logger: AppLogger,
-    private readonly llm = new LlmService()
+    private readonly llm = new LlmService(),
+    private readonly extractor = new ContentExtractor()
   ) {}
 
   async organize(file: FileRecord, settings: Settings): Promise<FileRecord> {
@@ -24,18 +33,33 @@ export class OrganizerService {
     await mkdir(folder, { recursive: true })
     const target = await uniqueDestination(join(folder, basename(file.path)))
     if (normalize(target) === normalize(file.path)) return file
-    await movePath(file.path, target, file.isDirectory)
+    if (file.contentHash) {
+      const currentHash = await this.extractor.hash(file.path, file.isDirectory).catch(() => null)
+      if (currentHash !== file.contentHash) {
+        throw new OrganizationError('source-changed', 'The item changed after indexing and must be indexed again before it can be moved')
+      }
+    }
+    try {
+      await movePath(file.path, target, file.isDirectory)
+    } catch (error) {
+      throw new OrganizationError('move-failed', `Unable to move ${file.name}`, { cause: error })
+    }
     try {
       await this.database.updateFile(file.id, { path: target, name: basename(target), organizedAt: new Date().toISOString(), organizationSubfolder: decision })
       return this.database.getFile(file.id)!
     } catch (error) {
-      await movePath(target, file.path, file.isDirectory).catch((rollbackError) => this.logger.log('organizer', `Database write and rollback both failed after moving: ${target}`, rollbackError))
-      throw error
+      try {
+        await movePath(target, file.path, file.isDirectory)
+      } catch (rollbackError) {
+        await this.logger.log('organizer', `Database update and physical rollback both failed: ${target}`, rollbackError)
+        throw new OrganizationError('database-failed-rollback-failed', `The database update and rollback both failed for ${file.name}`, { cause: error })
+      }
+      throw new OrganizationError('database-failed-rolled-back', `The database update failed and the move was rolled back for ${file.name}`, { cause: error })
     }
   }
 
   async organizeAll(settings: Settings): Promise<void> {
-    for (const file of this.database.listFiles()) {
+    for (const file of this.database.listFiles().filter((item) => !item.organizedAt)) {
       await this.organize(file, settings).catch((error) => this.logger.log('organizer', `Organization failed: ${file.path}`, error))
     }
   }
@@ -66,7 +90,7 @@ export class OrganizerService {
     ].join('\n')
     if (!file.title && !file.note && !file.contentText) return null
     const response = await this.llm.complete([
-      { role: 'system', content: 'You are a local file topic classifier. The file is already in a primary folder based on its extension. Choose a short, stable, reusable topic subfolder based on its title, user note, and content.Return JSON only: {"folder":"subfolder name"}. Use 2 to 20 characters. Do not include /, \\, :, a file type, or an extension. Do not explain.Prefer reusable topics such as Contracts, Invoices, Project Materials, Meeting Notes, Learning Materials, Product Design, Travel, or Finance. Do not copy the complete file name.' },
+      { role: 'system', content: 'You are a local file topic classifier. The file is already in a primary folder based on its extension. Choose a short, stable, reusable topic subfolder based on its title, user note, and content. Return JSON only: {"folder":"subfolder name"}. Use 2 to 20 characters. Do not include /, \\, :, a file type, or an extension. Do not explain. Prefer reusable topics such as Contracts, Invoices, Project Materials, Meeting Notes, Learning Materials, Product Design, Travel, or Finance. Do not copy the complete file name.' },
       { role: 'user', content: context }
     ], settings, 20_000)
     const match = response.match(/\{[\s\S]*\}/)

@@ -410,11 +410,12 @@ final class OrganizerService {
             uniquingKeysWith: { first, _ in first }
         )
         var diskPaths = Set<String>()
+        var pendingUpserts: [FileRecord] = []
+        var staleFileIDs = Set<Int64>()
         while let url = enumerator?.nextObject() as? URL {
             guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
             let path = url.standardizedFileURL.path
-            let existing = (try? store.file(path: path))
-                ?? storedByCanonicalPath[Self.canonicalPath(path)]
+            let existing = storedByCanonicalPath[Self.canonicalPath(path)]
             if values.isDirectory == true {
                 if let existing, existing.isDirectory {
                     diskPaths.insert(existing.path)
@@ -452,9 +453,34 @@ final class OrganizerService {
                 note: existing?.note,
                 organizationSubfolder: subfolder
             )
-            if let id = try? store.upsertFile(record), metadataChanged {
-                try? store.markFileIndexStale(id: id)
+            let recordChanged = existing == nil ||
+                metadataChanged ||
+                existing?.name != record.name ||
+                existing?.ext != record.ext ||
+                existing?.category != record.category ||
+                existing?.organizationSubfolder != record.organizationSubfolder ||
+                existing?.isDirectory != record.isDirectory ||
+                existing?.organizedAt == nil
+            if recordChanged {
+                pendingUpserts.append(record)
             }
+            if metadataChanged, let id = existing?.id {
+                staleFileIDs.insert(id)
+            }
+        }
+
+        do {
+            try store.applyManagedFileChanges(
+                upserts: pendingUpserts,
+                staleFileIDs: staleFileIDs
+            )
+        } catch {
+            AppLogService.shared.write(
+                "managed library reconciliation persistence failed: \(error)",
+                category: .organizeQueue,
+                level: .error,
+                metadata: ["changes": "\(pendingUpserts.count)"]
+            )
         }
 
         let stored = (try? store.allFiles()) ?? []

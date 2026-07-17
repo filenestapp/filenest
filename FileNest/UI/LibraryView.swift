@@ -76,6 +76,23 @@ struct LibraryFileQuery {
             return date >= start && date < end
         }
     }
+
+    static func sortedByConfidence(
+        _ files: [FileRecord],
+        matchesByPath: [String: LibrarySearchResult]
+    ) -> [FileRecord] {
+        files.sorted { lhs, rhs in
+            let lhsMatch = matchesByPath[lhs.path]
+            let rhsMatch = matchesByPath[rhs.path]
+            let lhsConfidence = lhsMatch?.confidence ?? 0
+            let rhsConfidence = rhsMatch?.confidence ?? 0
+            if lhsConfidence != rhsConfidence { return lhsConfidence > rhsConfidence }
+            let lhsScore = lhsMatch?.score ?? 0
+            let rhsScore = rhsMatch?.score ?? 0
+            if lhsScore != rhsScore { return lhsScore > rhsScore }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
 }
 
 /// Library search, category filtering, organization progress, and Finder actions.
@@ -91,6 +108,7 @@ struct LibraryView: View {
     @State private var smartSearchEnabled = false
     @State private var smartSearchPlan: SmartLibrarySearchPlan?
     @State private var smartSearchUsedAI = false
+    @State private var smartSearchIntent = ""
     @State private var isOrganizing = false
     @State private var sortField: LibrarySortField = .modified
     @State private var sortDirection: LibrarySortDirection = .descending
@@ -102,9 +120,7 @@ struct LibraryView: View {
     @State private var visibleLimit = 20
 
     private var sourceFiles: [FileRecord] {
-        (searchResults?.map(\.file) ?? appState.files).filter {
-            FileManager.default.fileExists(atPath: $0.path)
-        }
+        searchResults?.map(\.file) ?? appState.files
     }
 
     private var searchMatchesByPath: [String: LibrarySearchResult] {
@@ -124,6 +140,12 @@ struct LibraryView: View {
             dateField: dateField,
             creationDates: creationDates
         )
+        if sortField == .relevance, searchResults != nil {
+            return LibraryFileQuery.sortedByConfidence(
+                dateFiltered,
+                matchesByPath: searchMatchesByPath
+            )
+        }
         return LibraryFileQuery.sorted(dateFiltered, field: sortField, direction: sortDirection)
     }
 
@@ -222,39 +244,14 @@ struct LibraryView: View {
                             .stroke(FileNestTheme.strongBorder, lineWidth: 1)
                     }
 
-                    Button {
-                        smartSearchEnabled.toggle()
-                        clearSearch()
-                    } label: {
-                        Label("Smart Search", systemImage: "sparkles")
-                            .font(.system(size: 11, weight: smartSearchEnabled ? .semibold : .medium))
-                            .foregroundStyle(smartSearchEnabled ? FileNestTheme.accent : Color.secondary)
-                            .padding(.horizontal, 11)
-                            .frame(height: 38)
-                            .background(
-                                smartSearchEnabled ? FileNestTheme.selection : FileNestTheme.elevatedSurface.opacity(0.65),
-                                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            )
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                    .stroke(
-                                        smartSearchEnabled ? FileNestTheme.accent.opacity(0.3) : FileNestTheme.border,
-                                        lineWidth: 1
-                                    )
-                            }
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandOnHover()
-                    .help("AI analyzes the query and creates precise retrieval conditions")
-
                     Button(action: runSearch) {
                         if isSearching {
                             HStack(spacing: 6) {
                                 ProgressView().controlSize(.small)
-                                Text(LocalizedStringKey(smartSearchEnabled ? "AI Analyzing…" : "Searching…"))
+                                Text("Searching…")
                             }
                         } else {
-                            Text(LocalizedStringKey(smartSearchEnabled ? "Smart Search" : "Search"))
+                            Text("Search")
                         }
                     }
                     .buttonStyle(QuietButtonStyle())
@@ -291,20 +288,24 @@ struct LibraryView: View {
                     }
                     .font(.system(size: 10, weight: .medium))
 
-                    if smartSearchEnabled, let smartSearchPlan {
-                        HStack(spacing: 7) {
-                            Image(systemName: smartSearchUsedAI ? "sparkles" : "arrow.triangle.2.circlepath")
-                                .foregroundStyle(FileNestTheme.accent)
-                            Text(LocalizedStringKey(smartSearchUsedAI ? "AI Search Plan" : "Local Fallback Plan"))
-                                .fontWeight(.semibold)
-                            Text("·")
-                                .foregroundStyle(.tertiary)
-                            Text(smartSearchPlanDescription(smartSearchPlan))
-                                .lineLimit(1)
-                                .foregroundStyle(.secondary)
-                            Spacer()
+                    if smartSearchEnabled {
+                        if let smartSearchPlan {
+                            HStack(spacing: 7) {
+                                Image(systemName: smartSearchUsedAI ? "sparkles" : "arrow.triangle.2.circlepath")
+                                    .foregroundStyle(FileNestTheme.accent)
+                                Text(LocalizedStringKey(smartSearchUsedAI ? "AI Search Plan" : "Local Fallback Plan"))
+                                    .fontWeight(.semibold)
+                                Text("·")
+                                    .foregroundStyle(.tertiary)
+                                Text(smartSearchPlanDescription(smartSearchPlan))
+                                    .lineLimit(1)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                            .font(.system(size: 10))
                         }
-                        .font(.system(size: 10))
+                    } else if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        smartSearchSuggestion
                     }
                 }
             }
@@ -323,6 +324,14 @@ struct LibraryView: View {
                     ))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
+                    if smartSearchEnabled, !smartSearchIntent.isEmpty {
+                        Text(smartSearchIntent)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.primary.opacity(0.82))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 520)
+                            .textSelection(.enabled)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if filteredFiles.isEmpty {
@@ -427,6 +436,40 @@ struct LibraryView: View {
             : "Time Intent + File Keywords + Vector Semantic Ranking"
     }
 
+    private var smartSearchSuggestion: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(FileNestTheme.accent)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Not finding what you need?")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Smart Search uses AI to understand your request more precisely and may take a little longer.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            Button("Try Smart Search") {
+                runSmartSearch()
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(FileNestTheme.accent)
+            .pointingHandOnHover()
+            .help("AI analyzes the query and creates precise retrieval conditions")
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(FileNestTheme.selection.opacity(0.65), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(FileNestTheme.accent.opacity(0.16), lineWidth: 1)
+        }
+    }
+
     private func smartSearchPlanDescription(_ plan: SmartLibrarySearchPlan) -> String {
         var parts = [String]()
         if !plan.semanticQuery.isEmpty {
@@ -463,11 +506,13 @@ struct LibraryView: View {
             clearSearch()
             return
         }
-        if smartSearchEnabled {
-            startSmartSearch(query: query)
-        } else {
-            startSearch(query: query, debounceNanoseconds: 0)
-        }
+        startSearch(query: query, debounceNanoseconds: 0)
+    }
+
+    private func runSmartSearch() {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        startSmartSearch(query: query)
     }
 
     private func scheduleSearch(_ rawQuery: String) {
@@ -476,19 +521,15 @@ struct LibraryView: View {
             clearSearch()
             return
         }
-        guard !smartSearchEnabled else {
-            searchTask?.cancel()
-            searchTask = nil
-            searchResults = nil
-            smartSearchPlan = nil
-            isSearching = false
-            return
-        }
         startSearch(query: query, debounceNanoseconds: 300_000_000)
     }
 
     private func startSearch(query: String, debounceNanoseconds: UInt64) {
         searchTask?.cancel()
+        smartSearchEnabled = false
+        smartSearchPlan = nil
+        smartSearchUsedAI = false
+        smartSearchIntent = ""
         activeSearchQuery = query
         isSearching = true
         searchResults = nil
@@ -516,14 +557,23 @@ struct LibraryView: View {
 
     private func startSmartSearch(query: String) {
         searchTask?.cancel()
+        smartSearchEnabled = true
         activeSearchQuery = query
         isSearching = true
         searchResults = nil
         smartSearchPlan = nil
+        smartSearchIntent = ""
         sortField = .relevance
         sortDirection = .descending
         searchTask = Task { @MainActor in
-            let response = await appState.managedSmartSearchResults(matching: query)
+            let response = await appState.managedSmartSearchResults(
+                matching: query,
+                onIntentUpdate: { intent in
+                    guard !Task.isCancelled,
+                          activeSearchQuery == query else { return }
+                    smartSearchIntent = intent
+                }
+            )
             guard !Task.isCancelled,
                   activeSearchQuery == query,
                   searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
@@ -540,9 +590,11 @@ struct LibraryView: View {
         searchTask?.cancel()
         searchTask = nil
         isSearching = false
+        smartSearchEnabled = false
         searchResults = nil
         smartSearchPlan = nil
         smartSearchUsedAI = false
+        smartSearchIntent = ""
         activeSearchQuery = ""
         sortField = .modified
         sortDirection = .descending
@@ -752,22 +804,17 @@ private struct LibraryFileRow: View {
                     Text(file.name)
                         .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
-                    if file.indexedAt != nil {
-                        Label("Indexed", systemImage: "checkmark.circle.fill")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(FileNestTheme.success)
-                            .padding(.horizontal, 6)
-                            .frame(height: 18)
-                            .background(FileNestTheme.success.opacity(0.1), in: Capsule())
-                            .fixedSize()
-                    }
                     if let searchMatch {
-                        Text(LocalizedStringKey(searchMatch.matchKind.label))
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(FileNestTheme.accent)
+                        Text(appState.settings.localizedFormat(
+                            "Confidence %d%%",
+                            searchMatch.confidencePercent
+                        ))
+                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
                             .padding(.horizontal, 6)
                             .frame(height: 18)
-                            .background(FileNestTheme.accent.opacity(0.09), in: Capsule())
+                            .background(FileNestTheme.elevatedSurface, in: Capsule())
                             .fixedSize()
                     }
                 }

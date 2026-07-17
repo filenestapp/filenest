@@ -132,11 +132,37 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(try ManagedServiceReleaseAPI.pypiVersion(from: pypi), "3.7.0")
     }
 
+    func testManagedServiceReleaseMetadataSelectsVersionedOllamaDMG() throws {
+        let github = Data(#"""
+        {
+          "tag_name":"v0.32.1",
+          "assets":[
+            {"name":"ollama-darwin.tgz","browser_download_url":"https://example.test/v0.32.1/ollama-darwin.tgz"},
+            {"name":"Ollama.dmg","browser_download_url":"https://example.test/v0.32.1/Ollama.dmg"}
+          ]
+        }
+        """#.utf8)
+
+        let release = try ManagedServiceReleaseAPI.githubRelease(from: github)
+
+        XCTAssertEqual(release.version, "0.32.1")
+        XCTAssertEqual(
+            release.macOSDMGURL,
+            URL(string: "https://example.test/v0.32.1/Ollama.dmg")
+        )
+    }
+
     func testManagedServiceVersionComparisonUsesNumericComponents() {
         XCTAssertTrue(ManagedServiceReleaseAPI.isNewer("v0.10.0", than: "0.9.9"))
         XCTAssertTrue(ManagedServiceReleaseAPI.isNewer("3.7.1", than: "3.7.0"))
         XCTAssertFalse(ManagedServiceReleaseAPI.isNewer("3.7.0", than: "3.7.0"))
         XCTAssertFalse(ManagedServiceReleaseAPI.isNewer("2.99.0", than: "3.0.0"))
+    }
+
+    func testOllamaCommandVersionParsingUsesInstalledBinaryOutput() {
+        let output = Data("ollama version is 0.32.1\n".utf8)
+
+        XCTAssertEqual(OllamaServiceManager.version(fromCommandOutput: output), "0.32.1")
     }
 
     func testOnboardingIsIncompleteUntilExplicitlyFinished() {
@@ -160,6 +186,8 @@ final class AppSettingsTests: XCTestCase {
             settings.ollamaEmbeddingModel,
             OllamaModelRecommendation.defaultEmbeddingModel
         )
+        XCTAssertEqual(settings.ollamaModel, OllamaModelRecommendation.defaultGenerationModel)
+        XCTAssertEqual(settings.ollamaModel, "qwen3.5:9b")
         XCTAssertEqual(settings.ollamaEmbeddingModel, "qwen3-embedding:0.6b")
         XCTAssertTrue(settings.ollamaFlashAttentionEnabled)
         XCTAssertEqual(settings.cloudContextWindowTokens, 0)
@@ -168,8 +196,12 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(settings.ragResultLimit, 10)
         XCTAssertEqual(settings.ocrSource, AppSettings.OCRSource.local.rawValue)
         XCTAssertEqual(
-            settings.ollamaModel,
-            OllamaModelRecommendation.recommendedForCurrentDevice.generationModel
+            OllamaModelRecommendation.generationModels,
+            ["qwen3.5:2b", "qwen3.5:4b", "qwen3.5:9b"]
+        )
+        XCTAssertEqual(
+            OllamaModelRecommendation.embeddingModels,
+            ["qwen3-embedding:0.6b", "qwen3-embedding:4b", "qwen3-embedding:8b"]
         )
     }
 

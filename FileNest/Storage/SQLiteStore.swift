@@ -327,42 +327,66 @@ final class SQLiteStore {
     // MARK: - files CRUD
     func upsertFile(_ record: FileRecord) throws -> Int64 {
         try dbPool.write { db in
-            // Stored records may change path after organization, so update by ID first.
-            if let id = record.id,
-               let existing = try FileRecord.fetchOne(db, key: id) {
-                var updated = record
-                updated.discoveredAt = updated.discoveredAt ?? existing.discoveredAt ?? Date()
-                updated.organizedAt = updated.organizedAt ?? existing.organizedAt
-                updated.note = updated.note ?? existing.note
-                updated.organizationSubfolder = updated.organizationSubfolder ?? existing.organizationSubfolder
-                updated.indexSignature = updated.indexSignature ?? existing.indexSignature
-                try updated.update(db)
-                return id
-            }
+            try Self.upsertFile(record, in: db)
+        }
+    }
 
-            // Newly discovered files are unique by path; update an existing record.
-            if let existing = try FileRecord.fetchOne(
-                db,
-                sql: "SELECT * FROM files WHERE path = ?",
-                arguments: [record.path]
-            ) {
-                var updated = record
-                updated.id = existing.id
-                updated.discoveredAt = updated.discoveredAt ?? existing.discoveredAt ?? Date()
-                updated.organizedAt = updated.organizedAt ?? existing.organizedAt
-                updated.note = updated.note ?? existing.note
-                updated.organizationSubfolder = updated.organizationSubfolder ?? existing.organizationSubfolder
-                updated.indexSignature = updated.indexSignature ?? existing.indexSignature
-                try updated.update(db)
-                return updated.id!
-            } else {
-                var inserted = record
-                inserted.id = nil
-                inserted.discoveredAt = inserted.discoveredAt ?? Date()
-                try inserted.insert(db)
-                return inserted.id!
+    /// Applies a managed-library reconciliation in one transaction. Stable files are
+    /// intentionally omitted by the caller, so large scans do not rewrite every row.
+    func applyManagedFileChanges(
+        upserts: [FileRecord],
+        staleFileIDs: Set<Int64>
+    ) throws {
+        guard !upserts.isEmpty || !staleFileIDs.isEmpty else { return }
+        try dbPool.write { db in
+            for record in upserts {
+                _ = try Self.upsertFile(record, in: db)
+            }
+            for id in staleFileIDs {
+                try db.execute(
+                    sql: "UPDATE files SET indexed_at = NULL, index_signature = NULL WHERE id = ?",
+                    arguments: [id]
+                )
             }
         }
+    }
+
+    private static func upsertFile(_ record: FileRecord, in db: Database) throws -> Int64 {
+        // Stored records may change path after organization, so update by ID first.
+        if let id = record.id,
+           let existing = try FileRecord.fetchOne(db, key: id) {
+            var updated = record
+            updated.discoveredAt = updated.discoveredAt ?? existing.discoveredAt ?? Date()
+            updated.organizedAt = updated.organizedAt ?? existing.organizedAt
+            updated.note = updated.note ?? existing.note
+            updated.organizationSubfolder = updated.organizationSubfolder ?? existing.organizationSubfolder
+            updated.indexSignature = updated.indexSignature ?? existing.indexSignature
+            try updated.update(db)
+            return id
+        }
+
+        // Newly discovered files are unique by path; update an existing record.
+        if let existing = try FileRecord.fetchOne(
+            db,
+            sql: "SELECT * FROM files WHERE path = ?",
+            arguments: [record.path]
+        ) {
+            var updated = record
+            updated.id = existing.id
+            updated.discoveredAt = updated.discoveredAt ?? existing.discoveredAt ?? Date()
+            updated.organizedAt = updated.organizedAt ?? existing.organizedAt
+            updated.note = updated.note ?? existing.note
+            updated.organizationSubfolder = updated.organizationSubfolder ?? existing.organizationSubfolder
+            updated.indexSignature = updated.indexSignature ?? existing.indexSignature
+            try updated.update(db)
+            return updated.id!
+        }
+
+        var inserted = record
+        inserted.id = nil
+        inserted.discoveredAt = inserted.discoveredAt ?? Date()
+        try inserted.insert(db)
+        return inserted.id!
     }
 
     func allFiles() throws -> [FileRecord] {

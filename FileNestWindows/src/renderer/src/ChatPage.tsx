@@ -45,61 +45,76 @@ export function ChatPage({
 }): React.JSX.Element {
   const t = (value: string): string =>
     translate(value, snapshot.settings.appLanguage);
-  const [input, setInput] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(sessionStorage.getItem("filenest-chat-drafts") ?? "{}") as Record<string, string>; }
+    catch { return {}; }
+  });
   const [attachment, setAttachment] = useState<string | null>(
     () =>
       snapshot.chatSessions.find(
         (item) => item.id === snapshot.selectedSessionId,
-      )?.attachedFilePath ?? null,
+      )?.attachedFilePath ?? snapshot.pendingChatAttachmentPath,
   );
   const [streaming, setStreaming] = useState("");
   const [requestId, setRequestId] = useState<string | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
+  const [progressStage, setProgressStage] = useState<ChatStreamEvent["stage"]>();
   const endRef = useRef<HTMLDivElement>(null);
   const selectedSession = snapshot.chatSessions.find(
     (item) => item.id === snapshot.selectedSessionId,
   );
-  useEffect(
-    () => setAttachment(selectedSession?.attachedFilePath ?? null),
-    [selectedSession?.id, selectedSession?.attachedFilePath],
-  );
-  useEffect(
-    () =>
-      window.fileNest.onChatStream((event: ChatStreamEvent) => {
+  const draftKey = selectedSession ? `session:${selectedSession.id}` : `new:${snapshot.pendingChatAttachmentPath ?? "library"}`;
+  const input = drafts[draftKey] ?? "";
+  const setInput = (value: string | ((current: string) => string)): void => {
+    setDrafts((current) => ({ ...current, [draftKey]: typeof value === "function" ? value(current[draftKey] ?? "") : value }));
+  };
+  useEffect(() => { sessionStorage.setItem("filenest-chat-drafts", JSON.stringify(drafts)); }, [drafts]);
+  useEffect(() => {
+    setAttachment(selectedSession?.attachedFilePath ?? snapshot.pendingChatAttachmentPath);
+  }, [selectedSession?.id, selectedSession?.attachedFilePath, snapshot.pendingChatAttachmentPath]);
+  useEffect(() => {
+      const unsubscribe = window.fileNest.onChatStream((event: ChatStreamEvent) => {
         if (requestId && event.requestId !== requestId) return;
         if (event.type === "delta")
           setStreaming((value) => value + (event.delta ?? ""));
+        if (event.type === "progress") setProgressStage(event.stage);
         if (event.type === "done") {
           setStreaming("");
           setPendingQuestion(null);
           setRequestId(null);
+          setProgressStage(undefined);
           void onRefresh();
         }
         if (event.type === "error") {
           setStreaming(event.error ?? "Generation failed");
           setRequestId(null);
+          setProgressStage(undefined);
         }
-      }),
-    [onRefresh, requestId],
-  );
-  useEffect(
-    () => endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }),
-    [snapshot.messages.length, streaming, pendingQuestion],
-  );
+      });
+      return () => { if (typeof unsubscribe === "function") unsubscribe(); };
+    }, [onRefresh, requestId]);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [snapshot.messages.length, streaming, pendingQuestion]);
   const attachedFile = useMemo(
     () => snapshot.files.find((file) => file.path === attachment) ?? null,
     [attachment, snapshot.files],
   );
-  const sendQuestion = async (value: string): Promise<void> => {
+  const sendQuestion = async (
+    value: string,
+    retryAssistantMessageId?: number,
+  ): Promise<void> => {
     const question = value.trim();
     if (!question || requestId) return;
-    setInput("");
+    setDrafts((current) => ({ ...current, [draftKey]: "" }));
     setPendingQuestion(question);
     setStreaming("");
+    setProgressStage("searching");
     const result = await window.fileNest.sendChat({
       sessionId: snapshot.selectedSessionId,
       content: question,
       attachedFilePath: attachment,
+      retryAssistantMessageId,
     });
     setRequestId(result.requestId);
   };
@@ -110,7 +125,7 @@ export function ChatPage({
       .slice(0, index)
       .reverse()
       .find((item) => item.role === "user")?.content;
-    if (question) void sendQuestion(question);
+    if (question) void sendQuestion(question, message.id);
   };
   const startDictation = (): void => {
     type Result = { 0: { transcript: string } };
@@ -181,7 +196,7 @@ export function ChatPage({
           <button
             className="secondary-button"
             onClick={() =>
-              void window.fileNest.createChat().then(() => onRefresh())
+              void window.fileNest.beginChat().then(() => onRefresh())
             }
           >
             <PlusSquareIcon />
@@ -249,7 +264,11 @@ export function ChatPage({
                     <div className="thinking-line">
                       <span />
                       <span />
-                      <span /> Searching local files…
+                      <span /> {progressStage === "generating"
+                        ? t("Generating response…")
+                        : progressStage === "retrieved"
+                          ? t("Preparing relevant context…")
+                          : t("Searching local files…")}
                     </div>
                   )}
                 </div>
@@ -311,7 +330,7 @@ export function ChatPage({
                 }
               >
                 <Sparkles size={15} />
-                {snapshot.settings.thinkingMode ? "Thinking" : "Fast"}⌄
+                {t(snapshot.settings.thinkingMode ? "Thinking" : "Fast")}⌄
               </button>
               <select
                 className="model-button model-select"
@@ -348,7 +367,7 @@ export function ChatPage({
                     {snapshot.settings.cloudModel}
                   </option>
                 ) : (
-                  <option value="none">Search Only</option>
+                  <option value="none">{t("Search Only")}</option>
                 )}
               </select>
               <IconButton label="Voice Input" onClick={startDictation}>
@@ -360,6 +379,8 @@ export function ChatPage({
                   onClick={() => {
                     void window.fileNest.cancelChat(requestId);
                     setRequestId(null);
+                    setPendingQuestion(null);
+                    setProgressStage(undefined);
                   }}
                 >
                   <Square size={16} />
@@ -379,10 +400,10 @@ export function ChatPage({
         <div className="composer-foot">
           <span className="active-green">●</span>
           {snapshot.settings.embeddingSource === "local"
-            ? "Local Lightweight Index"
+            ? t("Local Lightweight Index")
             : snapshot.settings.embeddingSource === "ollama"
-              ? "Local Semantic Search"
-              : "Cloud Semantic Search"}
+              ? t("Local Semantic Search")
+              : t("Cloud Semantic Search")}
           <span>·</span>
           {usesCloud ? t("Cloud features send the content they need") : t("File contents are not uploaded")}
         </div>
@@ -412,10 +433,10 @@ function Message({
   if (message.role === "user")
     return (
       <div className="user-message">
-        <div className="user-avatar">You</div>
+        <div className="user-avatar">{t("You")}</div>
         <div className="message-body">
           <div className="message-meta">
-            <strong>You</strong>
+            <strong>{t("You")}</strong>
             <time>{formatDate(message.timestamp, language)}</time>
           </div>
           <p>{message.content}</p>
@@ -474,6 +495,11 @@ function Message({
           </button>
         ))}
         <div className="message-actions">
+          {message.totalResponseDuration != null && (
+            <span className="response-metrics">
+              {message.responseProvider} · {message.outputTokens ?? 0} {t("tokens")} · {message.totalResponseDuration.toFixed(2)}s
+            </span>
+          )}
           <IconButton
             label="Copy"
             onClick={() => void navigator.clipboard.writeText(message.content)}

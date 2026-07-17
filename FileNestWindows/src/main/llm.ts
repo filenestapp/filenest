@@ -1,4 +1,6 @@
 import type { ChatMessage, Settings } from '../shared/types'
+import { readFile } from 'node:fs/promises'
+import { extname } from 'node:path'
 
 export interface LlmTurn { role: 'system' | 'user' | 'assistant'; content: string }
 
@@ -23,6 +25,21 @@ export class LlmService {
     yield* this.streamOpenAi(turns, settings, signal)
   }
 
+  async *streamWithImage(turns: LlmTurn[], imagePath: string, settings: Settings, signal: AbortSignal): AsyncGenerator<string> {
+    if (settings.llmChoice === 'none') return
+    const image = (await readFile(imagePath)).toString('base64')
+    const mime = mimeForImage(imagePath)
+    if (settings.llmChoice === 'ollama') {
+      yield* this.streamOllama(withOllamaImage(turns, image), settings, signal)
+      return
+    }
+    if (settings.cloudApiFormat === 'anthropic') {
+      yield* this.streamAnthropicWithImage(turns, image, mime, settings, signal)
+      return
+    }
+    yield* this.streamOpenAiWithImage(turns, image, mime, settings, signal)
+  }
+
   provider(settings: Settings): { name: string; model: string } {
     return settings.llmChoice === 'ollama'
       ? { name: 'Ollama', model: settings.ollamaModel }
@@ -34,7 +51,13 @@ export class LlmService {
   private async *streamOllama(turns: LlmTurn[], settings: Settings, signal: AbortSignal): AsyncGenerator<string> {
     const response = await fetch(new URL('/api/chat', settings.ollamaHost.replace(/\/+$/, '') + '/'), {
       method: 'POST', signal, headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: settings.ollamaModel, messages: turns, stream: true, think: settings.thinkingMode, options: { temperature: 0.2 } })
+      body: JSON.stringify({
+        model: settings.ollamaModel,
+        messages: turns,
+        stream: true,
+        think: settings.thinkingMode,
+        options: { temperature: 0.2, num_ctx: 32_000 }
+      })
     })
     if (!response.ok || !response.body) throw new Error(`Ollama ${response.status}: ${await response.text()}`)
     for await (const line of readLines(response.body, signal)) {
@@ -72,6 +95,56 @@ export class LlmService {
       if (payload.type === 'content_block_delta' && payload.delta?.text) yield payload.delta.text
     }
   }
+
+  private async *streamOpenAiWithImage(turns: LlmTurn[], image: string, mime: string, settings: Settings, signal: AbortSignal): AsyncGenerator<string> {
+    const messages = turns.map((turn, index) => index === turns.length - 1 && turn.role === 'user'
+      ? { role: turn.role, content: [{ type: 'text', text: turn.content }, { type: 'image_url', image_url: { url: `data:${mime};base64,${image}` } }] }
+      : turn)
+    const response = await fetch(new URL('chat/completions', settings.cloudBaseUrl.replace(/\/+$/, '') + '/'), {
+      method: 'POST', signal,
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${settings.cloudApiKey}` },
+      body: JSON.stringify({ model: settings.cloudModel, messages, stream: true, temperature: 0.2 })
+    })
+    if (!response.ok || !response.body) throw new Error(`Cloud Vision LLM ${response.status}: ${await response.text()}`)
+    for await (const line of readSseData(response.body, signal)) {
+      if (line === '[DONE]') break
+      const payload = JSON.parse(line) as { choices?: Array<{ delta?: { content?: string } }> }
+      const delta = payload.choices?.[0]?.delta?.content
+      if (delta) yield delta
+    }
+  }
+
+  private async *streamAnthropicWithImage(turns: LlmTurn[], image: string, mime: string, settings: Settings, signal: AbortSignal): AsyncGenerator<string> {
+    const system = turns.filter((turn) => turn.role === 'system').map((turn) => turn.content).join('\n\n')
+    const conversational = turns.filter((turn) => turn.role !== 'system')
+    const messages = conversational.map((turn, index) => index === conversational.length - 1 && turn.role === 'user'
+      ? { role: turn.role, content: [{ type: 'image', source: { type: 'base64', media_type: mime, data: image } }, { type: 'text', text: turn.content }] }
+      : turn)
+    const response = await fetch(new URL('messages', settings.cloudBaseUrl.replace(/\/+$/, '') + '/'), {
+      method: 'POST', signal,
+      headers: { 'content-type': 'application/json', 'x-api-key': settings.cloudApiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: settings.cloudModel, system, messages, stream: true, max_tokens: 4096, temperature: 0.2 })
+    })
+    if (!response.ok || !response.body) throw new Error(`Anthropic Vision ${response.status}: ${await response.text()}`)
+    for await (const line of readSseData(response.body, signal)) {
+      const payload = JSON.parse(line) as { type?: string; delta?: { text?: string } }
+      if (payload.type === 'content_block_delta' && payload.delta?.text) yield payload.delta.text
+    }
+  }
+}
+
+function withOllamaImage(turns: LlmTurn[], image: string): Array<LlmTurn & { images?: string[] }> {
+  return turns.map((turn, index) => index === turns.length - 1 && turn.role === 'user' ? { ...turn, images: [image] } : turn)
+}
+
+function mimeForImage(path: string): string {
+  const extension = extname(path).slice(1).toLowerCase()
+  if (extension === 'png') return 'image/png'
+  if (extension === 'webp') return 'image/webp'
+  if (extension === 'gif') return 'image/gif'
+  if (extension === 'heic') return 'image/heic'
+  if (extension === 'tif' || extension === 'tiff') return 'image/tiff'
+  return 'image/jpeg'
 }
 
 async function* readLines(stream: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncGenerator<string> {

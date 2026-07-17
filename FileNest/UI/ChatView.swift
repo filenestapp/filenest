@@ -9,9 +9,12 @@ struct ChatView: View {
 
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
+    let isActive: Bool
     @State private var sending = false
     @State private var sendTask: Task<Void, Never>?
     @State private var streamingMessageID: Int64?
+    @State private var pendingStreamDelta = ""
+    @State private var streamFlushTask: Task<Void, Never>?
     @State private var optimisticUserID: Int64?
     @State private var progressByMessageID: [Int64: ChatProgress] = [:]
     @State private var composerTextHeight = ChatComposerTextView.defaultHeight
@@ -61,10 +64,21 @@ struct ChatView: View {
         .onAppear {
             guard !FileNestEnvironment.isUIPreview else { return }
             appState.refreshChatSessions()
+            markSelectedChatSeenIfActive()
             Task { await appState.ollama.refresh(host: appState.settings.ollamaHost) }
+        }
+        .onChange(of: isActive) { _ in
+            markSelectedChatSeenIfActive()
+        }
+        .onChange(of: appState.selectedChatSessionID) { _ in
+            markSelectedChatSeenIfActive()
+        }
+        .onChange(of: appState.completedChatSessionIDs) { _ in
+            markSelectedChatSeenIfActive()
         }
         .onDisappear {
             sendTask?.cancel()
+            discardPendingStreamDelta()
         }
         .alert(
             "Cloud AI Is Temporarily Unavailable",
@@ -285,8 +299,10 @@ struct ChatView: View {
         guard !question.isEmpty, !sending, !FileNestEnvironment.isUIPreview else { return }
         guard let sessionID = appState.persistChatForQuestion() else { return }
 
+        discardPendingStreamDelta()
         appState.updateChatComposerInput("")
         sending = true
+        appState.markChatRunning(sessionID)
 
         let seed = Int64(Date().timeIntervalSince1970 * 1_000_000)
         let userID = -max(seed, 1)
@@ -344,6 +360,7 @@ struct ChatView: View {
                   $0.role == ChatRole.user.rawValue
               }) else { return }
 
+        discardPendingStreamDelta()
         let question = appState.chatMessages[userIndex].content
         let assistantIndex = appState.chatMessages.indices
             .dropFirst(userIndex + 1)
@@ -372,6 +389,7 @@ struct ChatView: View {
             scope: isFileChat ? .attachedFile : .library
         )
         sending = true
+        appState.markChatRunning(sessionID)
 
         let attachment = appState.currentChatAttachmentPath
         let model = currentModel
@@ -417,11 +435,11 @@ struct ChatView: View {
             _ = index
             progressByMessageID[streamingMessageID] = progress
         case let .delta(chunk):
-            guard let streamingMessageID,
-                  let index = appState.chatMessages.firstIndex(where: { $0.id == streamingMessageID }) else { return }
+            guard let streamingMessageID else { return }
             progressByMessageID.removeValue(forKey: streamingMessageID)
-            appState.chatMessages[index].content += chunk
+            enqueueStreamDelta(chunk)
         case let .completed(message):
+            discardPendingStreamDelta()
             if let streamingMessageID,
                let index = appState.chatMessages.firstIndex(where: { $0.id == streamingMessageID }) {
                 appState.chatMessages[index] = message
@@ -432,17 +450,27 @@ struct ChatView: View {
             handleCloudProviderFailure(message)
         case .cancelled:
             appState.refreshChatSessions(selecting: sessionID)
-            finishStreaming(sessionID: sessionID, reload: false)
+            finishStreaming(sessionID: sessionID, reload: false, completed: false)
         }
     }
 
-    private func finishStreaming(sessionID: Int64, reload: Bool = true) {
+    private func finishStreaming(
+        sessionID: Int64,
+        reload: Bool = true,
+        completed: Bool = true
+    ) {
+        discardPendingStreamDelta()
         sending = false
         sendTask = nil
         if let streamingMessageID { progressByMessageID.removeValue(forKey: streamingMessageID) }
         streamingMessageID = nil
         optimisticUserID = nil
         activeFallbackRequest = nil
+        if completed {
+            appState.markChatCompleted(sessionID)
+        } else {
+            appState.markChatStopped(sessionID)
+        }
         if reload {
             appState.refreshChatSessions(selecting: sessionID)
             appState.refreshStatistics()
@@ -450,10 +478,14 @@ struct ChatView: View {
     }
 
     private func stopStreaming() {
+        flushPendingStreamDelta()
         sendTask?.cancel()
         if let streamingMessageID { progressByMessageID.removeValue(forKey: streamingMessageID) }
         sending = false
         activeFallbackRequest = nil
+        if let sessionID = appState.selectedChatSessionID {
+            appState.markChatStopped(sessionID)
+        }
     }
 
     private var localChatModels: [OllamaModelInfo] {
@@ -465,6 +497,7 @@ struct ChatView: View {
 
     private func handleCloudProviderFailure(_ message: String) {
         guard var request = activeFallbackRequest else { return }
+        discardPendingStreamDelta()
         request.failureMessage = message
         if let streamingMessageID {
             progressByMessageID.removeValue(forKey: streamingMessageID)
@@ -475,6 +508,7 @@ struct ChatView: View {
         streamingMessageID = nil
         optimisticUserID = nil
         activeFallbackRequest = nil
+        appState.markChatStopped(request.sessionID)
 
         guard !localChatModels.isEmpty else {
             startFallback(request, mode: .vectorOnly(cloudFailure: message))
@@ -498,6 +532,7 @@ struct ChatView: View {
     private func startFallback(_ request: ChatFallbackRequest, mode: ChatProviderMode) {
         pendingCloudFallback = nil
         guard !sending else { return }
+        discardPendingStreamDelta()
         let placeholderID = request.replacingAssistantMessageID
             ?? -max(Int64(Date().timeIntervalSince1970 * 1_000_000), 1)
         streamingMessageID = placeholderID
@@ -515,6 +550,7 @@ struct ChatView: View {
             sessionId: request.sessionID
         ))
         sending = true
+        appState.markChatRunning(request.sessionID)
         sendTask = Task {
             for await update in appState.chat.retryAnswer(
                 request.question,
@@ -527,6 +563,36 @@ struct ChatView: View {
                 handle(update, sessionID: request.sessionID)
             }
         }
+    }
+
+    private func enqueueStreamDelta(_ chunk: String) {
+        pendingStreamDelta += chunk
+        guard streamFlushTask == nil else { return }
+        streamFlushTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return
+            }
+            flushPendingStreamDelta()
+        }
+    }
+
+    private func flushPendingStreamDelta() {
+        streamFlushTask?.cancel()
+        streamFlushTask = nil
+        guard !pendingStreamDelta.isEmpty else { return }
+        let delta = pendingStreamDelta
+        pendingStreamDelta = ""
+        guard let streamingMessageID,
+              let index = appState.chatMessages.firstIndex(where: { $0.id == streamingMessageID }) else { return }
+        appState.chatMessages[index].content += delta
+    }
+
+    private func discardPendingStreamDelta() {
+        streamFlushTask?.cancel()
+        streamFlushTask = nil
+        pendingStreamDelta = ""
     }
 
     private func chooseFile() {
@@ -543,6 +609,11 @@ struct ChatView: View {
 
     private func startDictation() {
         NSApp.sendAction(Selector(("startDictation:")), to: nil, from: nil)
+    }
+
+    private func markSelectedChatSeenIfActive() {
+        guard isActive, let sessionID = appState.selectedChatSessionID else { return }
+        appState.markChatSeen(sessionID)
     }
 
 }
@@ -1027,6 +1098,14 @@ private struct ChatProgressSteps: View {
                     "AI is analyzing the search criteria",
                     completed: progress.phase != .planningSearch
                 )
+                if !progress.searchIntent.isEmpty {
+                    Text(progress.searchIntent)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.primary.opacity(0.82))
+                        .padding(.leading, 24)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
 
                 if progress.phase != .planningSearch {
                     progressRow(

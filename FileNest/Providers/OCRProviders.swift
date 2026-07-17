@@ -29,7 +29,7 @@ final class PaddleOCRServiceManager: ObservableObject {
 
     init(session: URLSession = .shared) {
         self.session = session
-        refresh()
+        refreshCachedState()
     }
 
     nonisolated static var installRoot: URL {
@@ -53,8 +53,11 @@ final class PaddleOCRServiceManager: ObservableObject {
         installedVersions()?.paddleOCR ?? (hasManagedEnvironment ? paddleOCRVersion : nil)
     }
 
-    func refresh() {
-        if Self.isAvailable() {
+    func refresh() async {
+        let isAvailable = await Task.detached(priority: .userInitiated) {
+            Self.isAvailable()
+        }.value
+        if isAvailable {
             let versions = Self.installedVersions()
             installedVersion = versions?.paddleOCR ?? Self.paddleOCRVersion
             installedPaddlePaddleVersion = versions?.paddlePaddle ?? Self.paddlePaddleVersion
@@ -65,6 +68,19 @@ final class PaddleOCRServiceManager: ObservableObject {
             installedPaddlePaddleVersion = nil
             state = .unavailable
         }
+    }
+
+    private func refreshCachedState() {
+        guard Self.hasManagedEnvironment else {
+            installedVersion = nil
+            installedPaddlePaddleVersion = nil
+            state = .unavailable
+            return
+        }
+        let versions = Self.installedVersions()
+        installedVersion = versions?.paddleOCR ?? Self.paddleOCRVersion
+        installedPaddlePaddleVersion = versions?.paddlePaddle ?? Self.paddlePaddleVersion
+        state = .ready("PaddleOCR \(installedVersion ?? Self.paddleOCRVersion)")
     }
 
     func install() async {
@@ -187,7 +203,7 @@ final class PaddleOCRServiceManager: ObservableObject {
             }.value
             installProgress = 1
             installStatus = isUpdate ? "PaddleOCR update complete" : "PaddleOCR installation complete"
-            refresh()
+            await refresh()
             if isUpdate {
                 updateStatus = .idle
                 await checkForUpdates()
@@ -197,7 +213,7 @@ final class PaddleOCRServiceManager: ObservableObject {
                 ? "PaddleOCR update failed: \(error.localizedDescription)"
                 : "PaddleOCR Installation Failed：\(error.localizedDescription)"
             if isUpdate {
-                refresh()
+                await refresh()
             } else {
                 state = .failed(message)
             }

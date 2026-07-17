@@ -174,11 +174,16 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 .file-icon-pdf { background: var(--danger-soft); color: var(--danger); }.file-icon-image { background: oklch(0.95 0.045 205); color: oklch(0.55 0.15 220); }.file-icon-video { background: oklch(0.95 0.045 315); color: oklch(0.55 0.17 315); }.file-icon-audio { background: oklch(0.95 0.05 150); color: oklch(0.54 0.16 150); }.file-icon-code { background: var(--accent-soft); color: var(--accent); }.file-icon-archive { background: var(--warning-soft); color: var(--warning); }
 
 .inspector { height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+.inspector.expanded { position: fixed; z-index: 40; inset: 0 0 0 260px; width: auto; box-shadow: -8px 0 28px oklch(0.2 0.02 260 / 0.16); }
 .inspector-header { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: 0 var(--space-5); border-bottom: 1px solid var(--border); }
 .inspector-title { min-width: 0; display: flex; align-items: center; gap: var(--space-3); }
 .inspector-title strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .inspector-scroll { min-height: 0; overflow-y: auto; }
 .inspector-section { padding: var(--space-5); border-bottom: 1px solid var(--border); }
+.chunk-list { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+.chunk-list article { padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-muted); }
+.chunk-list article header { display: flex; justify-content: space-between; gap: var(--space-3); color: var(--text-muted); font-size: 12px; }
+.chunk-list article p { margin: var(--space-2) 0 0; white-space: pre-wrap; line-height: 1.55; }
 .field-label { margin-bottom: var(--space-2); color: var(--text-secondary); font-size: 0.75rem; font-weight: 600; }
 .status-badge { display: inline-flex; align-items: center; gap: var(--space-1); padding: 3px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
 .status-badge.success { background: var(--success-soft); color: var(--success); }

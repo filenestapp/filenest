@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
+  ChevronLeft,
+  ChevronRight,
   Eye,
   FolderOpen,
   MessageCircle,
@@ -11,7 +13,14 @@ import {
   Trash2,
   WandSparkles,
 } from "lucide-react";
-import type { AppSnapshot, FileCategory, FileRecord } from "../../shared/types";
+import type {
+  AppSnapshot,
+  FileCategory,
+  FileRecord,
+  LibrarySearchResult,
+  LibrarySortField,
+  SortDirection,
+} from "../../shared/types";
 import {
   categoryLabels,
   FileTypeIcon,
@@ -20,6 +29,8 @@ import {
   IconButton,
 } from "./components";
 import { translate } from "./i18n";
+
+const PAGE_SIZE = 50;
 
 export function LibraryPage({
   snapshot,
@@ -32,48 +43,62 @@ export function LibraryPage({
   onStartChat(file: FileRecord): void;
   onRefresh(): Promise<void>;
 }): React.JSX.Element {
-  const t = (value: string): string =>
-    translate(value, snapshot.settings.appLanguage);
+  const t = (value: string): string => translate(value, snapshot.settings.appLanguage);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<FileCategory | null>(null);
-  const [files, setFiles] = useState(snapshot.files);
+  const [sortField, setSortField] = useState<LibrarySortField>("relevance");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("descending");
+  const [offset, setOffset] = useState(0);
+  const [results, setResults] = useState<LibrarySearchResult[]>([]);
+  const [total, setTotal] = useState(0);
+  const [interpretedQuery, setInterpretedQuery] = useState("");
   const [busy, setBusy] = useState(false);
-  useEffect(() => setFiles(snapshot.files), [snapshot.files]);
-  const search = async (): Promise<void> =>
-    setFiles(await window.fileNest.searchFiles(query, category));
-  useEffect(() => {
-    void search();
-  }, [category]);
+
+  const search = useCallback(async (): Promise<void> => {
+    const response = await window.fileNest.searchLibrary({
+      query,
+      category,
+      sortField,
+      sortDirection,
+      offset,
+      limit: PAGE_SIZE,
+    });
+    setResults(response.results);
+    setTotal(response.total);
+    setInterpretedQuery(response.interpretedQuery);
+  }, [category, offset, query, sortDirection, sortField]);
+
+  useEffect(() => { void search(); }, [search, snapshot.files]);
+
   const run = async (action: () => Promise<void>): Promise<void> => {
     setBusy(true);
     try {
       await action();
       await onRefresh();
+      await search();
     } finally {
       setBusy(false);
     }
   };
+
+  const setFilterCategory = (next: FileCategory | null): void => {
+    setCategory(next);
+    setOffset(0);
+  };
+
   return (
     <main className="library-page">
       <header className="page-header">
         <div>
           <h1>{t("Library")}</h1>
-          <p>Search and manage organized files; all indexes stay on this Mac.</p>
+          <p>{t("Search and manage organized files; all indexes stay on this PC.")}</p>
         </div>
         <div className="page-actions">
-          <button
-            className="primary-button"
-            disabled={busy}
-            onClick={() => void run(() => window.fileNest.organizeNow())}
-          >
+          <button className="primary-button" disabled={busy} onClick={() => void run(() => window.fileNest.organizeNow())}>
             <WandSparkles size={17} />
             {t("Organize Now")}
           </button>
-          <button
-            className="secondary-button"
-            disabled={busy || snapshot.indexing}
-            onClick={() => void run(() => window.fileNest.reindexAll())}
-          >
+          <button className="secondary-button" disabled={busy || snapshot.indexing} onClick={() => void run(() => window.fileNest.reindexAll())}>
             <RefreshCw className={snapshot.indexing ? "spin" : ""} size={17} />
             {t("Reindex")}
           </button>
@@ -81,19 +106,11 @@ export function LibraryPage({
             <>
               <IconButton
                 label={snapshot.indexingPaused ? "Resume Indexing" : "Pause Indexing"}
-                onClick={() =>
-                  void (snapshot.indexingPaused
-                    ? window.fileNest.resumeIndexing()
-                    : window.fileNest.pauseIndexing()
-                  ).then(onRefresh)
-                }
+                onClick={() => void (snapshot.indexingPaused ? window.fileNest.resumeIndexing() : window.fileNest.pauseIndexing()).then(onRefresh)}
               >
                 {snapshot.indexingPaused ? <Play size={17} /> : <Pause size={17} />}
               </IconButton>
-              <IconButton
-                label="Stop Indexing"
-                onClick={() => void window.fileNest.cancelIndexing().then(onRefresh)}
-              >
+              <IconButton label="Stop Indexing" onClick={() => void window.fileNest.cancelIndexing().then(onRefresh)}>
                 <Square size={15} />
               </IconButton>
             </>
@@ -102,12 +119,11 @@ export function LibraryPage({
       </header>
       {snapshot.indexingProgress && (
         <div className="progress-bar">
-          <div
-            style={{
-              width: `${snapshot.indexingProgress.total ? (snapshot.indexingProgress.completed / snapshot.indexingProgress.total) * 100 : 0}%`,
-            }}
-          />
-          <span>{snapshot.indexingProgress.currentName}</span>
+          <div style={{ width: `${snapshot.indexingProgress.total ? (snapshot.indexingProgress.completed / snapshot.indexingProgress.total) * 100 : 0}%` }} />
+          <span>
+            {snapshot.indexingProgress.stage}: {snapshot.indexingProgress.currentName} · {snapshot.indexingProgress.completed}/{snapshot.indexingProgress.total}
+            {snapshot.indexingProgress.failed ? ` · ${snapshot.indexingProgress.failed} failed` : ""}
+          </span>
         </div>
       )}
       <div className="library-toolbar">
@@ -117,104 +133,81 @@ export function LibraryPage({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") void search();
+              if (event.key === "Enter") { setOffset(0); void search(); }
             }}
-            placeholder="Search file names, titles, or contents…"
+            placeholder={t("Search names, contents, notes, or dates such as 'last week'…")}
           />
-          <button onClick={() => void search()}>{t("Search")}</button>
+          <button onClick={() => { setOffset(0); void search(); }}>{t("Search")}</button>
         </div>
         <div className="category-filters">
-          <button
-            className={category === null ? "selected" : ""}
-            onClick={() => setCategory(null)}
-          >
-            {t("All")}
-          </button>
+          <button className={category === null ? "selected" : ""} onClick={() => setFilterCategory(null)}>{t("All")}</button>
           {(Object.keys(categoryLabels) as FileCategory[]).map((item) => (
-            <button
-              key={item}
-              className={category === item ? "selected" : ""}
-              onClick={() => setCategory(item)}
-            >
+            <button key={item} className={category === item ? "selected" : ""} onClick={() => setFilterCategory(item)}>
               {t(categoryLabels[item])}
             </button>
           ))}
+          <select
+            aria-label={t("Sort files")}
+            value={`${sortField}:${sortDirection}`}
+            onChange={(event) => {
+              const [field, direction] = event.target.value.split(":") as [LibrarySortField, SortDirection];
+              setSortField(field);
+              setSortDirection(direction);
+              setOffset(0);
+            }}
+          >
+            <option value="relevance:descending">{t("Best match")}</option>
+            <option value="modified:descending">{t("Newest modified")}</option>
+            <option value="modified:ascending">{t("Oldest modified")}</option>
+            <option value="size:descending">{t("Largest size")}</option>
+            <option value="size:ascending">{t("Smallest size")}</option>
+            <option value="name:ascending">{t("Name A–Z")}</option>
+            <option value="name:descending">{t("Name Z–A")}</option>
+          </select>
         </div>
+        {interpretedQuery && interpretedQuery !== query.trim() && (
+          <small className="query-interpretation">{t("Interpreted as")}: {interpretedQuery}</small>
+        )}
       </div>
       <div className="file-table" role="table">
         <div className="file-table-header" role="row">
-          <span>{t("Name")}</span>
-          <span>{t("Category")}</span>
-          <span>{t("Size")}</span>
-          <span>{t("Modified")}</span>
-          <span>{t("Actions")}</span>
+          <span>{t("Name")}</span><span>{t("Category")}</span><span>{t("Size")}</span><span>{t("Modified")}</span><span>{t("Actions")}</span>
         </div>
         <div className="file-table-body">
-          {files.length === 0 ? (
+          {results.length === 0 ? (
             <div className="empty-library">
-              <FolderOpen size={38} />
-              <strong>{t("No Files Found")}</strong>
-              <span>Adjust the search criteria or place files in a watched folder.</span>
+              <FolderOpen size={38} /><strong>{t("No Files Found")}</strong><span>{t("Adjust the search criteria or place files in a watched folder.")}</span>
             </div>
-          ) : (
-            files.map((file) => (
-              <div
-                key={file.id}
-                className="file-row"
-                role="row"
-                onDoubleClick={() => void window.fileNest.openFile(file.path)}
-              >
-                <div className="file-name-cell">
-                  <FileTypeIcon file={file} size={22} />
-                  <div>
-                    <strong>{file.name}</strong>
-                    <span>{file.title ?? file.path}</span>
-                  </div>
-                  {file.indexedAt && <small>● {t("Indexed")}</small>}
+          ) : results.map(({ file, matchKind, snippet }) => (
+            <div key={file.id} className="file-row" role="row" onDoubleClick={() => void window.fileNest.openFile(file.path)}>
+              <div className="file-name-cell">
+                <FileTypeIcon file={file} size={22} />
+                <div>
+                  <strong>{file.name}</strong>
+                  <span>{snippet || file.title || file.path}</span>
                 </div>
-                <span>{t(categoryLabels[file.category])}</span>
-                <span>{formatBytes(file.size)}</span>
-                <span>
-                  {formatDate(file.mtime, snapshot.settings.appLanguage)}
-                </span>
-                <div className="row-actions">
-                  <IconButton
-                    label={t("File Preview")}
-                    onClick={() => onInspect(file)}
-                  >
-                    <Eye size={16} />
-                  </IconButton>
-                  {file.category === "documents" && (
-                    <IconButton
-                      label={t("Find with Chat")}
-                      onClick={() => onStartChat(file)}
-                    >
-                      <MessageCircle size={16} />
-                    </IconButton>
-                  )}
-                  <IconButton
-                    label={t("Show in File Explorer")}
-                    onClick={() =>
-                      void window.fileNest.showInExplorer(file.path)
-                    }
-                  >
-                    <FolderOpen size={16} />
-                  </IconButton>
-                  <IconButton
-                    label="Move to Recycle Bin"
-                    onClick={() => {
-                      if (confirm(`${file.name}?`))
-                        void window.fileNest.trashFile(file.id).then(onRefresh);
-                    }}
-                  >
-                    <Trash2 size={16} />
-                  </IconButton>
-                </div>
+                {file.indexedAt && <small>● {t("Indexed")} · {t(matchKind)}</small>}
               </div>
-            ))
-          )}
+              <span>{t(categoryLabels[file.category])}</span>
+              <span>{formatBytes(file.size)}</span>
+              <span>{formatDate(file.mtime, snapshot.settings.appLanguage)}</span>
+              <div className="row-actions">
+                <IconButton label={t("File Preview")} onClick={() => onInspect(file)}><Eye size={16} /></IconButton>
+                {file.category === "documents" && <IconButton label={t("Find with Chat")} onClick={() => onStartChat(file)}><MessageCircle size={16} /></IconButton>}
+                <IconButton label={t("Show in File Explorer")} onClick={() => void window.fileNest.showInExplorer(file.path)}><FolderOpen size={16} /></IconButton>
+                <IconButton label={t("Move to Recycle Bin")} onClick={() => { if (confirm(`${file.name}?`)) void window.fileNest.trashFile(file.id).then(onRefresh); }}><Trash2 size={16} /></IconButton>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
+      {total > PAGE_SIZE && (
+        <div className="library-pagination">
+          <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}><ChevronLeft size={16} /> {t("Previous")}</button>
+          <span>{offset + 1}–{Math.min(offset + PAGE_SIZE, total)} / {total}</span>
+          <button disabled={offset + PAGE_SIZE >= total} onClick={() => setOffset(offset + PAGE_SIZE)}>{t("Next")} <ChevronRight size={16} /></button>
+        </div>
+      )}
     </main>
   );
 }

@@ -1,0 +1,1330 @@
+{
+  "repo": {
+    "name": "mactools",
+    "path": "/Users/la230048/work/ai.prompt/mactools",
+    "generated_at": "2026-07-16T14:24:31.384766+00:00"
+  },
+  "counts": {
+    "files": 44809,
+    "extensions": [
+      [
+        ".test",
+        5536
+      ],
+      [
+        ".pcm",
+        2590
+      ],
+      [
+        ".swift",
+        2445
+      ],
+      [
+        ".c",
+        1464
+      ],
+      [
+        ".o",
+        1155
+      ],
+      [
+        "[none]",
+        1135
+      ],
+      [
+        ".dia",
+        1001
+      ],
+      [
+        ".d",
+        986
+      ],
+      [
+        ".h",
+        972
+      ],
+      [
+        ".swiftconstvalues",
+        878
+      ],
+      [
+        ".swiftdeps",
+        875
+      ],
+      [
+        ".png",
+        707
+      ],
+      [
+        ".stringsdata",
+        677
+      ],
+      [
+        ".strings",
+        437
+      ],
+      [
+        ".md",
+        410
+      ],
+      [
+        ".plist",
+        385
+      ],
+      [
+        ".tcl",
+        364
+      ],
+      [
+        ".m",
+        342
+      ],
+      [
+        ".json",
+        273
+      ],
+      [
+        ".java",
+        224
+      ],
+      [
+        ".zip",
+        223
+      ],
+      [
+        ".sample",
+        196
+      ],
+      [
+        ".xcconfig",
+        158
+      ],
+      [
+        ".js",
+        132
+      ],
+      [
+        ".yml",
+        126
+      ],
+      [
+        ".txt",
+        120
+      ],
+      [
+        ".pak",
+        116
+      ],
+      [
+        ".sh",
+        106
+      ],
+      [
+        ".xcworkspacedata",
+        104
+      ],
+      [
+        ".xcscheme",
+        104
+      ]
+    ],
+    "top_dirs": [
+      [
+        ".build",
+        44040
+      ],
+      [
+        "FileNestWindows",
+        339
+      ],
+      [
+        "Vendor",
+        255
+      ],
+      [
+        "design",
+        86
+      ],
+      [
+        "FileNest",
+        59
+      ],
+      [
+        "FileNestTests",
+        19
+      ],
+      [
+        "FileNest.xcodeproj",
+        3
+      ],
+      [
+        ".DS_Store",
+        1
+      ],
+      [
+        "project.yml",
+        1
+      ],
+      [
+        "README.md",
+        1
+      ],
+      [
+        ".gitignore",
+        1
+      ],
+      [
+        "HANDOVER.md",
+        1
+      ],
+      [
+        "script",
+        1
+      ],
+      [
+        ".codex",
+        1
+      ],
+      [
+        ".zcode",
+        1
+      ]
+    ]
+  },
+  "high_signal_files": {
+    "manifests": [
+      ".build/DerivedData/SourcePackages/checkouts/swift-cmark/tools/Dockerfile",
+      "FileNestWindows/package.json"
+    ],
+    "documentation": [
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/.github/ISSUE_TEMPLATE.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/.github/PULL_REQUEST_TEMPLATE.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/BRAG.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/CHANGELOG.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/CODE_OF_CONDUCT.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/CONTRIBUTING.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/AppGroupContainers.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/AssociationsBasics.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/Combine.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/CommonTableExpressions.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/Concurrency.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/CustomSQLiteBuilds.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBDemoiOS/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/FTS5Tokenizers.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/FetchedRecordsController.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/FullTextSearch.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/GRDB5MigrationGuide.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/GRDB6MigrationGuide.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/GoodPracticesForDesigningRecordTypes.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/Migrations.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/QueryInterfaceOrganization.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/ReleaseProcess.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/SQLInterpolation.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/SharingADatabase.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/SingleRowTables.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/WhyAdoptGRDB.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Concurrency.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/DatabaseConnections.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/DatabaseObservation.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/DatabaseSchema.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/DatabaseSharing.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Extension/Configuration.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Extension/DatabasePool.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Extension/DatabaseQueue.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Extension/DatabaseRegionObservation.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Extension/DatabaseValueConvertible.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Extension/Statement.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Extension/TransactionObserver.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Extension/ValueObservation.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/FullTextSearch.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/GRDB.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/JSON.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Migrations.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/QueryInterface.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/RecordRecommendedPractices.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/RecordTimestamps.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/SQLSupport.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/SingleRowTables.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Transactions.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/LICENSE.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/doc/compile-for-windows.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/doc/json-enhancements.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/doc/testrunner.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/doc/trusted-schema.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/doc/vdbesort-memory.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/doc/wal-lock.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/expert/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/jni/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/jni/src/org/sqlite/jni/test-script-interpreter.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/repair/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/repair/test/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/api/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/jaccwabyt/jaccwabyt.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/in-operator.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/json/README.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/tool/dbtotxt.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/TODO.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/.github/ISSUE_TEMPLATE/fixes-and-enhancements.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/.github/ISSUE_TEMPLATE/sparkle-doesn-t-work-in-my-app.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/.github/pull_request_template.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/CODE_OF_CONDUCT.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Documentation/Design Practices.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Documentation/Installation.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Documentation/Security.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Vendor/ed25519-sparkle/readme.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/ZIPFoundation/.github/CODE_OF_CONDUCT.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/ZIPFoundation/.github/CONTRIBUTING.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/ZIPFoundation/.github/ISSUE_TEMPLATE/Bug_report.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/ZIPFoundation/.github/ISSUE_TEMPLATE/Feature_request.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/ZIPFoundation/.github/ISSUE_TEMPLATE/Support_question.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/ZIPFoundation/.github/PULL_REQUEST_TEMPLATE.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/ZIPFoundation/CHANGELOG.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/ZIPFoundation/README.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/.github/ISSUE_TEMPLATE.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/.github/PULL_REQUEST_TEMPLATE.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/BRAG.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/CHANGELOG.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/CODE_OF_CONDUCT.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/CONTRIBUTING.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/AppGroupContainers.md"
+    ],
+    "route_candidates": [
+      ".build/DerivedData-Incremental/Build/Products/Debug/Sparkle.framework/Versions/B/Headers/SPUStandardUpdaterController.h",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/0V/NSViewController.h-QP7YOURQPZ0V",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/28/HIContainerViews.h-1B1GTHXLDWT28",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/28/NSSplitViewItemAccessoryViewController.h-38FAJ2NLVW228",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/3Z/HIWindowViews.h-M22NBN6VAT3Z",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/8S/NSPageController.h-3L4B4IRAWE18S",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/DL/QLPreviewingController.h-2ABQAVDAIMJDL",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/E3/IOEthernetController.h-1YEATH4UD1ZE3",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/H6/HITextViews.h-35D92S1NYXQH6",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/JW/NSDocumentController.h-2NHNV1KTOVPJW",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/K4/NSDictionaryController.h-1RBAFILFAWVK4",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/KE/NSTreeController.h-PNL5IBD1JAKE",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/KF/NSTextViewportLayoutController.h-15X6IX0G15HKF",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/LL/NSTitlebarAccessoryViewController.h-23CA0GY2X9OLL",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/MG/HIImageViews.h-36RE3LZYDNYMG",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/N6/NSController.h-10JHDXGP77HN6",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/NQ/NSFetchedResultsController.h-2A9470AAYXNQ",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/NX/SPUStandardUpdaterController.h-HKMIZ3WXKWNX",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/O8/NSArrayController.h-2F5ZN7P4O7QO8",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/OS/NSWindowController.h-1GBKBC3RPOXOS",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/QE/NSSplitViewController.h-1YV2IZ4W4P7QE",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/SK/IONetworkController.h-2S4O7C94B18SK",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/WO/NSTextCheckingController.h-13NGRIUVOLKWO",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/WS/HIDisclosureViews.h-3PLOS8S6F79WS",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/WV/IOStorageControllerCharacteristics.h-2FC8UOFL3O7WV",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/XD/HIButtonViews.h-1JAVYB8SXD3XD",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/XR/NSObjectController.h-W9VGDVPPB4XR",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/XV/AVPlayerInterstitialEventController.h-QQK4OIW4J0XV",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/XV/NSUserDefaultsController.h-2YAHCRJ9K8SXV",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/Y7/MLUpdateProgressHandlers.h-2MN9MY5SWNHY7",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/YC/HIProgressViews.h-15PU090TZU1YC",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/ZQ/NSMediaLibraryBrowserController.h-224ICW5S4D8ZQ",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/ZT/NSTabViewController.h-1KWF2WVWB3GZT",
+      ".build/DerivedData-Incremental/SourcePackages/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework/Versions/B/Headers/SPUStandardUpdaterController.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/Views/AppView.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/Views/PlayerCreationView.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/Views/PlayerEditionView.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/Views/PlayerFormView.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/Views/PlayerList.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/Views/AppView.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/Views/PlayerCreationView.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/Views/PlayerEditionView.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/Views/PlayerFormView.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/Views/PlayerList.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBDemoiOS/GRDBDemoWatchOS Extension/InterfaceController.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBDemoiOS/GRDBDemoiOS/ViewControllers/PlayerEditionViewController.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBDemoiOS/GRDBDemoiOS/ViewControllers/PlayerListViewController.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/FetchedRecordsController.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/pagesize.test",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/tool/pagesig.c",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Tests/CustomSQLite/CustomSQLite/ViewController.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Tests/Performance/GRDBProfiling/GRDBProfiling/ViewController.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Tests/SPM/ios-dynamic/ios-dynamic/ViewController.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Tests/SPM/ios/ios/ViewController.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Tests/SPM/macos/macos/ViewController.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Sparkle/InstallerProgress/InstallerProgressAppController.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Sparkle/InstallerProgress/InstallerProgressAppController.m",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Sparkle/SPUStandardUpdaterController.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Sparkle/SPUStandardUpdaterController.m",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Sparkle/SUStatusController.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Sparkle/SUStatusController.m",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/TestApplication/SUInstallUpdateViewController.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/TestApplication/SUInstallUpdateViewController.m",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/TestApplication/SUInstallUpdateViewController.xib",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/TestApplication/SUUpdateSettingsWindowController.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/TestApplication/SUUpdateSettingsWindowController.m",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/TestApplication/SUUpdateSettingsWindowController.xib",
+      ".build/DerivedData-OCRTabs/Build/Products/Debug/Sparkle.framework/Versions/B/Headers/SPUStandardUpdaterController.h",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/0V/NSViewController.h-QP7YOURQPZ0V",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/28/HIContainerViews.h-1B1GTHXLDWT28",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/28/NSSplitViewItemAccessoryViewController.h-38FAJ2NLVW228",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/3Z/HIWindowViews.h-M22NBN6VAT3Z",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/8S/NSPageController.h-3L4B4IRAWE18S",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/DL/QLPreviewingController.h-2ABQAVDAIMJDL",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/E3/IOEthernetController.h-1YEATH4UD1ZE3",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/H6/HITextViews.h-35D92S1NYXQH6",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/JW/NSDocumentController.h-2NHNV1KTOVPJW",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/K4/NSDictionaryController.h-1RBAFILFAWVK4",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/KE/NSTreeController.h-PNL5IBD1JAKE",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/KF/NSTextViewportLayoutController.h-15X6IX0G15HKF",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/LL/NSTitlebarAccessoryViewController.h-23CA0GY2X9OLL",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/MG/HIImageViews.h-36RE3LZYDNYMG",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/N6/NSController.h-10JHDXGP77HN6",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/NQ/NSFetchedResultsController.h-2A9470AAYXNQ",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/NX/SPUStandardUpdaterController.h-HKMIZ3WXKWNX",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/O8/NSArrayController.h-2F5ZN7P4O7QO8",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/OS/NSWindowController.h-1GBKBC3RPOXOS",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/QE/NSSplitViewController.h-1YV2IZ4W4P7QE",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/SK/IONetworkController.h-2S4O7C94B18SK",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/WO/NSTextCheckingController.h-13NGRIUVOLKWO",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/WS/HIDisclosureViews.h-3PLOS8S6F79WS",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/WV/IOStorageControllerCharacteristics.h-2FC8UOFL3O7WV",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/XD/HIButtonViews.h-1JAVYB8SXD3XD",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/XR/NSObjectController.h-W9VGDVPPB4XR",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/XV/AVPlayerInterstitialEventController.h-QQK4OIW4J0XV",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/XV/NSUserDefaultsController.h-2YAHCRJ9K8SXV",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/Y7/MLUpdateProgressHandlers.h-2MN9MY5SWNHY7",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/YC/HIProgressViews.h-15PU090TZU1YC",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/ZQ/NSMediaLibraryBrowserController.h-224ICW5S4D8ZQ",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/ZT/NSTabViewController.h-1KWF2WVWB3GZT",
+      ".build/DerivedData-OCRTabs/SourcePackages/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework/Versions/B/Headers/SPUStandardUpdaterController.h",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/Views/AppView.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/Views/PlayerCreationView.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/Views/PlayerEditionView.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/Views/PlayerFormView.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/Views/PlayerList.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/Views/AppView.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/Views/PlayerCreationView.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/Views/PlayerEditionView.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/Views/PlayerFormView.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/Views/PlayerList.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBDemoiOS/GRDBDemoWatchOS Extension/InterfaceController.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBDemoiOS/GRDBDemoiOS/ViewControllers/PlayerEditionViewController.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBDemoiOS/GRDBDemoiOS/ViewControllers/PlayerListViewController.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/FetchedRecordsController.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/pagesize.test",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/tool/pagesig.c",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Tests/CustomSQLite/CustomSQLite/ViewController.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Tests/Performance/GRDBProfiling/GRDBProfiling/ViewController.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Tests/SPM/ios-dynamic/ios-dynamic/ViewController.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Tests/SPM/ios/ios/ViewController.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Tests/SPM/macos/macos/ViewController.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/Sparkle/InstallerProgress/InstallerProgressAppController.h",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/Sparkle/InstallerProgress/InstallerProgressAppController.m",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/Sparkle/SPUStandardUpdaterController.h",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/Sparkle/SPUStandardUpdaterController.m",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/Sparkle/SUStatusController.h",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/Sparkle/SUStatusController.m",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/TestApplication/SUInstallUpdateViewController.h",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/TestApplication/SUInstallUpdateViewController.m",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/TestApplication/SUInstallUpdateViewController.xib",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/TestApplication/SUUpdateSettingsWindowController.h",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/TestApplication/SUUpdateSettingsWindowController.m",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/Sparkle/TestApplication/SUUpdateSettingsWindowController.xib",
+      ".build/DerivedData/Build/Products/Debug/Sparkle.framework/Versions/B/Headers/SPUStandardUpdaterController.h",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/0V/NSViewController.h-QP7YOURQPZ0V",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/28/HIContainerViews.h-1B1GTHXLDWT28",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/28/NSSplitViewItemAccessoryViewController.h-38FAJ2NLVW228",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/3Z/HIWindowViews.h-M22NBN6VAT3Z",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/8S/NSPageController.h-3L4B4IRAWE18S",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/DL/QLPreviewingController.h-2ABQAVDAIMJDL",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/E3/IOEthernetController.h-1YEATH4UD1ZE3",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/H6/HITextViews.h-35D92S1NYXQH6",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/JW/NSDocumentController.h-2NHNV1KTOVPJW",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/K4/NSDictionaryController.h-1RBAFILFAWVK4",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/KE/NSTreeController.h-PNL5IBD1JAKE",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/KF/NSTextViewportLayoutController.h-15X6IX0G15HKF",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/LL/NSTitlebarAccessoryViewController.h-23CA0GY2X9OLL",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/MG/HIImageViews.h-36RE3LZYDNYMG",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/N6/NSController.h-10JHDXGP77HN6"
+    ],
+    "data_model_candidates": [
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.d",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.dia",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.o",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.stringsdata",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.swiftconstvalues",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.swiftdeps",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/8L/NSStagedMigrationManager.h-3QKLQ7MECSM8L",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/FX/NSEntityMigrationPolicy.h-27UOG7BYZMYFX",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/IX/NSMigrationManager.h-2P2GLIOSKJ8IX",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/PV/NSMigrationStage.h-1JZY456WBEWPV",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/QU/NSCustomMigrationStage.h-2RFX8VETU17QU",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/RL/Migration.swift-2GQCU2HMW1JRL",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/U2/NSLightweightMigrationStage.h-336DXEAAYUYU2",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/units/Migration.o-2FRXC8EC366XU",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/GRDB5MigrationGuide.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/GRDB6MigrationGuide.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/Migrations.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Migrations.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Migration/DatabaseMigrator.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Migration/Migration.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/sql/000-mandelbrot.sql",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/sql/001-sudoku.sql",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Tests/Crash/MigrationCrashTests.swift",
+      ".build/DerivedData-OCRTabs/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.d",
+      ".build/DerivedData-OCRTabs/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.dia",
+      ".build/DerivedData-OCRTabs/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.o",
+      ".build/DerivedData-OCRTabs/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.stringsdata",
+      ".build/DerivedData-OCRTabs/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.swiftconstvalues",
+      ".build/DerivedData-OCRTabs/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.swiftdeps",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/8L/NSStagedMigrationManager.h-3QKLQ7MECSM8L",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/FX/NSEntityMigrationPolicy.h-27UOG7BYZMYFX",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/IX/NSMigrationManager.h-2P2GLIOSKJ8IX",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/PV/NSMigrationStage.h-1JZY456WBEWPV",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/QU/NSCustomMigrationStage.h-2RFX8VETU17QU",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/RL/Migration.swift-2GQCU2HMW1JRL",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/records/U2/NSLightweightMigrationStage.h-336DXEAAYUYU2",
+      ".build/DerivedData-OCRTabs/Index.noindex/DataStore/v5/units/Migration.o-2FRXC8EC366XU",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/GRDB5MigrationGuide.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/GRDB6MigrationGuide.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Documentation/Migrations.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Migrations.md",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/GRDB/Migration/DatabaseMigrator.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/GRDB/Migration/Migration.swift",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/sql/000-mandelbrot.sql",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/sql/001-sudoku.sql",
+      ".build/DerivedData-OCRTabs/SourcePackages/checkouts/GRDB.swift/Tests/Crash/MigrationCrashTests.swift",
+      ".build/DerivedData/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.d",
+      ".build/DerivedData/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.dia",
+      ".build/DerivedData/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.o",
+      ".build/DerivedData/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.stringsdata",
+      ".build/DerivedData/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.swiftconstvalues",
+      ".build/DerivedData/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Migration.swiftdeps",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/8L/NSStagedMigrationManager.h-3QKLQ7MECSM8L",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/FX/NSEntityMigrationPolicy.h-27UOG7BYZMYFX",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/IX/NSMigrationManager.h-2P2GLIOSKJ8IX",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/PV/NSMigrationStage.h-1JZY456WBEWPV",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/QU/NSCustomMigrationStage.h-2RFX8VETU17QU",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/RL/Migration.swift-2GQCU2HMW1JRL",
+      ".build/DerivedData/Index.noindex/DataStore/v5/records/U2/NSLightweightMigrationStage.h-336DXEAAYUYU2",
+      ".build/DerivedData/Index.noindex/DataStore/v5/units/Migration.o-2FRXC8EC366XU",
+      ".build/DerivedData/SourcePackages/checkouts/GRDB.swift/Documentation/GRDB5MigrationGuide.md",
+      ".build/DerivedData/SourcePackages/checkouts/GRDB.swift/Documentation/GRDB6MigrationGuide.md",
+      ".build/DerivedData/SourcePackages/checkouts/GRDB.swift/Documentation/Migrations.md",
+      ".build/DerivedData/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Migrations.md",
+      ".build/DerivedData/SourcePackages/checkouts/GRDB.swift/GRDB/Migration/DatabaseMigrator.swift",
+      ".build/DerivedData/SourcePackages/checkouts/GRDB.swift/GRDB/Migration/Migration.swift",
+      ".build/DerivedData/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/sql/000-mandelbrot.sql",
+      ".build/DerivedData/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/sql/001-sudoku.sql",
+      ".build/DerivedData/SourcePackages/checkouts/GRDB.swift/Tests/Crash/MigrationCrashTests.swift",
+      ".build/ReleaseDerivedData/Build/Intermediates.noindex/GRDB.build/Release/GRDB.build/Objects-normal/arm64/Migration.o",
+      ".build/ReleaseDerivedData/Build/Intermediates.noindex/GRDB.build/Release/GRDB.build/Objects-normal/arm64/Migration.stringsdata",
+      ".build/ReleaseDerivedData/SourcePackages/checkouts/GRDB.swift/Documentation/GRDB5MigrationGuide.md",
+      ".build/ReleaseDerivedData/SourcePackages/checkouts/GRDB.swift/Documentation/GRDB6MigrationGuide.md",
+      ".build/ReleaseDerivedData/SourcePackages/checkouts/GRDB.swift/Documentation/Migrations.md",
+      ".build/ReleaseDerivedData/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Migrations.md",
+      ".build/ReleaseDerivedData/SourcePackages/checkouts/GRDB.swift/GRDB/Migration/DatabaseMigrator.swift",
+      ".build/ReleaseDerivedData/SourcePackages/checkouts/GRDB.swift/GRDB/Migration/Migration.swift",
+      ".build/ReleaseDerivedData/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/sql/000-mandelbrot.sql",
+      ".build/ReleaseDerivedData/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/sql/001-sudoku.sql",
+      ".build/ReleaseDerivedData/SourcePackages/checkouts/GRDB.swift/Tests/Crash/MigrationCrashTests.swift"
+    ],
+    "config_candidates": [
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNest.build/Objects-normal/arm64/AppSettings.d",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNest.build/Objects-normal/arm64/AppSettings.dia",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNest.build/Objects-normal/arm64/AppSettings.o",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNest.build/Objects-normal/arm64/AppSettings.swiftconstvalues",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNest.build/Objects-normal/arm64/AppSettings.swiftdeps",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNest.build/Objects-normal/arm64/SettingsView.d",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNest.build/Objects-normal/arm64/SettingsView.dia",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNest.build/Objects-normal/arm64/SettingsView.o",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNest.build/Objects-normal/arm64/SettingsView.swiftconstvalues",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNest.build/Objects-normal/arm64/SettingsView.swiftdeps",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNestTests.build/Objects-normal/arm64/AppSettingsTests.d",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNestTests.build/Objects-normal/arm64/AppSettingsTests.dia",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNestTests.build/Objects-normal/arm64/AppSettingsTests.o",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNestTests.build/Objects-normal/arm64/AppSettingsTests.swiftconstvalues",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/FileNest.build/Debug/FileNestTests.build/Objects-normal/arm64/AppSettingsTests.swiftdeps",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Configuration.d",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Configuration.dia",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Configuration.o",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Configuration.stringsdata",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Configuration.swiftconstvalues",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/GRDB.build/Debug/GRDB.build/Objects-normal/arm64/Configuration.swiftdeps",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/ZIPFoundation.build/Debug/ZIPFoundation.build/Objects-normal/arm64/Archive+BackingConfiguration.d",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/ZIPFoundation.build/Debug/ZIPFoundation.build/Objects-normal/arm64/Archive+BackingConfiguration.dia",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/ZIPFoundation.build/Debug/ZIPFoundation.build/Objects-normal/arm64/Archive+BackingConfiguration.o",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/ZIPFoundation.build/Debug/ZIPFoundation.build/Objects-normal/arm64/Archive+BackingConfiguration.swiftconstvalues",
+      ".build/DerivedData-Incremental/Build/Intermediates.noindex/ZIPFoundation.build/Debug/ZIPFoundation.build/Objects-normal/arm64/Archive+BackingConfiguration.swiftdeps",
+      ".build/DerivedData-Incremental/Build/Products/Debug/Sparkle.framework/Versions/B/Headers/SPUUpdaterSettings.h",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/15/AppSettings.swift-RDH3P0F7DW15",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/2R/NSPressureConfiguration.h-1OTHT821XVX2R",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/4J/AVAudioProcessingSettings.h-2S1LMICVJ564J",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/5N/AVSpatialVideoConfiguration.h-OF945VRDVJ5N",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/61/AVCaptureExternalDisplayConfigurator.h-10096BEIF8361",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/69/InternetConfig.h-1DD0VWG1JCY69",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/6M/NSTintConfiguration.h-12E96XFEFU26M",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/BS/SPUUpdaterSettings.h-1H0ZITDW6QDBS",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/D0/AVVideoSettings.h-171R6CK6QR7D0",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/D8/SecTrustSettings.h-37DLG16F2S6D8",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/JI/libDER_config.h-VZ690IR5BMJI",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/KD/AVAudioSettings.h-34R9CDEMOZYKD",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/KJ/SettingsView.swift-134VICNC8DUKJ",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/MF/AXSettings.h-2K4HTX2ET2QMF",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/N9/Archive+BackingConfiguration.swift-2PWANKL4OFMN9",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/O3/AppSettingsTests.swift-33QEWVMXR3YO3",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/QH/cssmconfig.h-8SW7G5XUPLQH",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/QW/AVOutputSettingsAssistant.h-1GGEA7WTJN4QW",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/R2/MLModelConfiguration.h-3U4C1MGBGLHR2",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/R6/CGDisplayConfiguration.h-2V6CZRNA1PHR6",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/XY/AVCaptionSettings.h-4VF7P5ZAPHXY",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/XZ/PMPrintSettingsKeys.h-3I7A96H59CXXZ",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/records/Z1/Configuration.swift-1RV6VC6H60IZ1",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/units/AppSettings.o-1S3RQWTBI8Z4T",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/units/AppSettingsTests.o-ZKCNGEULAG4M",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/units/Archive+BackingConfiguration.o-3EP1TSYK0JS29",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/units/Configuration.o-10ULAGYMHRPQ6",
+      ".build/DerivedData-Incremental/Index.noindex/DataStore/v5/units/SettingsView.o-2TCOR8IBRW9S9",
+      ".build/DerivedData-Incremental/SourcePackages/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework/Versions/B/Headers/SPUUpdaterSettings.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/.github/workflows/CI.yml",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB.xcodeproj/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Core/Configuration.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Extension/Configuration.md",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDBCustom.xcodeproj/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/GRDB.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/GRDBCustomSQLite-Testing.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/GRDBCustomSQLite-USER.xcconfig.example",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/GRDBDeploymentTarget.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/grdb_config.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/SQLiteLib-USER.xcconfig.example",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/SQLiteLib.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/SQLiteLib.xcodeproj/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/scripts/copyExampleConfiguration.sh",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/.fossil-settings/empty-dirs",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/.fossil-settings/ignore-glob",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/autoconf/configure.ac",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/autoconf/tea/configure.ac",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/autoconf/tea/tclconfig/install-sh",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/autoconf/tea/tclconfig/tcl.m4",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/config.guess",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/config.sub",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/configure",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/configure.ac",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/fts5/fts5_config.c",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/fts5/test/fts5config.test",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/jni/src/org/sqlite/jni/capi/ConfigLogCallback.java",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/jni/src/org/sqlite/jni/capi/ConfigSqllogCallback.java",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/mptest/config01.test",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/mptest/config02.test",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test_config.c",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Support/GRDB.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Support/GRDBDeploymentTarget.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Support/SQLCipher_config.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Support/grdb_config.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Tests/CustomSQLite/GRDBCustomSQLite/GRDBCustomSQLite-USER.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Tests/CustomSQLite/GRDBCustomSQLite/SQLiteLib-USER.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Tests/GRDBTests/DatabaseConfigurationTests.swift",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Tests/Performance/GRDBPerformance/GRDBPerformance.xcodeproj/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/.github/workflows/ci.yml",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/.github/workflows/create-draft-release.yml",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/CommandLineTool-Debug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/CommandLineTool-Release.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/CommandLineTool-Shared.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigCommon.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigCommonCoverage.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigCommonDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigCommonRelease.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigDownloader.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigDownloaderDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigFramework.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigFrameworkDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigFrameworkRelease.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigInstallerConnection.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigInstallerConnectionDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigInstallerLauncher.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigInstallerLauncherDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigInstallerProgress.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigInstallerStatus.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigInstallerStatusDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigRelaunch.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigSparkleTool.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigSwift.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigSwiftDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigSwiftRelease.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigTestApp.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigTestAppDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigTestAppHelper.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigTestAppHelperDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigUITest.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigUITestCoverage.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigUITestDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigUITestRelease.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigUnitTest.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigUnitTestCoverage.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigUnitTestDebug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ConfigUnitTestRelease.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/bsdiff-Debug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/bsdiff-Release.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/bsdiff-Shared.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ed25519-Debug.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ed25519-Release.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/ed25519-Shared.xcconfig",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/generate_latest_changes.py",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/link-tools.sh",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/make-release-package.sh",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/make-xcframework.sh",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/release-move-tag.sh",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/set-git-version-info.sh",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/strip-framework.sh",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Configurations/update-carthage.py",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Sparkle/SPUUpdaterSettings+Debug.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Sparkle/SPUUpdaterSettings.h",
+      ".build/DerivedData-Incremental/SourcePackages/checkouts/Sparkle/Sparkle/SPUUpdaterSettings.m"
+    ]
+  },
+  "detected_routes": {},
+  "detected_entities": {
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/CHANGELOG.md": [
+      "Columns",
+      "DatabaseEventKind",
+      "SQLCount",
+      "ValueScheduling",
+      "nodes",
+      "rounds",
+      "t",
+      "test"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBAsyncDemo/GRDBAsyncDemo/PlayerRequest.swift": [
+      "Ordering"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBCombineDemo/GRDBCombineDemo/PlayerRequest.swift": [
+      "Ordering"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/DemoApps/GRDBDemoiOS/GRDBDemoiOS/ViewControllers/PlayerEditionViewController.swift": [
+      "Mode"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/Documentation/Playgrounds/Tour.playground/Contents.swift": [
+      "place"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Core/Database+Schema.swift": [
+      "FooBar",
+      "citizen",
+      "citizenship",
+      "country",
+      "item",
+      "player",
+      "players",
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Core/Database.swift": [
+      "AutocommitState",
+      "ThreadingMode",
+      "grdb_issue_102",
+      "player",
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Core/DatabaseCollation.swift": [
+      "file"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Core/DatabaseFunction.swift": [
+      "test"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Core/SQL.swift": [
+      "Element"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Core/SQLRequest.swift": [
+      "Cache"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Core/Statement.swift": [
+      "TransactionEffect",
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Core/Support/StandardLibrary/StandardLibrary.swift": [
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Core/TransactionObserver.swift": [
+      "DatabaseEventPredicate"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/Extension/Statement.md": [
+      "is",
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/RecordRecommendedPractices.md": [
+      "Columns"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Documentation.docc/SingleRowTables.md": [
+      "appConfiguration"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Dump/Database+Dump.swift": [
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Dump/DatabaseReader+dump.swift": [
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/FTS/FTS4.swift": [
+      "ContentMode"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/FTS/FTS5.swift": [
+      "ContentMode"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Migration/DatabaseMigrator.swift": [
+      "grdb_migrations"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Migration/Migration.swift": [
+      "ForeignKeyChecks"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/Request/RequestProtocols.swift": [
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/SQL/SQLAssociation.swift": [
+      "SQLAssociationCardinality"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/SQL/SQLExpression.swift": [
+      "BooleanTest",
+      "JSONInterpretation"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/SQL/SQLRelation.swift": [
+      "Kind",
+      "SQLAssociationCondition"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/SQL/SQLSelection.swift": [
+      "SQLCount"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/SQLGeneration/SQLColumnGenerator.swift": [
+      "SQLColumnGenerator"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/SQLGeneration/SQLGenerationContext.swift": [
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/Schema/ColumnDefinition.swift": [
+      "Indexing",
+      "book",
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/Schema/Database+SchemaDefinition.swift": [
+      "example",
+      "place",
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/Schema/ForeignKeyDefinition.swift": [
+      "Indexing",
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/Schema/TableAlteration.swift": [
+      "TableAlterationKind"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/QueryInterface/Schema/TableDefinition.swift": [
+      "ColumnComponent",
+      "Component",
+      "book",
+      "citizenship",
+      "country",
+      "passport",
+      "place",
+      "player",
+      "players"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Record/MutablePersistableRecord+Insert.swift": [
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Record/MutablePersistableRecord+Upsert.swift": [
+      "vocabulary"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Record/MutablePersistableRecord.swift": [
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Record/PersistableRecord+Insert.swift": [
+      "player"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Record/PersistableRecord+Upsert.swift": [
+      "vocabulary"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/Utils/Pool.swift": [
+      "PoolCompletion"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/ValueObservation/Observers/ValueConcurrentObserver.swift": [
+      "FetchingState"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/GRDB/ValueObservation/ValueObservation.swift": [
+      "ValueObservationTrackingMode"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/README.md": [
+      "Columns",
+      "place",
+      "player",
+      "vocabulary",
+      "wine"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/expert/sqlite3expert.c": [
+      "temp",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/fts3/fts3.c": [
+      "IF",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/fts3/fts3_aux.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/fts3/fts3_term.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/fts3/fts3_test.c": [
+      "NM_enum"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/fts3/fts3_tokenize_vtab.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/fts5/fts5_config.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/fts5/fts5_test_tok.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/fts5/fts5_vocab.c": [
+      "vocab"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/jni/src/c/sqlite3-jni.c": [
+      "UDFType"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/jni/src/org/sqlite/jni/capi/SQLTester.java": [
+      "ResultBufferMode",
+      "ResultRowMode"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/jni/src/org/sqlite/jni/capi/Tester1.java": [
+      "T",
+      "t",
+      "t1",
+      "t2"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/jni/src/org/sqlite/jni/wrapper1/Tester2.java": [
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/lsm1/lsm-test/lsmtest_tdb.c": [
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/lsm1/lsm_vtab.c": [
+      "demo2",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/amatch.c": [
+      "f_data",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/btreeinfo.c": [
+      "sqlite_btreeinfo",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/carray.c": [
+      "carray",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/closure.c": [
+      "group",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/completion.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/csv.c": [
+      "statement",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/dbdump.c": [
+      "IF"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/explain.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/fileio.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/fossildelta.c": [
+      "delta_parse",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/fuzzer.c": [
+      "f_data",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/ieee754.c": [
+      "pow2"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/memstat.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/nextchar.c": [
+      "dictionary"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/prefixes.c": [
+      "prefixes"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/qpvtab.c": [
+      "qpvtab",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/series.c": [
+      "generate_series",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/spellfix.c": [
+      "IF",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/stmt.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/templatevtab.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/unionvtab.c": [
+      "statement",
+      "xyz"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/vfsstat.c": [
+      "t1",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/vtablog.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/wholenumber.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/misc/zipfile.c": [
+      "y"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/rbu/sqlite3rbu.c": [
+      "IF",
+      "rbu_count",
+      "rbu_imposter2",
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/recover/dbdata.c": [
+      "sqlite_dbdata",
+      "sqlite_dbptr",
+      "t1",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/recover/sqlite3recover.c": [
+      "name",
+      "recovery",
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/repair/checkindex.c": [
+      "xyz"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/rtree/geopoly.c": [
+      "statement",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/rtree/rtree.c": [
+      "statement",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/session/session_speed_test.c": [
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/session/sqlite3session.c": [
+      "pTab",
+      "statement",
+      "tbl1",
+      "x",
+      "xx"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/userauth/userauth.c": [
+      "sqlite_user"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/c-pp.c": [
+      "CmppLevel_Flags",
+      "CmppParseState",
+      "CmppTokenType",
+      "def",
+      "incl",
+      "inclpath"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/demo-123.js": [
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/demo-jsstorage.js": [
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/demo-worker1-promiser.js": [
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/demo-worker1.js": [
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/fiddle/fiddle.js": [
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/speedtest1-worker.js": [
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/test-opfs-vfs.js": [
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/tester1.c-pp.js": [
+      "foo",
+      "ignored",
+      "kvvfs",
+      "p",
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/ext/wasm/tests/opfs/concurrency/worker.js": [
+      "t1",
+      "t2"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/mptest/mptest.c": [
+      "client",
+      "counters",
+      "task"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/alter.c": [
+      "statement",
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/analyze.c": [
+      "sqlite_stat1",
+      "sqlite_stat2",
+      "sqlite_stat3",
+      "sqlite_stat4",
+      "statement"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/build.c": [
+      "IF",
+      "and",
+      "ex",
+      "has",
+      "if",
+      "main",
+      "or",
+      "statement",
+      "t",
+      "that",
+      "xx",
+      "xxx",
+      "xyz",
+      "yyy"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/dbpage.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/dbstat.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/expr.c": [
+      "statement",
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/fkey.c": [
+      "c",
+      "p",
+      "t1",
+      "t2"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/json.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/main.c": [
+      "statement"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/pragma.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/prepare.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/select.c": [
+      "statement",
+      "t1",
+      "t2"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/tclsqlite.c": [
+      "DB_enum",
+      "DbPreupdateSubCmd",
+      "TTYPE_enum"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test8.c": [
+      "real",
+      "statement",
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test_backup.c": [
+      "BackupSubCommandEnum"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test_bestindex.c": [
+      "x1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test_fs.c": [
+      "fsdir",
+      "fstree",
+      "idx",
+      "x",
+      "xyz"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test_intarray.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test_malloc.c": [
+      "MB_enum"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test_osinst.c": [
+      "VL_enum",
+      "v",
+      "xxx"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test_schema.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test_tclvar.c": [
+      "tclvar",
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/test_vfs.c": [
+      "DB_enum"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/trigger.c": [
+      "statement"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/vdbeaux.c": [
+      "AS"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/vdbevtab.c": [
+      "x"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/wherecode.c": [
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/src/window.c": [
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/crashtest1.c": [
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/fuzzcheck.c": [
+      "db",
+      "readme",
+      "xsql"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/kvtest.c": [
+      "kv"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/optfuzz.c": [
+      "IF",
+      "staging"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/speedtest1.c": [
+      "ZLOOKSLIKECOREDATA",
+      "log",
+      "t3",
+      "t4",
+      "t5",
+      "z1",
+      "z2"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/startup.c": [
+      "configdb_global_config",
+      "configdb_sqlite_stat1",
+      "localdb_sqlite_stat1",
+      "localdb_stash",
+      "localdb_stashfile",
+      "localdb_vcache",
+      "localdb_vfile",
+      "localdb_vmerge",
+      "localdb_vvar",
+      "repo_accesslog",
+      "repo_admin_log",
+      "repo_attachment",
+      "repo_backlink",
+      "repo_blob",
+      "repo_cherrypick",
+      "repo_concealed",
+      "repo_config",
+      "repo_delta",
+      "repo_event",
+      "repo_filename",
+      "repo_leaf",
+      "repo_mlink",
+      "repo_orphan",
+      "repo_pending_alert",
+      "repo_phantom",
+      "repo_plink",
+      "repo_private",
+      "repo_rcvfrom",
+      "repo_reportfmt",
+      "repo_shun",
+      "repo_sqlite_stat1",
+      "repo_sqlite_stat2",
+      "repo_sqlite_stat3",
+      "repo_subscriber",
+      "repo_tag",
+      "repo_tagxref",
+      "repo_ticket",
+      "repo_ticketchng",
+      "repo_unclustered",
+      "repo_unsent",
+      "repo_unversioned",
+      "repo_user",
+      "repo_vcache"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/threadtest1.c": [
+      "t"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/threadtest2.c": [
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/threadtest3.c": [
+      "t1",
+      "t2",
+      "t3",
+      "t4",
+      "t5",
+      "t6",
+      "t7",
+      "t8",
+      "t9"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/threadtest4.c": [
+      "t1",
+      "test2",
+      "test3"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/threadtest5.c": [
+      "p1",
+      "p2",
+      "task"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/tt3_checkpoint.c": [
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/tt3_index.c": [
+      "t11"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/tt3_lookaside1.c": [
+      "t1",
+      "t2",
+      "t3"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/tt3_shared.c": [
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/tt3_stress.c": [
+      "statements",
+      "t",
+      "t0",
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/tt3_vacuum.c": [
+      "t1"
+    ],
+    ".build/DerivedData-Incremental/SourcePackages/checkouts/GRDB.swift/SQLiteCustom/src/sqlite/test/vt02.c": [
+      "temp",
+      "vt02",
+      "x"
+    ]
+  }
+}

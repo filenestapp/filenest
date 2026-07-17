@@ -3,6 +3,36 @@ import Combine
 @testable import FileNest
 
 final class AppStateTests: XCTestCase {
+    @MainActor
+    func testChatActivityTracksRunningCompletionAndSeenStates() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        let previousIndexer = AppStateIndexerProxy.shared.indexer
+        defer { AppStateIndexerProxy.shared.indexer = previousIndexer }
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: temporaryDirectory.appendingPathComponent("organized"),
+            startAutomatically: false
+        )
+
+        state.markChatRunning(42)
+        XCTAssertEqual(state.runningChatSessionIDs, [42])
+        XCTAssertTrue(state.completedChatSessionIDs.isEmpty)
+
+        state.markChatCompleted(42)
+        XCTAssertTrue(state.runningChatSessionIDs.isEmpty)
+        XCTAssertEqual(state.completedChatSessionIDs, [42])
+
+        state.markChatSeen(42)
+        XCTAssertTrue(state.completedChatSessionIDs.isEmpty)
+    }
+
     func testIndexingTaskStateDrivesAnimationsAndReindexAvailability() {
         XCTAssertTrue(IndexingTaskState.running.isActive)
         XCTAssertTrue(IndexingTaskState.running.isAnimating)
@@ -334,6 +364,47 @@ final class AppStateTests: XCTestCase {
                 direction: .descending
             ).map(\.name),
             ["older-large.pdf", "newer-small.pdf"]
+        )
+    }
+
+    func testLibraryFileQuerySortsSearchResultsByConfidenceBeforeScore() {
+        let higherScore = makeLibraryRecord(
+            name: "higher-score.pdf",
+            modifiedAt: Date(timeIntervalSince1970: 100)
+        )
+        let higherConfidence = makeLibraryRecord(
+            name: "higher-confidence.pdf",
+            modifiedAt: Date(timeIntervalSince1970: 200)
+        )
+        let matches = [
+            higherScore.path: LibrarySearchResult(
+                file: higherScore,
+                score: 0.99,
+                confidence: 0.65,
+                matchKind: .title,
+                snippet: nil,
+                sectionPath: [],
+                pageStart: nil,
+                pageEnd: nil
+            ),
+            higherConfidence.path: LibrarySearchResult(
+                file: higherConfidence,
+                score: 0.50,
+                confidence: 0.95,
+                matchKind: .content,
+                snippet: nil,
+                sectionPath: [],
+                pageStart: nil,
+                pageEnd: nil
+            ),
+        ]
+
+        XCTAssertEqual(
+            LibraryFileQuery.sortedByConfidence(
+                [higherScore, higherConfidence],
+                matchesByPath: matches
+            ).map(\.name),
+            ["higher-confidence.pdf", "higher-score.pdf"]
         )
     }
 

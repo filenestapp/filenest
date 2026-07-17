@@ -58,6 +58,8 @@ struct OnboardingView: View {
     @State private var batchCompletedBytes: Int64 = 0
     @State private var watchDirectoryInventories: [WatchDirectoryInventory] = []
     @State private var organizeExistingFiles = false
+    @State private var selectedGenerationModel = OllamaModelRecommendation.defaultGenerationModel
+    @State private var selectedEmbeddingModel = OllamaModelRecommendation.defaultEmbeddingModel
 
     private var usesCloud: Bool {
         appState.settings.llmChoice == AppSettings.LLMChoice.cloud.rawValue
@@ -79,10 +81,9 @@ struct OnboardingView: View {
 
     private var requiredModels: [(role: String, model: String, icon: String)] {
         [
-            ("Generation", recommendation.generationModel, "sparkles"),
-            ("Embedding Model", OllamaModelRecommendation.defaultEmbeddingModel,
+            ("Generation", selectedGenerationModel, "sparkles"),
+            ("Embedding Model", selectedEmbeddingModel,
              "point.3.connected.trianglepath.dotted"),
-            ("Fallback OCR Model", "glm-ocr", "text.viewfinder"),
         ]
     }
 
@@ -109,12 +110,19 @@ struct OnboardingView: View {
             if appState.settings.llmChoice == AppSettings.LLMChoice.none.rawValue {
                 configureAIMode(.ollama)
             }
-            await appState.ollama.refresh(host: appState.settings.ollamaHost)
+            async let ollamaRefresh: Void = appState.ollama.refresh(host: appState.settings.ollamaHost)
+            async let paddleRefresh: Void = appState.paddleOCR.refresh()
             appState.docling.refresh()
-            appState.paddleOCR.refresh()
+            _ = await (ollamaRefresh, paddleRefresh)
         }
         .onChange(of: appState.settings.watchDirs) { _ in
             if currentStep == .finish { refreshWatchDirectoryInventories() }
+        }
+        .onChange(of: selectedGenerationModel) { model in
+            appState.settings.setOllamaModel(model)
+        }
+        .onChange(of: selectedEmbeddingModel) { model in
+            appState.settings.setOllamaEmbeddingModel(model)
         }
         .onChange(of: scenePhase) { phase in
             if phase == .active, currentStep == .finish {
@@ -426,7 +434,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 20) {
             OnboardingStepHeader(
                 title: "Download Local Models",
-                subtitle: "The generation model is recommended for this Mac; embeddings use the lightweight 0.6B model by default.",
+                subtitle: "Choose the generation and embedding models FileNest downloads; Qwen 9B and 0.6B are selected by default.",
                 icon: "square.stack.3d.up"
             )
 
@@ -438,6 +446,18 @@ struct OnboardingView: View {
 
             OnboardingSection(title: "Required Models") {
                 VStack(spacing: 0) {
+                    modelPickerRow(
+                        title: "Generation",
+                        selection: $selectedGenerationModel,
+                        models: OllamaModelRecommendation.generationModels
+                    )
+                    Divider().padding(.leading, 58)
+                    modelPickerRow(
+                        title: "Embedding Model",
+                        selection: $selectedEmbeddingModel,
+                        models: OllamaModelRecommendation.embeddingModels
+                    )
+                    Divider().padding(.leading, 58)
                     ForEach(Array(requiredModels.enumerated()), id: \.element.model) { index, item in
                         modelRow(role: item.role, model: item.model, icon: item.icon)
                         if index < requiredModels.count - 1 {
@@ -789,7 +809,7 @@ struct OnboardingView: View {
         case .ollama:
             appState.settings.setEmbeddingSource(AppSettings.EmbeddingSource.ollama.rawValue)
             appState.settings.setOCRSource(AppSettings.OCRSource.local.rawValue)
-            applyRecommendation()
+            applySelectedModels()
         case .cloud:
             appState.settings.setEmbeddingSource(AppSettings.EmbeddingSource.cloud.rawValue)
             appState.settings.setOCRSource(AppSettings.OCRSource.cloud.rawValue)
@@ -892,9 +912,9 @@ struct OnboardingView: View {
         }
     }
 
-    private func applyRecommendation() {
-        appState.settings.setOllamaModel(recommendation.generationModel)
-        appState.settings.setOllamaEmbeddingModel(OllamaModelRecommendation.defaultEmbeddingModel)
+    private func applySelectedModels() {
+        appState.settings.setOllamaModel(selectedGenerationModel)
+        appState.settings.setOllamaEmbeddingModel(selectedEmbeddingModel)
         appState.settings.setOllamaOCRModel("glm-ocr")
     }
 
@@ -976,6 +996,30 @@ struct OnboardingView: View {
         .accessibilityValue(Text(batchDownloadProgress, format: .percent.precision(.fractionLength(0))))
     }
 
+    private func modelPickerRow(
+        title: LocalizedStringKey,
+        selection: Binding<String>,
+        models: [String]
+    ) -> some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Picker("", selection: selection) {
+                ForEach(models, id: \.self) { model in
+                    Text(model).tag(model)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 210)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 46)
+        .disabled(isDownloadingAll || appState.ollama.pullingModel != nil)
+    }
+
     private func modelRow(role: String, model: String, icon: String) -> some View {
         let installed = isModelInstalled(model)
         let pulling = appState.ollama.pullingModel == model
@@ -993,7 +1037,11 @@ struct OnboardingView: View {
                     Text(LocalizedStringKey(role))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
-                    if model == recommendation.generationModel {
+                    if model == OllamaModelRecommendation.defaultGenerationModel {
+                        Text("Default")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(FileNestTheme.accentBlue)
+                    } else if model == recommendation.generationModel {
                         Text("Recommended")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(FileNestTheme.accent)
@@ -1074,7 +1122,7 @@ struct OnboardingView: View {
 
     private func downloadAllModels() async {
         isDownloadingAll = true
-        applyRecommendation()
+        applySelectedModels()
         let pendingModels = requiredModels.filter { !isModelInstalled($0.model) }
         batchTotalBytes = pendingModels.reduce(0) {
             $0 + (OllamaModelCatalog.estimatedDownloadBytes(for: $1.model) ?? 0)

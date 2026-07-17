@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, shell } from 'electron'
 import { basename, dirname } from 'node:path'
 import { stat } from 'node:fs/promises'
-import type { AppSnapshot, ChatStreamEvent, FileCategory, FileRecord, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { AiConnectivityCheck, AppSnapshot, ChatStreamEvent, FileCategory, FileRecord, LibrarySearchRequest, LibrarySearchResponse, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 import { FileNestDatabase } from './database'
 import { AppLogger } from './logger'
 import { ContentExtractor } from './content-extractor'
@@ -15,6 +15,8 @@ import { OllamaManager } from './ollama'
 import updater from 'electron-updater'
 import { doclingManager } from './docling'
 import { categoryForExtension, normalizedExtension } from './file-policy'
+import { LibrarySearchService } from './library-search'
+import { normalizeSettingsPatch } from './settings-normalization'
 
 const { autoUpdater } = updater
 
@@ -27,8 +29,10 @@ export class AppController {
   private readonly organizer = new OrganizerService(this.database, this.logger)
   private readonly watcher = new FileWatcherService(this.database, this.indexer, this.organizer, this.logger)
   private readonly chat = new ChatService(this.database, this.embeddings, new LlmService(), this.logger)
+  private readonly librarySearch = new LibrarySearchService(this.database, this.embeddings, this.logger)
   private readonly ollamaManager = new OllamaManager()
   private selectedSessionId: number | null = null
+  private pendingChatAttachmentPath: string | null = null
   private ollama = { reachable: false, models: [] as string[] }
   private indexingProgress: AppSnapshot['indexingProgress'] = null
   onChanged?: () => void
@@ -37,8 +41,8 @@ export class AppController {
     await this.database.initialize()
     const settings = this.database.getSettings()
     this.selectedSessionId = this.database.listChatSessions()[0]?.id ?? null
-    this.indexer.onProgress = (completed, total, currentName) => {
-      this.indexingProgress = total ? { completed, total, currentName } : null
+    this.indexer.onProgress = (completed, total, currentName, failed, stage) => {
+      this.indexingProgress = total ? { completed, total, currentName, failed, stage } : null
       this.notifyChanged()
     }
     this.watcher.onChanged = () => this.notifyChanged()
@@ -57,12 +61,14 @@ export class AppController {
       rules: this.database.listRules(),
       chatSessions: sessions,
       selectedSessionId: this.selectedSessionId,
+      pendingChatAttachmentPath: this.pendingChatAttachmentPath,
       messages: this.selectedSessionId == null ? [] : this.database.listMessages(this.selectedSessionId),
       statistics: await this.database.statistics(),
       watching: this.watcher.isWatching,
       indexing: this.indexer.isRunning,
       indexingPaused: this.indexer.isPaused,
       indexingProgress: this.indexingProgress,
+      watchDirectoryStatuses: await this.watcher.statuses(this.database.getSettings()),
       ollama: this.ollama,
       docling: await doclingManager.status()
     }
@@ -70,7 +76,7 @@ export class AppController {
 
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
     const previous = this.database.getSettings()
-    const next = await this.database.updateSettings(normalizeSettingsPatch(patch))
+    const next = await this.database.updateSettings(normalizeSettingsPatch(patch, previous))
     if ('launchAtLogin' in patch && process.platform === 'win32') app.setLoginItemSettings({ openAtLogin: next.launchAtLogin, path: process.execPath })
     const watcherKeys: Array<keyof Settings> = ['watchDirs', 'enabledExtensions', 'excludeHidden', 'autoOrganize', 'autoOrganizeMode', 'autoOrganizeIntervalSeconds', 'autoOrganizeBatchSize']
     if (watcherKeys.some((key) => JSON.stringify(previous[key]) !== JSON.stringify(next[key])) && this.watcher.isWatching) await this.watcher.start(next)
@@ -97,9 +103,10 @@ export class AppController {
 
   async startWatching(): Promise<void> { await this.watcher.start(this.database.getSettings()); this.notifyChanged() }
   async stopWatching(): Promise<void> { await this.watcher.stop(); this.notifyChanged() }
-  async scanExisting(): Promise<void> { await this.watcher.scanExisting(this.database.getSettings()); this.notifyChanged() }
+  async scanExisting(directories?: string[]): Promise<void> { await this.watcher.scanExisting(this.database.getSettings(), directories); this.notifyChanged() }
+  async preserveExisting(directories?: string[]): Promise<void> { await this.watcher.preserveExisting(this.database.getSettings(), directories); this.notifyChanged() }
   async organizeNow(): Promise<void> { await this.organizer.organizeAll(this.database.getSettings()); this.notifyChanged() }
-  async reindexAll(): Promise<void> { await this.indexer.reindexAll(this.database.getSettings()); this.indexingProgress = null; this.notifyChanged() }
+  async reindexAll(mode: ReindexMode = 'all'): Promise<void> { await this.indexer.reindexAll(this.database.getSettings(), mode); this.indexingProgress = null; this.notifyChanged() }
   async reindexFile(id: number): Promise<void> {
     const file = this.database.getFile(id)
     if (!file) return
@@ -116,6 +123,10 @@ export class AppController {
     return this.database.searchFiles(query.trim(), category)
   }
 
+  searchLibrary(request: LibrarySearchRequest): Promise<LibrarySearchResponse> {
+    return this.librarySearch.search(request, this.database.getSettings())
+  }
+
   async openFile(path: string): Promise<string> { return shell.openPath(path) }
   showInExplorer(path: string): void { shell.showItemInFolder(path) }
 
@@ -130,7 +141,7 @@ export class AppController {
   async saveFileNote(id: number, note: string): Promise<void> {
     await this.database.updateFile(id, { note })
     const file = this.database.getFile(id)
-    if (file) await this.indexer.indexFile({ ...file, contentHash: null }, this.database.getSettings(), undefined, true)
+    if (file) await this.indexer.updateNoteIndex(file, this.database.getSettings())
     this.notifyChanged()
   }
 
@@ -139,6 +150,8 @@ export class AppController {
     if (!file) throw new Error('The file does not exist')
     return this.chat.summarize(file, this.database.getSettings())
   }
+
+  getDocumentChunks(id: number) { return this.database.listDocumentChunks(id) }
 
   previewUrl(path: string): string {
     const allowed = this.database.getFileByPath(path)
@@ -160,14 +173,23 @@ export class AppController {
     return session
   }
 
-  selectChat(id: number) { this.selectedSessionId = id; this.notifyChanged(); return this.database.listMessages(id) }
+  beginChat(attachedFilePath: string | null = null): void {
+    this.selectedSessionId = null
+    this.pendingChatAttachmentPath = attachedFilePath
+    this.notifyChanged()
+  }
+
+  selectChat(id: number) { this.selectedSessionId = id; this.pendingChatAttachmentPath = null; this.notifyChanged(); return this.database.listMessages(id) }
   async deleteChat(id: number): Promise<void> { await this.database.deleteChat(id); if (this.selectedSessionId === id) this.selectedSessionId = this.database.listChatSessions()[0]?.id ?? null; this.notifyChanged() }
   async clearChats(): Promise<void> { await this.database.clearChats(); this.selectedSessionId = null; this.notifyChanged() }
 
   async sendChat(request: SendChatRequest, sender: Electron.WebContents): Promise<{ requestId: string }> {
     if (request.attachedFilePath) await this.ensureAttachedFile(request.attachedFilePath)
     const requestId = this.chat.send(request, this.database.getSettings(), (event) => {
-      if (event.sessionId != null) this.selectedSessionId = event.sessionId
+      if (event.sessionId != null) {
+        this.selectedSessionId = event.sessionId
+        this.pendingChatAttachmentPath = null
+      }
       if (!sender.isDestroyed()) sender.send('chat:stream', event)
       if (event.type === 'done') this.notifyChanged()
     })
@@ -180,7 +202,7 @@ export class AppController {
   async pullOllamaModel(model: string): Promise<void> { await this.ollamaManager.pull(model, this.database.getSettings()); await this.refreshOllama() }
   async deleteOllamaModel(model: string): Promise<void> { await this.ollamaManager.delete(model, this.database.getSettings()); await this.refreshOllama() }
   async installOllama(): Promise<void> {
-    await this.ollamaManager.install()
+    await this.ollamaManager.install(this.database.getSettings())
     await new Promise((resolve) => setTimeout(resolve, 1_500))
     await this.refreshOllama()
   }
@@ -188,6 +210,39 @@ export class AppController {
     const task = doclingManager.install()
     this.notifyChanged()
     try { await task } finally { this.notifyChanged() }
+  }
+
+  async testAiConnections(): Promise<AiConnectivityCheck[]> {
+    const settings = this.database.getSettings()
+    const results: AiConnectivityCheck[] = []
+    if (settings.llmChoice === 'none') {
+      results.push({ capability: 'chat', provider: 'Retrieval only', success: true, detail: 'Generative chat is disabled' })
+    } else {
+      const provider = new LlmService().provider(settings)
+      try {
+        await new LlmService().complete([
+          { role: 'system', content: 'Return only OK.' },
+          { role: 'user', content: 'Connection test' }
+        ], settings, 15_000)
+        results.push({ capability: 'chat', provider: provider.name, success: true, detail: provider.model })
+      } catch (error) {
+        results.push({ capability: 'chat', provider: provider.name, success: false, detail: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    try {
+      const vector = await this.embeddings.embed('FileNest connection test', settings)
+      results.push({ capability: 'embedding', provider: this.embeddings.modelName(settings), success: vector.length > 0, detail: `${vector.length} dimensions` })
+    } catch (error) {
+      results.push({ capability: 'embedding', provider: this.embeddings.modelName(settings), success: false, detail: error instanceof Error ? error.message : String(error) })
+    }
+    const ocrProvider = settings.ocrSource === 'disabled' ? 'Disabled' : settings.ocrSource === 'local' ? 'Local Tesseract with Ollama fallback' : settings.ocrSource === 'ollama' ? `Ollama ${settings.ollamaOcrModel}` : `Cloud ${settings.cloudOcrModel}`
+    try {
+      const detail = await testOcrConnection(settings)
+      results.push({ capability: 'ocr', provider: ocrProvider, success: true, detail })
+    } catch (error) {
+      results.push({ capability: 'ocr', provider: ocrProvider, success: false, detail: error instanceof Error ? error.message : String(error) })
+    }
+    return results
   }
 
   async checkForUpdates(): Promise<string> {
@@ -254,15 +309,34 @@ export class AppController {
   }
 }
 
-function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settings> {
-  const result = { ...patch }
-  if (result.vectorChunkWords != null) result.vectorChunkWords = Math.min(4000, Math.max(50, Math.round(result.vectorChunkWords)))
-  if (result.vectorChunkOverlap != null) result.vectorChunkOverlap = Math.max(0, Math.round(result.vectorChunkOverlap))
-  if (result.autoOrganizeIntervalSeconds != null) result.autoOrganizeIntervalSeconds = Math.min(3600, Math.max(5, Math.round(result.autoOrganizeIntervalSeconds)))
-  if (result.autoOrganizeBatchSize != null) result.autoOrganizeBatchSize = Math.min(500, Math.max(1, Math.round(result.autoOrganizeBatchSize)))
-  if (result.enabledExtensions) result.enabledExtensions = [...new Set(result.enabledExtensions.map((value) => value.replace(/^\./, '').trim().toLowerCase()).filter(Boolean))]
-  if (result.vectorizeExtensions) result.vectorizeExtensions = [...new Set(result.vectorizeExtensions.map((value) => value.replace(/^\./, '').trim().toLowerCase()).filter(Boolean))]
-  if (result.watchDirs) result.watchDirs = [...new Set(result.watchDirs)]
-  if (result.updateFeedUrl != null) result.updateFeedUrl = result.updateFeedUrl.trim()
-  return result
+const CONNECTIVITY_TEST_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+
+async function testOcrConnection(settings: Settings): Promise<string> {
+  if (settings.ocrSource === 'disabled') return 'OCR is disabled'
+  if (settings.ocrSource === 'local') return 'The bundled local OCR runtime is available; Ollama remains the fallback'
+  if (settings.ocrSource === 'ollama') {
+    const response = await fetch(new URL('/api/chat', settings.ollamaHost.replace(/\/+$/, '') + '/'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: settings.ollamaOcrModel, stream: false, messages: [{ role: 'user', content: 'Return OK after inspecting this connectivity test image.', images: [CONNECTIVITY_TEST_PNG] }] }),
+      signal: AbortSignal.timeout(15_000)
+    })
+    if (!response.ok) throw new Error(`Ollama OCR ${response.status}: ${await response.text()}`)
+    return settings.ollamaOcrModel
+  }
+  const reuse = settings.cloudOcrReuseChatCredentials
+  const key = reuse ? settings.cloudApiKey : settings.cloudOcrApiKey
+  const base = reuse ? settings.cloudBaseUrl : settings.cloudOcrBaseUrl
+  const format = reuse ? settings.cloudApiFormat : settings.cloudOcrFormat
+  if (!key) throw new Error('The OCR API key is empty')
+  const url = new URL(format === 'anthropic' ? 'messages' : 'chat/completions', base.replace(/\/+$/, '') + '/')
+  const headers: Record<string, string> = format === 'anthropic'
+    ? { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' }
+    : { 'content-type': 'application/json', authorization: `Bearer ${key}` }
+  const body = format === 'anthropic'
+    ? { model: settings.cloudOcrModel, max_tokens: 8, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: CONNECTIVITY_TEST_PNG } }, { type: 'text', text: 'Return OK.' }] }] }
+    : { model: settings.cloudOcrModel, max_tokens: 8, messages: [{ role: 'user', content: [{ type: 'text', text: 'Return OK.' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${CONNECTIVITY_TEST_PNG}` } }] }] }
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) })
+  if (!response.ok) throw new Error(`Cloud OCR ${response.status}: ${await response.text()}`)
+  return settings.cloudOcrModel
 }

@@ -2,11 +2,16 @@
 set -euo pipefail
 
 MODE="${1:-run}"
+CONFIGURATION_WAS_SET="${FILENEST_CONFIGURATION+x}"
+CONFIGURATION="${FILENEST_CONFIGURATION:-Release}"
+if [[ ( "$MODE" == "--debug" || "$MODE" == "debug" ) && -z "$CONFIGURATION_WAS_SET" ]]; then
+  CONFIGURATION="Debug"
+fi
 APP_NAME="FileNest"
 BUNDLE_ID="com.local.filenest"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DERIVED_DATA="$ROOT_DIR/.build/DerivedData"
-BUILT_APP_BUNDLE="$DERIVED_DATA/Build/Products/Debug/FileNest.app"
+BUILT_APP_BUNDLE="$DERIVED_DATA/Build/Products/$CONFIGURATION/FileNest.app"
 APP_BUNDLE="$HOME/Applications/FileNest.app"
 STAGED_APP_BUNDLE="$HOME/Applications/.FileNest.app.staging"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/FileNest"
@@ -109,7 +114,7 @@ pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 xcodebuild \
   -project "$ROOT_DIR/FileNest.xcodeproj" \
   -scheme FileNest \
-  -configuration Debug \
+  -configuration "$CONFIGURATION" \
   -destination 'platform=macOS' \
   -derivedDataPath "$DERIVED_DATA" \
   CODE_SIGNING_ALLOWED=YES \

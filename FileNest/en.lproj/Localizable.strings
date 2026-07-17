@@ -603,6 +603,7 @@
 "Components are installed in an isolated FileNest user environment without changing system Python or requiring administrator access." = "Components are installed in an isolated FileNest user environment without changing system Python or requiring administrator access.";
 "Download Local Models" = "Download Local Models";
 "The generation model is recommended for this Mac; embeddings use the lightweight 0.6B model by default." = "The generation model is recommended for this Mac; embeddings use the lightweight 0.6B model by default.";
+"Choose the generation and embedding models FileNest downloads; Qwen 9B and 0.6B are selected by default." = "Choose the generation and embedding models FileNest downloads; Qwen 9B and 0.6B are selected by default.";
 "Memory" = "Memory";
 "Available Disk" = "Available Disk";
 "Processor" = "Processor";
@@ -645,6 +646,7 @@
 "Could not read the installed version" = "Could not read the installed version";
 "Could not fetch the latest service version" = "Could not fetch the latest service version";
 "Ollama update failed" = "Ollama update failed";
+"Ollama update verification failed" = "Ollama update verification failed";
 "Ollama update complete and running" = "Ollama update complete and running";
 "The running Ollama service is not managed by FileNest. Stop it before updating." = "The running Ollama service is not managed by FileNest. Stop it before updating.";
 "PaddleOCR update complete" = "PaddleOCR update complete";
@@ -848,12 +850,18 @@
 "Filter Match" = "Filter Match";
 "Semantic Match" = "Semantic Match";
 "Hybrid Match" = "Hybrid Match";
+"Confidence %d%%" = "Confidence %d%%";
+"Generating response" = "Generating response";
+"New response available" = "New response available";
 "Searching…" = "Searching…";
 "Found %d Related Files" = "Found %d Related Files";
 "File Keywords + Vector Semantic Ranking" = "File Keywords + Vector Semantic Ranking";
 "Time Intent + File Keywords + Vector Semantic Ranking" = "Time Intent + File Keywords + Vector Semantic Ranking";
 "Smart Search" = "Smart Search";
 "AI analyzes the query and creates precise retrieval conditions" = "AI analyzes the query and creates precise retrieval conditions";
+"Not finding what you need?" = "Not finding what you need?";
+"Smart Search uses AI to understand your request more precisely and may take a little longer." = "Smart Search uses AI to understand your request more precisely and may take a little longer.";
+"Try Smart Search" = "Try Smart Search";
 "AI Analyzing…" = "AI Analyzing…";
 "AI Search Plan" = "AI Search Plan";
 "Local Fallback Plan" = "Local Fallback Plan";

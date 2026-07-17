@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { createContext, useContext, useState } from "react";
 import {
   Activity,
   Bot,
@@ -24,11 +24,12 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
-import type { AppSnapshot, Rule, Settings } from "../../shared/types";
+import type { AiConnectivityCheck, AppLanguage, AppSnapshot, ReindexMode, Rule, Settings } from "../../shared/types";
 import { formatBytes, IconButton } from "./components";
 import { translate } from "./i18n";
 
 type Section = "general" | "indexing" | "ai" | "statistics" | "rules";
+const SettingsLanguageContext = createContext<AppLanguage>("en");
 
 export function SettingsPage({
   snapshot,
@@ -49,6 +50,7 @@ export function SettingsPage({
       { id: "rules", label: "Organization Rules", icon: <ListChecks size={17} /> },
     ];
   return (
+    <SettingsLanguageContext.Provider value={snapshot.settings.appLanguage}>
     <main className="settings-page">
       <header className="page-header">
         <div>
@@ -91,6 +93,7 @@ export function SettingsPage({
         </div>
       </div>
     </main>
+    </SettingsLanguageContext.Provider>
   );
 }
 
@@ -111,10 +114,13 @@ function GeneralSettings({
   };
   const addFolders = async (): Promise<void> => {
     const dirs = await window.fileNest.chooseWatchDirectories();
-    if (dirs.length)
-      await update({
-        watchDirs: [...new Set([...snapshot.settings.watchDirs, ...dirs])],
-      });
+    const added = dirs.filter((path) => !snapshot.settings.watchDirs.includes(path));
+    if (!added.length) return;
+    await update({ watchDirs: [...snapshot.settings.watchDirs, ...added] });
+    const processExisting = confirm(t("Process files already in the newly added folders now? Choose Cancel to preserve them and watch only future changes."));
+    if (processExisting) await window.fileNest.scanExisting(added);
+    else await window.fileNest.preserveExisting(added);
+    await onRefresh();
   };
   return (
     <div className="settings-sections">
@@ -165,7 +171,7 @@ function GeneralSettings({
           {snapshot.settings.watchDirs.map((path) => (
             <div key={path}>
               <HardDrive size={17} />
-              <span>{path}</span>
+              <span>{path}<small>{snapshot.watchDirectoryStatuses.find((status) => status.path === path)?.detail}</small></span>
               <IconButton
                 label={t("Delete")}
                 onClick={() =>
@@ -296,6 +302,7 @@ function IndexSettings({
   onRefresh,
 }: ChildProps): React.JSX.Element {
   const s = snapshot.settings;
+  const [reindexMode, setReindexMode] = useState<ReindexMode>("all");
   const update = async (patch: Partial<Settings>): Promise<void> => {
     await window.fileNest.updateSettings(patch);
     await onRefresh();
@@ -476,6 +483,9 @@ function IndexSettings({
             onCommit={(value) => update({ vectorChunkOverlap: value })}
           />
         </SettingRow>
+        <SettingRow label="Chat Retrieval Results" hint="Maximum related files supplied to chat, from 1 to 30">
+          <NumberField value={s.ragResultLimit} onCommit={(value) => update({ ragResultLimit: value })} />
+        </SettingRow>
         <SettingRow label="Extensions Included in Indexing">
           <input
             className="wide-input"
@@ -486,10 +496,15 @@ function IndexSettings({
           />
         </SettingRow>
         <div className="button-row">
+          <select aria-label={t("Reindex scope")} value={reindexMode} onChange={(event) => setReindexMode(event.target.value as ReindexMode)}>
+            <option value="unindexed">{t("Index new files only")}</option>
+            <option value="embeddings">{t("Rebuild embeddings from stored chunks")}</option>
+            <option value="all">{t("Reparse files and rebuild all indexes")}</option>
+          </select>
           <button
             className="primary-button"
             disabled={snapshot.indexing}
-            onClick={() => void window.fileNest.reindexAll().then(onRefresh)}
+            onClick={() => void window.fileNest.reindexAll(reindexMode).then(onRefresh)}
           >
             <RotateCw className={snapshot.indexing ? "spin" : ""} size={16} />
             {t("Reindex")}
@@ -640,6 +655,7 @@ function AiSettings({ snapshot, t, onRefresh }: ChildProps): React.JSX.Element {
   const s = snapshot.settings;
   const [pullModel, setPullModel] = useState("qwen3.5:9b");
   const [busy, setBusy] = useState(false);
+  const [connectionResults, setConnectionResults] = useState<AiConnectivityCheck[]>([]);
   const update = async (patch: Partial<Settings>): Promise<void> => {
     await window.fileNest.updateSettings(patch);
     await onRefresh();
@@ -683,6 +699,13 @@ function AiSettings({ snapshot, t, onRefresh }: ChildProps): React.JSX.Element {
             <span />
           </label>
         </SettingRow>
+        <div className="button-row">
+          <button className="secondary-button" disabled={busy} onClick={() => void run(async () => setConnectionResults(await window.fileNest.testAiConnections()))}>
+            {busy ? <LoaderCircle className="spin" size={16} /> : <Activity size={16} />}
+            Test Chat, Embedding, and OCR
+          </button>
+        </div>
+        {connectionResults.length > 0 && <div className="connection-results">{connectionResults.map((result) => <div key={result.capability} className={result.success ? "success-text" : "warning-text"}>{result.success ? "✓" : "!"} {result.capability}: {result.provider} · {result.detail}</div>)}</div>}
       </SettingsSection>
       {s.llmChoice === "ollama" && (
         <SettingsSection title="Ollama" subtitle="Models and files stay on this computer">
@@ -717,6 +740,9 @@ function AiSettings({ snapshot, t, onRefresh }: ChildProps): React.JSX.Element {
                 ),
               )}
             </select>
+          </SettingRow>
+          <SettingRow label="Flash Attention" hint="Used when supported by the installed Ollama runtime">
+            <label className="switch"><input type="checkbox" checked={s.ollamaFlashAttentionEnabled} onChange={(e) => void update({ ollamaFlashAttentionEnabled: e.target.checked })} /><span /></label>
           </SettingRow>
           <SettingRow label="Embedding Model">
             <input
@@ -827,6 +853,9 @@ function AiSettings({ snapshot, t, onRefresh }: ChildProps): React.JSX.Element {
               onChange={(e) => void update({ cloudModel: e.target.value })}
             />
           </SettingRow>
+          <SettingRow label="Context Window" hint="Use 0 for automatic model defaults">
+            <NumberField value={s.cloudContextWindowTokens} onCommit={(value) => update({ cloudContextWindowTokens: value })} />
+          </SettingRow>
         </SettingsSection>
       )}
     </div>
@@ -903,6 +932,15 @@ function Statistics({
             <span>Managed Files</span>
             <strong>{formatBytes(s.managedFileBytes)}</strong>
           </div>
+          <div>
+            <span>Local AI Models</span>
+            <strong>{formatBytes(s.localModelBytes)}</strong>
+          </div>
+        </div>
+      </SettingsSection>
+      <SettingsSection title="Storage by Category">
+        <div className="storage-list">
+          {s.categoryStorage.filter((item) => item.fileCount > 0).map((item) => <div key={item.category}><span>{t(item.category)} · {item.fileCount}</span><strong>{formatBytes(item.bytes)}</strong></div>)}
         </div>
       </SettingsSection>
     </div>
@@ -1087,11 +1125,12 @@ function SettingsSection({
   subtitle?: string;
   children: React.ReactNode;
 }): React.JSX.Element {
+  const language = useContext(SettingsLanguageContext);
   return (
     <section className="settings-section">
       <header>
-        <h2>{title}</h2>
-        {subtitle && <p>{subtitle}</p>}
+        <h2>{translate(title, language)}</h2>
+        {subtitle && <p>{translate(subtitle, language)}</p>}
       </header>
       <div className="section-body">{children}</div>
     </section>
@@ -1106,11 +1145,12 @@ function SettingRow({
   hint?: string;
   children: React.ReactNode;
 }): React.JSX.Element {
+  const language = useContext(SettingsLanguageContext);
   return (
     <div className="setting-row">
       <div>
-        <strong>{label}</strong>
-        {hint && <span>{hint}</span>}
+        <strong>{translate(label, language)}</strong>
+        {hint && <span>{translate(hint, language)}</span>}
       </div>
       <div>{children}</div>
     </div>

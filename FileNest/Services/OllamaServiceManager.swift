@@ -183,7 +183,10 @@ struct OllamaModelProfile: Identifiable, Equatable {
 }
 
 enum OllamaModelRecommendation {
+    static let defaultGenerationModel = "qwen3.5:9b"
     static let defaultEmbeddingModel = "qwen3-embedding:0.6b"
+    static let generationModels = ["qwen3.5:2b", "qwen3.5:4b", defaultGenerationModel]
+    static let embeddingModels = [defaultEmbeddingModel, "qwen3-embedding:4b", "qwen3-embedding:8b"]
     static let profiles: [OllamaModelProfile] = [
         OllamaModelProfile(
             id: "memory-8", minimumMemoryGB: 8, memoryLabel: "8GB Memory",
@@ -211,6 +214,13 @@ enum OllamaModelRecommendation {
             embeddingSize: "8b", contextRange: "32K–64K"
         ),
     ]
+
+    static var defaultProfile: OllamaModelProfile {
+        profiles.first {
+            $0.generationModel == defaultGenerationModel
+                && $0.embeddingModel == defaultEmbeddingModel
+        } ?? profiles[0]
+    }
 
     static var currentMemoryGB: Int {
         let bytesPerGB = Double(1_024 * 1_024 * 1_024)
@@ -287,6 +297,7 @@ final class OllamaServiceManager: ObservableObject {
 
     private let session: URLSession
     private var launchedProcess: Process?
+    private var latestDownloadURL: URL?
 
     init(session: URLSession = .shared) {
         self.session = session
@@ -335,7 +346,7 @@ final class OllamaServiceManager: ObservableObject {
         return name.hasSuffix(":latest") ? String(name.dropLast(":latest".count)) : name
     }
 
-    static let officialDownloadURL = URL(string: "https://ollama.com/download/Ollama.dmg")!
+    nonisolated static let officialDownloadURL = URL(string: "https://ollama.com/download/Ollama.dmg")!
 
     nonisolated static var localApplicationURL: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -381,28 +392,33 @@ final class OllamaServiceManager: ObservableObject {
         guard isManagedInstall else {
             updateStatus = .idle
             latestVersion = nil
+            latestDownloadURL = nil
             return
         }
         guard !updateStatus.isBusy else { return }
 
         updateStatus = .checking
         do {
-            let latest = try await ManagedServiceReleaseAPI.latestGitHubVersion(session: session)
-            latestVersion = latest
+            let release = try await ManagedServiceReleaseAPI.latestGitHubRelease(session: session)
+            latestVersion = release.version
+            latestDownloadURL = release.macOSDMGURL
             guard let installedVersion else {
                 updateStatus = .failed("Could not read the installed version")
                 return
             }
-            updateStatus = ManagedServiceReleaseAPI.isNewer(latest, than: installedVersion)
-                ? .updateAvailable(latest)
+            updateStatus = ManagedServiceReleaseAPI.isNewer(release.version, than: installedVersion)
+                ? .updateAvailable(release.version)
                 : .upToDate
         } catch {
+            latestDownloadURL = nil
             updateStatus = .failed(error.localizedDescription)
         }
     }
 
     func update(host: String, flashAttentionEnabled: Bool = true) async {
-        guard isManagedInstall, !updateStatus.isBusy else { return }
+        guard isManagedInstall,
+              case let .updateAvailable(targetVersion) = updateStatus,
+              let downloadURL = latestDownloadURL else { return }
         if state == .running, !canStopManagedService {
             updateStatus = .failed("The running Ollama service is not managed by FileNest. Stop it before updating.")
             return
@@ -415,19 +431,40 @@ final class OllamaServiceManager: ObservableObject {
                 return
             }
         }
-        await installAndStart(host: host, flashAttentionEnabled: flashAttentionEnabled)
+        await installAndStart(
+            host: host,
+            flashAttentionEnabled: flashAttentionEnabled,
+            downloadURL: downloadURL
+        )
         guard lastError == nil else {
             updateStatus = .failed(lastError ?? "Ollama update failed")
             return
         }
+        let executable = Self.resolveExecutable()
+        executablePath = executable?.path
+        installedVersion = executable.flatMap(Self.installedVersion(for:))
+        guard let installedVersion,
+              !ManagedServiceReleaseAPI.isNewer(targetVersion, than: installedVersion) else {
+            let detectedVersion = installedVersion ?? "unknown"
+            Self.log(
+                "Ollama update verification failed expected=\(targetVersion) detected=\(detectedVersion)",
+                level: .error
+            )
+            installStatus = "Ollama update verification failed"
+            updateStatus = .failed("Ollama update verification failed")
+            return
+        }
         installStatus = "Ollama update complete and running"
-        updateStatus = .idle
-        await checkForUpdates()
+        updateStatus = .upToDate
     }
 
     /// Downloads the official Ollama DMG into FileNest's user-level directory and starts the service after installation.
     /// Does not write to /Applications or create a /usr/local/bin link, so administrator privileges are unnecessary.
-    func installAndStart(host: String, flashAttentionEnabled: Bool = true) async {
+    func installAndStart(
+        host: String,
+        flashAttentionEnabled: Bool = true,
+        downloadURL: URL = officialDownloadURL
+    ) async {
         guard !isInstalling else { return }
         guard #available(macOS 14.0, *) else {
             let message = "This version of Ollama requires macOS 14 Sonoma or later."
@@ -447,7 +484,7 @@ final class OllamaServiceManager: ObservableObject {
         defer { try? FileManager.default.removeItem(at: retainedDMG) }
 
         do {
-            var request = URLRequest(url: Self.officialDownloadURL)
+            var request = URLRequest(url: downloadURL)
             request.timeoutInterval = 900
             let response = try await downloadOfficialDMG(request: request, to: retainedDMG)
             try Self.validate(response)
@@ -760,6 +797,10 @@ final class OllamaServiceManager: ObservableObject {
     }
 
     nonisolated private static func installedVersion(for executable: URL) -> String? {
+        if let data = try? runProcess(executable: executable.path, arguments: ["--version"]),
+           let version = version(fromCommandOutput: data) {
+            return version
+        }
         let application = executable
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -769,8 +810,11 @@ final class OllamaServiceManager: ObservableObject {
            let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
             return ManagedServiceReleaseAPI.normalized(version)
         }
-        guard let data = try? runProcess(executable: executable.path, arguments: ["--version"]),
-              let output = String(data: data, encoding: .utf8),
+        return nil
+    }
+
+    nonisolated static func version(fromCommandOutput data: Data) -> String? {
+        guard let output = String(data: data, encoding: .utf8),
               let version = output.split(whereSeparator: { !$0.isNumber && $0 != "." })
                 .first(where: { $0.contains(".") }) else { return nil }
         return ManagedServiceReleaseAPI.normalized(String(version))

@@ -1,4 +1,5 @@
 import XCTest
+import GRDB
 @testable import FileNest
 
 final class OrganizerServiceTests: XCTestCase {
@@ -301,6 +302,43 @@ final class OrganizerServiceTests: XCTestCase {
         XCTAssertEqual(managed.first?.organizationSubfolder, "Contracts")
         XCTAssertNil(try store.file(path: staleURL.path))
         XCTAssertNotNil(try store.file(id: outsideID))
+    }
+
+    func testReconcileManagedFilesDoesNotRewriteStableRows() throws {
+        let topicDirectory = organizedDirectory
+            .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
+            .appendingPathComponent("Stable", isDirectory: true)
+        try FileManager.default.createDirectory(at: topicDirectory, withIntermediateDirectories: true)
+        let managedURL = topicDirectory.appendingPathComponent("unchanged.txt")
+        try Data("stable".utf8).write(to: managedURL)
+        let organizer = OrganizerService(
+            store: store,
+            settings: AppSettings(store: store),
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid
+        )
+        _ = organizer.reconcileManagedFiles()
+
+        try store.dbPool.write { db in
+            try db.create(table: "file_update_audit") { table in
+                table.autoIncrementedPrimaryKey("id")
+            }
+            try db.execute(sql: """
+                CREATE TRIGGER audit_stable_file_update
+                AFTER UPDATE ON files
+                BEGIN
+                    INSERT INTO file_update_audit (id) VALUES (NULL);
+                END
+                """)
+        }
+
+        let managed = organizer.reconcileManagedFiles()
+        let updateCount = try store.dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM file_update_audit") ?? 0
+        }
+
+        XCTAssertEqual(managed.map(\.path), [managedURL.path])
+        XCTAssertEqual(updateCount, 0)
     }
 
     func testReconcileManagedFilesInvalidatesIndexWhenMetadataChangedOffline() throws {

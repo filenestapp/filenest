@@ -1,9 +1,10 @@
 import { app, safeStorage } from 'electron'
 import initSqlJs, { type Database as SqlDatabase, type SqlJsStatic } from 'sql.js'
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { AppStatistics, ChatMessage, ChatSession, FileCategory, FileRecord, Rule, Settings } from '../shared/types'
+import { homedir } from 'node:os'
+import type { AppStatistics, ChatMessage, ChatSession, DocumentChunk, FileCategory, FileRecord, Rule, Settings } from '../shared/types'
 import { CATEGORY_FOLDERS, createDefaultSettings } from './defaults'
 
 type SqlValue = string | number | Uint8Array | null
@@ -51,6 +52,12 @@ export class FileNestDatabase {
         chunk_index INTEGER NOT NULL, vector BLOB NOT NULL, vector_text TEXT, dim INTEGER NOT NULL, model TEXT NOT NULL,
         chunk_text TEXT NOT NULL, UNIQUE(file_id, chunk_index)
       );
+      CREATE TABLE IF NOT EXISTS document_chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        chunk_index INTEGER NOT NULL, text TEXT NOT NULL, contextual_text TEXT NOT NULL,
+        section_path TEXT NOT NULL DEFAULT '[]', page_start INTEGER, page_end INTEGER,
+        kind TEXT NOT NULL DEFAULT 'text', UNIQUE(file_id, chunk_index)
+      );
       CREATE TABLE IF NOT EXISTS rules (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, pattern TEXT NOT NULL,
         target_folder TEXT NOT NULL, priority INTEGER NOT NULL, enabled INTEGER NOT NULL, action TEXT NOT NULL DEFAULT 'organize'
@@ -61,19 +68,40 @@ export class FileNestDatabase {
       );
       CREATE TABLE IF NOT EXISTS chat_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
-        role TEXT NOT NULL, content TEXT NOT NULL, ts TEXT NOT NULL, related_file_ids TEXT NOT NULL DEFAULT '[]'
+        role TEXT NOT NULL, content TEXT NOT NULL, ts TEXT NOT NULL, related_file_ids TEXT NOT NULL DEFAULT '[]',
+        input_tokens INTEGER, output_tokens INTEGER, first_response_duration REAL, total_response_duration REAL,
+        response_provider TEXT, response_model TEXT
       );
       CREATE TABLE IF NOT EXISTS token_usage (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
         input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, session_id INTEGER
       );
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS watch_directory_baseline_entries (
+        directory_path TEXT NOT NULL, entry_path TEXT NOT NULL,
+        PRIMARY KEY(directory_path, entry_path)
+      );
       CREATE INDEX IF NOT EXISTS idx_files_added ON files(discovered_at DESC);
       CREATE INDEX IF NOT EXISTS idx_embeddings_file ON embeddings(file_id);
+      CREATE INDEX IF NOT EXISTS idx_chunks_file ON document_chunks(file_id, chunk_index);
       CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, ts);
     `)
     const embeddingColumns = this.rows('PRAGMA table_info(embeddings)').map((row) => String(row.name))
     if (!embeddingColumns.includes('vector_text')) this.db.run('ALTER TABLE embeddings ADD COLUMN vector_text TEXT')
+    const messageColumns = this.rows('PRAGMA table_info(chat_messages)').map((row) => String(row.name))
+    const messageMigrations: Array<[string, string]> = [
+      ['input_tokens', 'INTEGER'], ['output_tokens', 'INTEGER'],
+      ['first_response_duration', 'REAL'], ['total_response_duration', 'REAL'],
+      ['response_provider', 'TEXT'], ['response_model', 'TEXT']
+    ]
+    for (const [name, type] of messageMigrations) {
+      if (!messageColumns.includes(name)) this.db.run(`ALTER TABLE chat_messages ADD COLUMN ${name} ${type}`)
+    }
+    this.db.run(`
+      INSERT OR IGNORE INTO document_chunks(file_id,chunk_index,text,contextual_text,section_path,kind)
+      SELECT file_id,chunk_index,chunk_text,chunk_text,'[]','text' FROM embeddings
+      WHERE COALESCE(chunk_text,'') <> ''
+    `)
     this.db.run("UPDATE rules SET target_folder='Documents' WHERE name='PDF Documents' AND pattern='*.pdf' AND target_folder='Documents/PDF'")
     this.db.run("UPDATE rules SET target_folder='Documents' WHERE name='Office Documents' AND pattern='*.doc;*.docx;*.docm;*.xls;*.xlsx;*.ppt;*.pptx' AND target_folder='Documents/Office'")
   }
@@ -157,10 +185,10 @@ export class FileNestDatabase {
   searchFiles(query: string, category?: FileCategory | null, limit = 200): FileRecord[] {
     const needle = `%${query.replace(/[\\%_]/g, '\\$&')}%`
     const categoryClause = category ? ' AND category=?' : ''
-    const params: SqlValue[] = [needle, needle, needle]
+    const params: SqlValue[] = [needle, needle, needle, needle, needle]
     if (category) params.push(category)
     params.push(limit)
-    return this.rows(`SELECT * FROM files WHERE (name LIKE ? ESCAPE '\\' OR COALESCE(title,'') LIKE ? ESCAPE '\\' OR COALESCE(content_text,'') LIKE ? ESCAPE '\\')${categoryClause} ORDER BY discovered_at DESC LIMIT ?`, params).map(mapFile)
+    return this.rows(`SELECT * FROM files WHERE (name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' OR COALESCE(title,'') LIKE ? ESCAPE '\\' OR COALESCE(note,'') LIKE ? ESCAPE '\\' OR COALESCE(content_text,'') LIKE ? ESCAPE '\\')${categoryClause} ORDER BY discovered_at DESC LIMIT ?`, params).map(mapFile)
   }
 
   async upsertFile(input: Omit<FileRecord, 'id'>): Promise<FileRecord> {
@@ -205,6 +233,52 @@ export class FileNestDatabase {
       throw error
     }
     await this.flush()
+  }
+
+  async commitFileIndex(
+    fileId: number,
+    chunks: Array<{ chunk: DocumentChunk; vector: Float32Array }>,
+    model: string,
+    patch: Pick<FileRecord, 'title' | 'contentText' | 'contentHash' | 'indexedAt' | 'indexSignature'>
+  ): Promise<void> {
+    this.db.run('BEGIN')
+    try {
+      this.db.run('DELETE FROM embeddings WHERE file_id=?', [fileId])
+      this.db.run('DELETE FROM document_chunks WHERE file_id=?', [fileId])
+      for (const { chunk, vector } of chunks) {
+        const bytes = new Uint8Array(vector.buffer.slice(vector.byteOffset, vector.byteOffset + vector.byteLength))
+        const encoded = Buffer.from(bytes).toString('base64')
+        this.db.run(
+          'INSERT INTO embeddings(file_id,chunk_index,vector,vector_text,dim,model,chunk_text) VALUES(?,?,?,?,?,?,?)',
+          [fileId, chunk.index, new Uint8Array([0]), encoded, vector.length, model, chunk.contextualText]
+        )
+        this.db.run(
+          'INSERT INTO document_chunks(file_id,chunk_index,text,contextual_text,section_path,page_start,page_end,kind) VALUES(?,?,?,?,?,?,?,?)',
+          [fileId, chunk.index, chunk.text, chunk.contextualText, JSON.stringify(chunk.sectionPath), chunk.pageStart, chunk.pageEnd, chunk.kind]
+        )
+      }
+      this.db.run(
+        'UPDATE files SET title=?,content_text=?,content_hash=?,indexed_at=?,index_signature=? WHERE id=?',
+        [patch.title, patch.contentText, patch.contentHash, patch.indexedAt, patch.indexSignature, fileId]
+      )
+      this.db.run('COMMIT')
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
+    }
+    await this.flush()
+  }
+
+  listDocumentChunks(fileId: number): DocumentChunk[] {
+    return this.rows('SELECT * FROM document_chunks WHERE file_id=? ORDER BY chunk_index', [fileId]).map((row) => ({
+      index: Number(row.chunk_index),
+      text: String(row.text),
+      contextualText: String(row.contextual_text),
+      sectionPath: JSON.parse(String(row.section_path || '[]')) as string[],
+      pageStart: row.page_start == null ? null : Number(row.page_start),
+      pageEnd: row.page_end == null ? null : Number(row.page_end),
+      kind: String(row.kind) as DocumentChunk['kind']
+    }))
   }
 
   listEmbeddings(fileId?: number): EmbeddingRow[] {
@@ -264,12 +338,61 @@ export class FileNestDatabase {
     return this.rows('SELECT * FROM chat_messages WHERE session_id=? ORDER BY ts,id', [sessionId]).map(mapMessage)
   }
 
-  async addMessage(sessionId: number, role: ChatMessage['role'], content: string, relatedFileIds: number[] = []): Promise<ChatMessage> {
+  async addMessage(
+    sessionId: number,
+    role: ChatMessage['role'],
+    content: string,
+    relatedFileIds: number[] = [],
+    metrics: Partial<Pick<ChatMessage, 'inputTokens' | 'outputTokens' | 'firstResponseDuration' | 'totalResponseDuration' | 'responseProvider' | 'responseModel'>> = {}
+  ): Promise<ChatMessage> {
     const now = new Date().toISOString()
-    this.db.run('INSERT INTO chat_messages(session_id,role,content,ts,related_file_ids) VALUES(?,?,?,?,?)', [sessionId, role, content, now, JSON.stringify(relatedFileIds)])
+    this.db.run(
+      'INSERT INTO chat_messages(session_id,role,content,ts,related_file_ids,input_tokens,output_tokens,first_response_duration,total_response_duration,response_provider,response_model) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+      [sessionId, role, content, now, JSON.stringify(relatedFileIds), metrics.inputTokens ?? null, metrics.outputTokens ?? null, metrics.firstResponseDuration ?? null, metrics.totalResponseDuration ?? null, metrics.responseProvider ?? null, metrics.responseModel ?? null]
+    )
     const id = Number(this.scalar('SELECT last_insert_rowid()'))
     await this.updateChat(sessionId, { updatedAt: now })
     return this.listMessages(sessionId).find((item) => item.id === id)!
+  }
+
+  async replaceAssistantMessage(
+    messageId: number,
+    content: string,
+    relatedFileIds: number[],
+    metrics: Partial<Pick<ChatMessage, 'inputTokens' | 'outputTokens' | 'firstResponseDuration' | 'totalResponseDuration' | 'responseProvider' | 'responseModel'>>
+  ): Promise<ChatMessage> {
+    this.db.run(
+      `UPDATE chat_messages SET content=?,ts=?,related_file_ids=?,input_tokens=?,output_tokens=?,
+       first_response_duration=?,total_response_duration=?,response_provider=?,response_model=?
+       WHERE id=? AND role='assistant'`,
+      [content, new Date().toISOString(), JSON.stringify(relatedFileIds), metrics.inputTokens ?? null, metrics.outputTokens ?? null, metrics.firstResponseDuration ?? null, metrics.totalResponseDuration ?? null, metrics.responseProvider ?? null, metrics.responseModel ?? null, messageId]
+    )
+    await this.flush()
+    const row = this.rows('SELECT * FROM chat_messages WHERE id=?', [messageId])[0]
+    if (!row) throw new Error('The assistant message no longer exists')
+    return mapMessage(row)
+  }
+
+  replaceWatchDirectoryBaseline(directoryPath: string, entryPaths: string[]): Promise<void> {
+    this.db.run('BEGIN')
+    try {
+      this.db.run('DELETE FROM watch_directory_baseline_entries WHERE directory_path=?', [directoryPath])
+      for (const path of entryPaths) this.db.run('INSERT INTO watch_directory_baseline_entries(directory_path,entry_path) VALUES(?,?)', [directoryPath, path])
+      this.db.run('COMMIT')
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
+    }
+    return this.flush()
+  }
+
+  isWatchDirectoryBaselineEntry(directoryPath: string, entryPath: string): boolean {
+    return Number(this.scalar('SELECT COUNT(*) FROM watch_directory_baseline_entries WHERE directory_path=? AND entry_path=?', [directoryPath, entryPath]) ?? 0) > 0
+  }
+
+  async clearWatchDirectoryBaselines(directoryPaths: string[]): Promise<void> {
+    for (const path of directoryPaths) this.db.run('DELETE FROM watch_directory_baseline_entries WHERE directory_path=?', [path])
+    await this.flush()
   }
 
   async deleteChat(id: number): Promise<void> {
@@ -307,6 +430,7 @@ export class FileNestDatabase {
       return { category, bytes: items.reduce((sum, file) => sum + file.size, 0), fileCount: items.length }
     })
     const dbBytes = await stat(this.path).then((value) => value.size).catch(() => 0)
+    const localModelBytes = await directorySize(join(homedir(), '.ollama', 'models'))
     return {
       totalFiles: files.length,
       indexedFiles: files.filter((file) => file.indexedAt).length,
@@ -317,6 +441,7 @@ export class FileNestDatabase {
       databaseBytes: dbBytes,
       vectorBytes: this.listEmbeddings().reduce((sum, item) => sum + item.vector.byteLength, 0),
       extractedTextBytes: files.reduce((sum, file) => sum + Buffer.byteLength(file.contentText ?? '', 'utf8'), 0),
+      localModelBytes,
       dailyActivity,
       categoryStorage
     }
@@ -324,12 +449,14 @@ export class FileNestDatabase {
 }
 
 function encryptSecret(value: unknown): unknown {
-  if (typeof value !== 'string' || !value || value.startsWith(SECRET_PREFIX) || !safeStorage?.isEncryptionAvailable()) return value
+  if (typeof value !== 'string' || !value || value.startsWith(SECRET_PREFIX)) return value
+  if (!safeStorage?.isEncryptionAvailable()) throw new Error('Secure credential storage is unavailable; the API key was not saved')
   return SECRET_PREFIX + safeStorage.encryptString(value).toString('base64')
 }
 
 function decryptSecret(value: unknown): unknown {
-  if (typeof value !== 'string' || !value.startsWith(SECRET_PREFIX) || !safeStorage?.isEncryptionAvailable()) return value
+  if (typeof value !== 'string' || !value.startsWith(SECRET_PREFIX)) return value
+  if (!safeStorage?.isEncryptionAvailable()) return ''
   try { return safeStorage.decryptString(Buffer.from(value.slice(SECRET_PREFIX.length), 'base64')) } catch { return '' }
 }
 
@@ -346,5 +473,26 @@ function mapSession(row: Record<string, unknown>): ChatSession {
 }
 
 function mapMessage(row: Record<string, unknown>): ChatMessage {
-  return { id: Number(row.id), sessionId: Number(row.session_id), role: String(row.role) as ChatMessage['role'], content: String(row.content), timestamp: String(row.ts), relatedFileIds: JSON.parse(String(row.related_file_ids || '[]')) as number[] }
+  return {
+    id: Number(row.id), sessionId: Number(row.session_id), role: String(row.role) as ChatMessage['role'],
+    content: String(row.content), timestamp: String(row.ts),
+    relatedFileIds: JSON.parse(String(row.related_file_ids || '[]')) as number[],
+    inputTokens: row.input_tokens == null ? null : Number(row.input_tokens),
+    outputTokens: row.output_tokens == null ? null : Number(row.output_tokens),
+    firstResponseDuration: row.first_response_duration == null ? null : Number(row.first_response_duration),
+    totalResponseDuration: row.total_response_duration == null ? null : Number(row.total_response_duration),
+    responseProvider: row.response_provider == null ? null : String(row.response_provider),
+    responseModel: row.response_model == null ? null : String(row.response_model)
+  }
+}
+
+async function directorySize(root: string): Promise<number> {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => [])
+  let total = 0
+  for (const entry of entries) {
+    const path = join(root, entry.name)
+    if (entry.isDirectory()) total += await directorySize(path)
+    else total += await stat(path).then((value) => value.size).catch(() => 0)
+  }
+  return total
 }

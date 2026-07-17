@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto'
-import type { ChatMessage, ChatSession, ChatStreamEvent, FileRecord, SendChatRequest, Settings } from '../shared/types'
+import type { ChatMessage, ChatSession, ChatStreamEvent, DocumentChunk, FileRecord, SendChatRequest, Settings } from '../shared/types'
 import { FileNestDatabase } from './database'
-import { EmbeddingService } from './embedding'
+import { EmbeddingService, type SearchHit } from './embedding'
 import { estimateTokens, LlmService, type LlmTurn } from './llm'
 import { AppLogger } from './logger'
+
+interface RetrievedFile {
+  file: FileRecord
+  chunks: DocumentChunk[]
+}
 
 export class ChatService {
   private controllers = new Map<string, AbortController>()
@@ -26,14 +31,18 @@ export class ChatService {
   }
 
   async summarize(file: FileRecord, settings: Settings): Promise<string> {
-    const content = (file.contentText ?? file.note ?? file.name).slice(0, 14_000)
+    const chunks = this.database.listDocumentChunks(file.id)
+    const content = (chunks.map((chunk) => chunk.contextualText).join('\n\n') || file.contentText || file.note || file.name).slice(0, 24_000)
     if (settings.llmChoice === 'none') return content.slice(0, 600)
     const parts: string[] = []
-    const signal = new AbortController().signal
-    for await (const delta of this.llm.stream([
+    const turns: LlmTurn[] = [
       { role: 'system', content: 'You are a local file summary assistant. Summarize the key points concisely in the current interface language and do not fabricate details.' },
       { role: 'user', content: `File: ${file.name}\n\n${content}` }
-    ], settings, signal)) parts.push(delta)
+    ]
+    const stream = file.category === 'images'
+      ? this.llm.streamWithImage(turns, file.path, settings, new AbortController().signal)
+      : this.llm.stream(turns, settings, new AbortController().signal)
+    for await (const delta of stream) parts.push(delta)
     return parts.join('').trim()
   }
 
@@ -52,31 +61,66 @@ export class ChatService {
 
   private async run(requestId: string, request: SendChatRequest, settings: Settings, signal: AbortSignal, emit: (event: ChatStreamEvent) => void): Promise<void> {
     try {
+      const startedAt = performance.now()
       const session = await this.ensureSession(request)
       emit({ requestId, type: 'session', sessionId: session.id })
-      const user = await this.database.addMessage(session.id, 'user', request.content)
-      if (this.database.listMessages(session.id).filter((item) => item.role === 'user').length === 1) {
-        await this.database.updateChat(session.id, { title: request.content.trim().slice(0, 42) || 'New Chat' })
+      const retryTarget = this.findRetryTarget(session.id, request.retryAssistantMessageId)
+      const question = retryTarget?.question ?? request.content.trim()
+      if (!question) throw new Error('Enter a question before sending')
+      if (!retryTarget) {
+        await this.database.addMessage(session.id, 'user', question)
+        if (this.database.listMessages(session.id).filter((item) => item.role === 'user').length === 1) {
+          await this.database.updateChat(session.id, { title: question.slice(0, 42) || 'New Chat' })
+        }
       }
-      const related = await this.retrieve(request.content, session, settings)
-      if (settings.llmChoice === 'none') {
-        const content = retrievalOnlyAnswer(related)
-        const message = await this.database.addMessage(session.id, 'assistant', content, related.map((file) => file.id))
-        emit({ requestId, type: 'done', sessionId: session.id, message })
-        return
-      }
-      const history = this.database.listMessages(session.id)
+
+      emit({ requestId, type: 'progress', sessionId: session.id, stage: 'searching' })
+      const related = await this.retrieve(question, session, settings)
+      const relatedFileIds = related.map((item) => item.file.id)
+      emit({ requestId, type: 'progress', sessionId: session.id, stage: 'retrieved', relatedFileIds })
+      if (signal.aborted) throw new DOMException('Generation stopped', 'AbortError')
+
+      const history = this.historyForRequest(session.id, retryTarget?.message.id)
       const turns = buildTurns(history, related, settings)
-      let content = ''
-      for await (const delta of this.llm.stream(turns, settings, signal)) {
-        content += delta
-        emit({ requestId, type: 'delta', sessionId: session.id, delta })
-      }
-      if (!content.trim()) throw new Error('The model returned no content')
-      const message = await this.database.addMessage(session.id, 'assistant', content, related.map((file) => file.id))
       const provider = this.llm.provider(settings)
-      await this.database.recordUsage(provider.name, provider.model, estimateTokens(turns), estimateTokens([{ content }]), session.id)
-      emit({ requestId, type: 'done', sessionId: session.id, message })
+      const inputTokens = estimateTokens(turns)
+      let content = ''
+      let firstResponseAt: number | null = null
+
+      if (settings.llmChoice === 'none') {
+        content = retrievalOnlyAnswer(related.map((item) => item.file))
+      } else {
+        emit({ requestId, type: 'progress', sessionId: session.id, stage: 'generating', relatedFileIds })
+        try {
+          const image = session.attachedFilePath && related[0]?.file.category === 'images' ? related[0].file : null
+          const stream = image ? this.llm.streamWithImage(turns, image.path, settings, signal) : this.llm.stream(turns, settings, signal)
+          for await (const delta of stream) {
+            if (firstResponseAt == null) firstResponseAt = performance.now()
+            content += delta
+            emit({ requestId, type: 'delta', sessionId: session.id, delta })
+          }
+          if (!content.trim()) throw new Error('The model returned no content')
+        } catch (error) {
+          if (signal.aborted) throw error
+          await this.logger.log('chat', 'The language model failed; returning local retrieval results', error)
+          content = fallbackAnswer(related.map((item) => item.file), error)
+        }
+      }
+
+      const completedAt = performance.now()
+      const metrics = {
+        inputTokens,
+        outputTokens: estimateTokens([{ content }]),
+        firstResponseDuration: ((firstResponseAt ?? completedAt) - startedAt) / 1000,
+        totalResponseDuration: (completedAt - startedAt) / 1000,
+        responseProvider: provider.name,
+        responseModel: provider.model
+      }
+      const message = retryTarget
+        ? await this.database.replaceAssistantMessage(retryTarget.message.id, content, relatedFileIds, metrics)
+        : await this.database.addMessage(session.id, 'assistant', content, relatedFileIds, metrics)
+      await this.database.recordUsage(provider.name, provider.model, inputTokens, metrics.outputTokens, session.id)
+      emit({ requestId, type: 'done', sessionId: session.id, message, relatedFileIds })
     } catch (error) {
       if (signal.aborted) {
         emit({ requestId, type: 'error', error: 'Generation stopped' })
@@ -85,6 +129,23 @@ export class ChatService {
         emit({ requestId, type: 'error', error: error instanceof Error ? error.message : String(error) })
       }
     }
+  }
+
+  private findRetryTarget(sessionId: number, messageId?: number | null): { message: ChatMessage; question: string } | null {
+    if (messageId == null) return null
+    const messages = this.database.listMessages(sessionId)
+    const index = messages.findIndex((message) => message.id === messageId && message.role === 'assistant')
+    if (index < 0) throw new Error('The response to retry no longer exists')
+    const question = messages.slice(0, index).reverse().find((message) => message.role === 'user')?.content
+    if (!question) throw new Error('The question for this response no longer exists')
+    return { message: messages[index], question }
+  }
+
+  private historyForRequest(sessionId: number, retryMessageId?: number): ChatMessage[] {
+    const history = this.database.listMessages(sessionId)
+    if (retryMessageId == null) return history
+    const index = history.findIndex((message) => message.id === retryMessageId)
+    return history.slice(0, index)
   }
 
   private async ensureSession(request: SendChatRequest): Promise<ChatSession> {
@@ -99,38 +160,70 @@ export class ChatService {
     return this.database.createChat(request.attachedFilePath ?? null)
   }
 
-  private async retrieve(query: string, session: ChatSession, settings: Settings): Promise<FileRecord[]> {
+  private async retrieve(query: string, session: ChatSession, settings: Settings): Promise<RetrievedFile[]> {
+    const limit = Math.max(1, Math.min(30, settings.ragResultLimit))
     if (session.attachedFilePath) {
       const file = this.database.getFileByPath(session.attachedFilePath)
-      return file ? [file] : []
-    }
-    try {
-      const hits = await this.embeddings.search(query, settings, 16)
-      const seen = new Set<number>()
-      const files: FileRecord[] = []
-      for (const hit of hits) {
-        if (seen.has(hit.fileId)) continue
-        const file = this.database.getFile(hit.fileId)
-        if (file) { seen.add(file.id); files.push(file) }
-        if (files.length === 5) break
+      if (!file) return []
+      let hits: SearchHit[] = []
+      try { hits = await this.embeddings.search(query, settings, Math.min(limit * 2, 40), file.id) } catch (error) {
+        await this.logger.log('chat', 'File semantic search failed; using stored document chunks', error)
       }
-      if (files.length) return files
+      return [{ file, chunks: selectNeighborChunks(this.database.listDocumentChunks(file.id), hits, limit) }]
+    }
+
+    let hits: SearchHit[] = []
+    try {
+      hits = await this.embeddings.search(query, settings, Math.min(limit * 4, 80))
     } catch (error) {
       await this.logger.log('chat', 'Semantic search failed; falling back to keyword search', error)
     }
-    const keywords = query.split(/[\s，。！？、,.;:]+/).filter((item) => item.length > 1)
-    const found = new Map<number, FileRecord>()
-    for (const keyword of keywords) this.database.searchFiles(keyword, null, 8).forEach((file) => found.set(file.id, file))
-    return [...found.values()].slice(0, 5)
+    const candidates = new Map<number, { file: FileRecord; hits: SearchHit[] }>()
+    for (const hit of hits) {
+      const file = this.database.getFile(hit.fileId)
+      if (!file) continue
+      const existing = candidates.get(file.id) ?? { file, hits: [] }
+      existing.hits.push(hit)
+      candidates.set(file.id, existing)
+    }
+    for (const keyword of query.split(/[\s，。！？、,.;:]+/).filter((item) => item.length > 1)) {
+      for (const file of this.database.searchFiles(keyword, null, limit * 2)) {
+        if (!candidates.has(file.id)) candidates.set(file.id, { file, hits: [] })
+      }
+    }
+    return [...candidates.values()].slice(0, limit).map(({ file, hits: fileHits }) => ({
+      file,
+      chunks: selectNeighborChunks(this.database.listDocumentChunks(file.id), fileHits, Math.max(3, Math.ceil(limit / 2)))
+    }))
   }
 }
 
-function buildTurns(history: ChatMessage[], related: FileRecord[], settings: Settings): LlmTurn[] {
-  const context = related.map((file, index) => `[File ${index + 1} | ID ${file.id}]\nName: ${file.name}\nPath: ${file.path}\nTitle: ${file.title ?? ''}\nNote: ${file.note ?? ''}\nContent: \n${(file.contentText ?? '').slice(0, 10_000)}`).join('\n\n---\n\n')
+function buildTurns(history: ChatMessage[], related: RetrievedFile[], settings: Settings): LlmTurn[] {
+  const maxTokens = contextWindowForSettings(settings)
+  const contextBudget = Math.max(512, Math.floor(maxTokens * 0.55))
+  const perFileBudget = Math.max(160, Math.floor(contextBudget / Math.max(1, related.length)))
+  const context = related.map(({ file, chunks }, index) => {
+    const rawText = chunks.length ? chunks.map((chunk) => chunk.contextualText).join('\n\n') : (file.contentText ?? '')
+    const text = truncateToTokens(rawText, perFileBudget)
+    return `[File ${index + 1} | ID ${file.id}]\nName: ${file.name}\nPath: ${file.path}\nTitle: ${file.title ?? ''}\nNote: ${file.note ?? ''}\nRelevant content:\n${text}`
+  }).join('\n\n---\n\n')
+  const system: LlmTurn = { role: 'system', content: `You are FileNest, a local file-retrieval assistant. Answer only from the supplied local-file context, state uncertainty clearly, and use exact file names when citing files. Context:\n\n${context || 'No relevant files were retrieved.'}` }
+  const responseReserve = Math.max(2_048, Math.floor(maxTokens * 0.15))
+  const historyBudget = Math.max(512, maxTokens - estimateTokens([system]) - responseReserve)
   return [
-    { role: 'system', content: `You are FileNest, a local file-retrieval assistant. Answer only from the supplied local-file context, state uncertainty clearly, and use exact file names when citing files. Context:\n\n${context || 'No relevant files were retrieved.'}` },
-    ...planChatHistory(history, settings.llmChoice === 'ollama' ? 8_000 : 30_000)
+    system,
+    ...planChatHistory(history, historyBudget)
   ]
+}
+
+export function contextWindowForSettings(settings: Settings): number {
+  if (settings.llmChoice === 'ollama') return 32_000
+  if (settings.cloudContextWindowTokens > 0) return settings.cloudContextWindowTokens
+  const model = settings.cloudModel.toLowerCase()
+  if (model.includes('claude')) return 200_000
+  if (model.includes('gemini')) return 128_000
+  if (model.includes('gpt-4') || model.includes('gpt-5')) return 128_000
+  return 30_000
 }
 
 export function planChatHistory(history: ChatMessage[], maxTokens: number): LlmTurn[] {
@@ -154,6 +247,20 @@ export function planChatHistory(history: ChatMessage[], maxTokens: number): LlmT
   return planned
 }
 
+function selectNeighborChunks(chunks: DocumentChunk[], hits: SearchHit[], limit: number): DocumentChunk[] {
+  if (!chunks.length) return []
+  if (!hits.length) return chunks.slice(0, limit)
+  const selected = new Map<number, DocumentChunk>()
+  for (const hit of hits) {
+    for (const index of [hit.chunkIndex - 1, hit.chunkIndex, hit.chunkIndex + 1]) {
+      const chunk = chunks.find((item) => item.index === index)
+      if (chunk) selected.set(chunk.index, chunk)
+      if (selected.size >= limit) return [...selected.values()].sort((left, right) => left.index - right.index)
+    }
+  }
+  return [...selected.values()].sort((left, right) => left.index - right.index)
+}
+
 function truncateToTokens(value: string, maxTokens: number): string {
   if (estimateTokens([{ content: value }]) <= maxTokens) return value
   const maxChars = Math.max(1, Math.floor(maxTokens * 3.2) - 2)
@@ -163,6 +270,11 @@ function truncateToTokens(value: string, maxTokens: number): string {
 function retrievalOnlyAnswer(files: FileRecord[]): string {
   if (!files.length) return 'No relevant files were found. Try different keywords, or enable Ollama or a cloud model in Settings for a more complete answer.'
   return `I found ${files.length} related files:\n\n${files.map((file, index) => `${index + 1}. **${file.name}**\n   ${file.path}`).join('\n\n')}`
+}
+
+function fallbackAnswer(files: FileRecord[], error: unknown): string {
+  const reason = error instanceof Error ? error.message : String(error)
+  return `The configured language model was unavailable (${reason}). Local retrieval still completed.\n\n${retrievalOnlyAnswer(files)}`
 }
 
 function heuristicRules(prompt: string): Array<{ name: string; type: 'rule'; pattern: string; targetFolder: string; priority: number; enabled: boolean; action: 'organize' | 'ignore' }> {

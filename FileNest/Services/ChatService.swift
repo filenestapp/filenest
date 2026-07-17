@@ -37,6 +37,7 @@ struct ChatProgress: Equatable {
     var matchedFileCount: Int = 0
     var matchedFiles: [FileRecord] = []
     var usesExistingIndex = false
+    var searchIntent = ""
 }
 
 enum LibrarySearchMatchKind: Equatable {
@@ -78,11 +79,16 @@ struct LibrarySearchResult: Identifiable, Equatable {
     var id: String { file.id.map(String.init) ?? file.path }
     let file: FileRecord
     let score: Double
+    let confidence: Double
     let matchKind: LibrarySearchMatchKind
     let snippet: String?
     let sectionPath: [String]
     let pageStart: Int?
     let pageEnd: Int?
+
+    var confidencePercent: Int {
+        Int((min(max(confidence, 0), 1) * 100).rounded())
+    }
 }
 
 struct SmartLibrarySearchPlan: Equatable {
@@ -105,6 +111,7 @@ private struct LibrarySearchExecution {
 }
 
 private struct SmartSearchPlanPayload: Decodable {
+    let intent: String?
     let semanticQuery: String?
     let keywords: [String]?
     let categories: [String]?
@@ -113,6 +120,7 @@ private struct SmartSearchPlanPayload: Decodable {
     let sort: String?
 
     enum CodingKeys: String, CodingKey {
+        case intent
         case semanticQuery = "semantic_query"
         case keywords
         case categories
@@ -279,17 +287,32 @@ final class ChatService {
                     usesExistingIndex: usesExistingIndex
                 )))
                 let smartSearchPlan: SmartLibrarySearchPlan?
+                var searchIntent = ""
                 if isFileChat {
                     smartSearchPlan = nil
                 } else {
                     smartSearchPlan = await resolvedSmartSearchPlan(
                         for: question,
                         providerMode: providerMode,
-                        modelOverride: modelOverride
+                        modelOverride: modelOverride,
+                        onIntentUpdate: { intent in
+                            searchIntent = intent
+                            continuation.yield(.progress(ChatProgress(
+                                phase: .planningSearch,
+                                scope: .library,
+                                searchIntent: intent
+                            )))
+                        }
                     ).plan
+                    if Task.isCancelled {
+                        continuation.yield(.cancelled)
+                        continuation.finish()
+                        return
+                    }
                     continuation.yield(.progress(ChatProgress(
                         phase: .queryingIndex,
-                        scope: .library
+                        scope: .library,
+                        searchIntent: searchIntent
                     )))
                 }
                 let related = await relatedFiles(
@@ -302,7 +325,8 @@ final class ChatService {
                     scope: isFileChat ? .attachedFile : .library,
                     matchedFileCount: related.files.count,
                     matchedFiles: related.files,
-                    usesExistingIndex: usesExistingIndex
+                    usesExistingIndex: usesExistingIndex,
+                    searchIntent: searchIntent
                 )))
 
                 let history = loadHistory(sessionId: sessionId)
@@ -314,7 +338,8 @@ final class ChatService {
                     scope: isFileChat ? .attachedFile : .library,
                     matchedFileCount: related.files.count,
                     matchedFiles: related.files,
-                    usesExistingIndex: usesExistingIndex
+                    usesExistingIndex: usesExistingIndex,
+                    searchIntent: searchIntent
                 )))
                 var fullReply = ""
                 var providerCompleted = false
@@ -480,14 +505,21 @@ final class ChatService {
 
     func smartSearchLibrary(
         _ rawQuery: String,
-        limit: Int = 200
+        limit: Int = 200,
+        onIntentUpdate: ((String) -> Void)? = nil
     ) async -> SmartLibrarySearchResponse {
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackPlan = Self.fallbackSmartSearchPlan(for: query)
         guard !query.isEmpty, limit > 0 else {
             return SmartLibrarySearchResponse(results: [], plan: fallbackPlan, usedAI: false)
         }
-        let resolved = await resolvedSmartSearchPlan(for: query)
+        let resolved = await resolvedSmartSearchPlan(
+            for: query,
+            onIntentUpdate: onIntentUpdate
+        )
+        guard !Task.isCancelled else {
+            return SmartLibrarySearchResponse(results: [], plan: fallbackPlan, usedAI: false)
+        }
         let plan = resolved.plan
         let results = await executeLibrarySearch(query, limit: limit, smartPlan: plan)
         return SmartLibrarySearchResponse(results: results, plan: plan, usedAI: resolved.usedAI)
@@ -496,7 +528,8 @@ final class ChatService {
     private func resolvedSmartSearchPlan(
         for query: String,
         providerMode: ChatProviderMode = .configured,
-        modelOverride: String? = nil
+        modelOverride: String? = nil,
+        onIntentUpdate: ((String) -> Void)? = nil
     ) async -> (plan: SmartLibrarySearchPlan, usedAI: Bool) {
         let fallbackPlan = Self.fallbackSmartSearchPlan(for: query)
         guard !query.isEmpty,
@@ -515,10 +548,19 @@ final class ChatService {
         }
 
         do {
-            let reply = try await provider.chat([
+            var reply = ""
+            var lastIntent = ""
+            for try await chunk in provider.streamChat([
                 ChatTurn(role: .system, content: Self.smartSearchSystemPrompt()),
                 ChatTurn(role: .user, content: query),
-            ], context: nil)
+            ], context: nil) {
+                try Task.checkCancellation()
+                reply += chunk
+                guard let intent = Self.streamedSearchIntent(in: reply),
+                      intent != lastIntent else { continue }
+                lastIntent = intent
+                onIntentUpdate?(intent)
+            }
             return (try Self.decodeSmartSearchPlan(reply, fallbackQuery: query), true)
         } catch {
             return (fallbackPlan, false)
@@ -533,14 +575,16 @@ final class ChatService {
         await executeLibrarySearchDetails(
             rawQuery,
             limit: limit,
-            smartPlan: smartPlan
+            smartPlan: smartPlan,
+            sortByConfidence: true
         ).results
     }
 
     private func executeLibrarySearchDetails(
         _ rawQuery: String,
         limit: Int,
-        smartPlan: SmartLibrarySearchPlan?
+        smartPlan: SmartLibrarySearchPlan?,
+        sortByConfidence: Bool = false
     ) async -> LibrarySearchExecution {
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, limit > 0 else {
@@ -638,9 +682,17 @@ final class ChatService {
             let semanticSnippet = semantic?.chunkText.flatMap {
                 Self.compactExcerpt($0, terms: terms)
             }
+            let confidence = max(
+                max(
+                    lexical?.confidence ?? 0,
+                    semantic.map { Self.semanticConfidence(for: $0) } ?? 0
+                ),
+                lexical == nil && semantic == nil ? 0.30 : 0
+            )
             return LibrarySearchResult(
                 file: file,
                 score: score,
+                confidence: confidence,
                 matchKind: matchKind,
                 snippet: lexical?.snippet ?? semanticSnippet,
                 sectionPath: semantic?.sectionPath ?? [],
@@ -688,13 +740,18 @@ final class ChatService {
                 )
                 if lhsYearTier != rhsYearTier { return lhsYearTier > rhsYearTier }
             }
-            if smartPlan?.sortNewestFirst == true {
+            if sortByConfidence, lhs.confidence != rhs.confidence {
+                return lhs.confidence > rhs.confidence
+            }
+            if smartPlan?.sortNewestFirst == true, sortByConfidence {
+                if lhs.file.mtime != rhs.file.mtime { return lhs.file.mtime > rhs.file.mtime }
+            } else if smartPlan?.sortNewestFirst == true {
                 func relevanceTier(_ result: LibrarySearchResult) -> Int {
                     guard let fileID = result.file.id else { return 0 }
                     guard let lexical = lexicalByID[fileID] else {
                         return semanticByID[fileID] == nil ? 0 : 1
                     }
-                    switch lexical.kind {
+                    switch lexical.rankingKind {
                     case .fileName, .title: return 3
                     case .note, .content: return 2
                     case .path: return 1
@@ -937,8 +994,9 @@ final class ChatService {
         let today = formatter.string(from: now)
         return """
         Convert the user's file-search request into one strict JSON object. Today is \(today).
-        Return JSON only, with this schema:
+        Return JSON only. Put the intent field first, using this schema:
         {
+          "intent": "one concise user-facing sentence describing what will be searched and prioritized",
           "semantic_query": "content meaning to embed, without date, type, or sorting instructions",
           "keywords": ["exact identifier or lexical term"],
           "categories": ["documents|images|videos|audio|code|archives|other"],
@@ -947,10 +1005,48 @@ final class ChatService {
           "sort": "relevance|newest"
         }
         Resolve relative dates such as today, yesterday, this week, last month, this year, and their Chinese equivalents into absolute inclusive dates.
+        Write intent in the same language as the user's request. Keep it to one sentence without line breaks or quotation marks.
         Preserve distinctive names, invoice numbers, vehicle numbers, and other identifiers in keywords. Use at most 8 concise keywords.
         Use an empty category list when no type was requested. Use null for both dates when no date was requested.
         Do not answer the request and do not include Markdown fences.
         """
+    }
+
+    static func streamedSearchIntent(in response: String) -> String? {
+        guard let marker = response.range(of: #""intent""#),
+              let colon = response[marker.upperBound...].firstIndex(of: ":") else {
+            return nil
+        }
+        let valueStart = response.index(after: colon)
+        guard valueStart < response.endIndex,
+              let openingQuote = response[valueStart...].firstIndex(of: "\"") else {
+            return nil
+        }
+
+        var intent = ""
+        var isEscaped = false
+        var index = response.index(after: openingQuote)
+        while index < response.endIndex {
+            let character = response[index]
+            if isEscaped {
+                switch character {
+                case "n", "r", "t": intent.append(" ")
+                case "\"": intent.append("\"")
+                case "\\": intent.append("\\")
+                case "/": intent.append("/")
+                default: intent.append(character)
+                }
+                isEscaped = false
+            } else if character == "\\" {
+                isEscaped = true
+            } else if character == "\"" {
+                return intent.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                intent.append(character)
+            }
+            index = response.index(after: index)
+        }
+        return intent
     }
 
     private static func decodeSmartSearchPlan(
@@ -1221,8 +1317,16 @@ final class ChatService {
     private struct LibraryLexicalMatch {
         let file: FileRecord
         let score: Int
+        let confidence: Double
         let kind: LibrarySearchMatchKind
+        let rankingKind: LibrarySearchMatchKind
         let snippet: String?
+    }
+
+    private struct LibraryConfidenceEvidence {
+        let confidence: Double
+        let kind: LibrarySearchMatchKind
+        let source: String?
     }
 
     private static func librarySearchTerms(
@@ -1247,6 +1351,69 @@ final class ChatService {
         let note = (file.note ?? "").lowercased()
         let content = (file.contentText ?? "").lowercased()
         let path = file.path.lowercased()
+
+        var evidence: LibraryConfidenceEvidence?
+        func considerEvidence(
+            confidence: Double,
+            kind: LibrarySearchMatchKind,
+            source: String?
+        ) {
+            guard confidence > evidence?.confidence ?? -1 else { return }
+            evidence = LibraryConfidenceEvidence(
+                confidence: confidence,
+                kind: kind,
+                source: source
+            )
+        }
+
+        let evidenceTerms = terms.filter { !$0.isEmpty && $0 != normalizedQuery }
+        func evidenceStrength(in source: String) -> Double? {
+            if source.contains(normalizedQuery) { return 1 }
+            guard !evidenceTerms.isEmpty else { return nil }
+            let matchedCount = evidenceTerms.reduce(into: 0) { count, term in
+                if source.contains(term) { count += 1 }
+            }
+            guard matchedCount > 0 else { return nil }
+            return Double(matchedCount) / Double(evidenceTerms.count)
+        }
+
+        if stem == normalizedQuery || name == normalizedQuery {
+            considerEvidence(confidence: 1, kind: .fileName, source: file.title ?? file.displayPath)
+        } else if let strength = evidenceStrength(in: name) {
+            considerEvidence(
+                confidence: 0.50 + (0.09 * strength),
+                kind: .fileName,
+                source: file.title ?? file.displayPath
+            )
+        }
+        if let strength = evidenceStrength(in: title) {
+            considerEvidence(
+                confidence: 0.60 + (0.09 * strength),
+                kind: .title,
+                source: file.title
+            )
+        }
+        if let strength = evidenceStrength(in: note) {
+            considerEvidence(
+                confidence: 0.75 + (0.09 * strength),
+                kind: .note,
+                source: file.note
+            )
+        }
+        if let strength = evidenceStrength(in: content) {
+            considerEvidence(
+                confidence: 0.90 + (0.09 * strength),
+                kind: .content,
+                source: file.contentText
+            )
+        }
+        if let strength = evidenceStrength(in: path) {
+            considerEvidence(
+                confidence: 0.35 + (0.09 * strength),
+                kind: .path,
+                source: file.displayPath
+            )
+        }
 
         var best: (score: Int, kind: LibrarySearchMatchKind, source: String?)?
         func consider(_ score: Int, _ kind: LibrarySearchMatchKind, _ source: String?) {
@@ -1298,13 +1465,31 @@ final class ChatService {
         } else {
             best?.score += termScore
         }
-        guard let best else { return nil }
+        guard let best, let evidence else { return nil }
         return LibraryLexicalMatch(
             file: file,
             score: best.score,
-            kind: best.kind,
-            snippet: best.source.flatMap { compactExcerpt($0, terms: terms) }
+            confidence: min(evidence.confidence, 1),
+            kind: evidence.kind,
+            rankingKind: best.kind,
+            snippet: evidence.source.flatMap { compactExcerpt($0, terms: terms) }
         )
+    }
+
+    private static func semanticConfidence(for hit: VectorSearchHit) -> Double {
+        let strength = min(max(Double(hit.score), 0), 1)
+        let base: Double
+        switch hit.kind {
+        case .text, .table, .list, .picture:
+            base = 0.90
+        case .note:
+            base = 0.75
+        case .title:
+            base = 0.60
+        case .metadata:
+            base = 0.35
+        }
+        return min(base + (0.09 * strength), 1)
     }
 
     private static func compactExcerpt(_ source: String, terms: [String], limit: Int = 240) -> String? {

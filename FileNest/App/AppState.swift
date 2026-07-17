@@ -86,6 +86,8 @@ final class AppState: ObservableObject {
     @Published var chatSessions: [ChatSession] = []
     @Published var selectedChatSessionID: Int64?
     @Published var chatMessages: [ChatMessage] = []
+    @Published private(set) var runningChatSessionIDs = Set<Int64>()
+    @Published private(set) var completedChatSessionIDs = Set<Int64>()
     @Published private(set) var draftChatAttachmentPath: String?
     @Published private(set) var chatComposerInput = ""
     @Published var statistics: AppStatistics = .empty
@@ -93,7 +95,6 @@ final class AppState: ObservableObject {
     @Published var isOnboardingPresented = false
     @Published private(set) var indexingState: IndexingTaskState = .idle
     @Published private(set) var indexingKind: IndexingTaskKind = .automatic
-    @Published private(set) var indexingAnimationFrame = 0
     @Published private(set) var vectorIndexRebuildProgress: VectorIndexRebuildProgress?
     @Published private(set) var isIndexConfigurationPromptPresented = false
     @Published private(set) var hasPendingAutomaticEmbeddingRebuild = false
@@ -110,7 +111,6 @@ final class AppState: ObservableObject {
     private var reindexTask: Task<Void, Never>?
     private var notePostSaveTasks = [Int64: Task<Void, Never>]()
     private var notePostSaveTokens = [Int64: UUID]()
-    private var indexingAnimationTask: Task<Void, Never>?
     private let indexingGate = IndexingExecutionGate()
     private var lastRebuildVectorSpace = false
     private var lastOnlyUnindexedFiles = false
@@ -339,7 +339,9 @@ final class AppState: ObservableObject {
             startWatching()
         }
         Task {
-            await ollama.refresh(host: settings.ollamaHost)
+            async let ollamaRefresh: Void = ollama.refresh(host: settings.ollamaHost)
+            async let paddleRefresh: Void = paddleOCR.refresh()
+            _ = await (ollamaRefresh, paddleRefresh)
             async let ollamaUpdates: Void = ollama.checkForUpdates()
             async let doclingUpdates: Void = docling.checkForUpdates()
             async let paddleUpdates: Void = paddleOCR.checkForUpdates()
@@ -621,8 +623,14 @@ final class AppState: ObservableObject {
         }
     }
 
-    func managedSmartSearchResults(matching query: String) async -> SmartLibrarySearchResponse {
-        let response = await chat.smartSearchLibrary(query)
+    func managedSmartSearchResults(
+        matching query: String,
+        onIntentUpdate: ((String) -> Void)? = nil
+    ) async -> SmartLibrarySearchResponse {
+        let response = await chat.smartSearchLibrary(
+            query,
+            onIntentUpdate: onIntentUpdate
+        )
         let results = response.results.filter {
             organizer.isManagedPath($0.file.path) && FileManager.default.fileExists(atPath: $0.file.path)
         }
@@ -681,6 +689,24 @@ final class AppState: ObservableObject {
         draftChatAttachmentPath = nil
     }
 
+    func markChatRunning(_ sessionID: Int64) {
+        completedChatSessionIDs.remove(sessionID)
+        runningChatSessionIDs.insert(sessionID)
+    }
+
+    func markChatCompleted(_ sessionID: Int64) {
+        runningChatSessionIDs.remove(sessionID)
+        completedChatSessionIDs.insert(sessionID)
+    }
+
+    func markChatStopped(_ sessionID: Int64) {
+        runningChatSessionIDs.remove(sessionID)
+    }
+
+    func markChatSeen(_ sessionID: Int64) {
+        completedChatSessionIDs.remove(sessionID)
+    }
+
     func newChat(attachedFilePath: String? = nil) {
         switchChatComposerDraft(to: "new", resetDestination: true)
         isDraftChat = true
@@ -728,12 +754,16 @@ final class AppState: ObservableObject {
     }
 
     func deleteChat(_ id: Int64) {
+        runningChatSessionIDs.remove(id)
+        completedChatSessionIDs.remove(id)
         chatComposerDrafts.removeValue(forKey: chatComposerDraftKey(sessionID: id))
         chat.deleteSession(id: id)
         refreshChatSessions()
     }
 
     func clearAllChats() {
+        runningChatSessionIDs.removeAll()
+        completedChatSessionIDs.removeAll()
         chat.clearHistory()
         chatComposerDrafts.removeAll()
         activeChatComposerDraftKey = "new"
@@ -961,7 +991,6 @@ final class AppState: ObservableObject {
         indexingState = .paused
         statusText = "Indexing Paused"
         updateProgressPhase(.paused)
-        stopIndexingAnimation()
         Task { await indexingGate.pause() }
     }
 
@@ -976,7 +1005,6 @@ final class AppState: ObservableObject {
         indexingState = .running
         statusText = indexingStatusTitle
         updateProgressPhase(.indexing)
-        startIndexingAnimation()
         Task { await indexingGate.resume() }
     }
 
@@ -991,7 +1019,6 @@ final class AppState: ObservableObject {
         indexingState = .stopping
         statusText = "Stopping Indexing"
         updateProgressPhase(.stopping)
-        startIndexingAnimation()
         reindexTask?.cancel()
         managedSyncIndexTask?.cancel()
         Task {
@@ -1128,7 +1155,6 @@ final class AppState: ObservableObject {
             failed: 0
         )
         statusText = indexingStatusTitle
-        startIndexingAnimation()
     }
 
     private func finishIndexing(
@@ -1170,7 +1196,6 @@ final class AppState: ObservableObject {
             )
         }
         statusText = indexingStatusTitle
-        stopIndexingAnimation()
     }
 
     private func updateProgressPhase(_ phase: VectorIndexRebuildProgress.Phase) {
@@ -1188,27 +1213,6 @@ final class AppState: ObservableObject {
             currentFileName: progress.currentFileName,
             failed: progress.failed
         )
-    }
-
-    private func startIndexingAnimation() {
-        guard indexingAnimationTask == nil else { return }
-        indexingAnimationTask = Task { [weak self] in
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(nanoseconds: 550_000_000)
-                } catch {
-                    break
-                }
-                guard let self else { break }
-                self.indexingAnimationFrame = (self.indexingAnimationFrame + 1) % 8
-            }
-        }
-    }
-
-    private func stopIndexingAnimation() {
-        indexingAnimationTask?.cancel()
-        indexingAnimationTask = nil
-        indexingAnimationFrame = 0
     }
 
     private func restoreSteadyStatus(after nanoseconds: UInt64) {

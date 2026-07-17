@@ -16,6 +16,11 @@ enum ManagedServiceUpdateStatus: Equatable {
 }
 
 enum ManagedServiceReleaseAPI {
+    struct GitHubReleaseMetadata: Equatable {
+        let version: String
+        let macOSDMGURL: URL
+    }
+
     static let ollamaLatestReleaseURL = URL(
         string: "https://api.github.com/repos/ollama/ollama/releases/latest"
     )!
@@ -32,6 +37,14 @@ enum ManagedServiceReleaseAPI {
         return try githubVersion(from: data)
     }
 
+    static func latestGitHubRelease(
+        session: URLSession = .shared,
+        url: URL = ollamaLatestReleaseURL
+    ) async throws -> GitHubReleaseMetadata {
+        let data = try await responseData(session: session, url: url)
+        return try githubRelease(from: data)
+    }
+
     static func latestPyPIVersion(
         package: String,
         session: URLSession = .shared
@@ -43,6 +56,19 @@ enum ManagedServiceReleaseAPI {
     static func githubVersion(from data: Data) throws -> String {
         let response = try JSONDecoder().decode(GitHubRelease.self, from: data)
         return normalized(response.tagName)
+    }
+
+    static func githubRelease(from data: Data) throws -> GitHubReleaseMetadata {
+        let response = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        guard let downloadURL = response.assets?
+            .first(where: { $0.name.caseInsensitiveCompare("Ollama.dmg") == .orderedSame })?
+            .browserDownloadURL else {
+            throw ManagedServiceReleaseError.invalidResponse
+        }
+        return GitHubReleaseMetadata(
+            version: normalized(response.tagName),
+            macOSDMGURL: downloadURL
+        )
     }
 
     static func pypiVersion(from data: Data) throws -> String {
@@ -74,9 +100,21 @@ enum ManagedServiceReleaseAPI {
 
     private struct GitHubRelease: Decodable {
         let tagName: String
+        let assets: [GitHubReleaseAsset]?
 
         enum CodingKeys: String, CodingKey {
             case tagName = "tag_name"
+            case assets
+        }
+    }
+
+    private struct GitHubReleaseAsset: Decodable {
+        let name: String
+        let browserDownloadURL: URL
+
+        enum CodingKeys: String, CodingKey {
+            case name
+            case browserDownloadURL = "browser_download_url"
         }
     }
 
