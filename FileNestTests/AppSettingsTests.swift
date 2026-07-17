@@ -1,4 +1,5 @@
 import XCTest
+import Carbon
 @testable import FileNest
 
 final class AppSettingsTests: XCTestCase {
@@ -41,6 +42,7 @@ final class AppSettingsTests: XCTestCase {
         settings.setAutoVectorize(false)
         settings.setVectorizeExtensions(["PDF", ".md", "pdf"])
         settings.setVectorChunkWords(850)
+        settings.setVectorRetrievalChunkTokens(320)
         settings.setVectorChunkOverlap(50)
         settings.setDoclingEnabled(false)
         settings.setEmbeddingSource(AppSettings.EmbeddingSource.cloud.rawValue)
@@ -59,10 +61,16 @@ final class AppSettingsTests: XCTestCase {
         settings.setThinkingMode(true)
         settings.setAppLanguage(AppSettings.AppLanguage.english.rawValue)
         settings.setAppearance(AppSettings.AppAppearance.dark.rawValue)
+        settings.setQuickSearchShortcut(QuickSearchShortcut(
+            keyCode: 11,
+            modifiers: UInt32(cmdKey | shiftKey)
+        ))
         settings.setOnboardingCompleted(true)
         settings.setUpdateFeedURL("https://updates.example.com/appcast.xml")
         settings.setAutomaticUpdateChecks(false)
         settings.setAutomaticallyDownloadsUpdates(true)
+        let modelVersionCheckDate = Date(timeIntervalSince1970: 1_750_000_000)
+        settings.setLastAIModelVersionCheckAt(modelVersionCheckDate)
 
         let reloaded = AppSettings(store: store)
 
@@ -86,6 +94,7 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertFalse(reloaded.autoVectorize)
         XCTAssertEqual(reloaded.vectorizeExtensions, ["pdf", "md"])
         XCTAssertEqual(reloaded.vectorChunkWords, 850)
+        XCTAssertEqual(reloaded.vectorRetrievalChunkTokens, 320)
         XCTAssertEqual(reloaded.vectorChunkOverlap, 50)
         XCTAssertFalse(reloaded.doclingEnabled)
         XCTAssertEqual(reloaded.embeddingSource, AppSettings.EmbeddingSource.cloud.rawValue)
@@ -104,10 +113,39 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertTrue(reloaded.thinkingMode)
         XCTAssertEqual(reloaded.appLanguage, AppSettings.AppLanguage.english.rawValue)
         XCTAssertEqual(reloaded.appearance, AppSettings.AppAppearance.dark.rawValue)
+        XCTAssertEqual(reloaded.quickSearchShortcutKeyCode, 11)
+        XCTAssertEqual(reloaded.quickSearchShortcutModifiers, UInt32(cmdKey | shiftKey))
         XCTAssertTrue(reloaded.onboardingCompleted)
         XCTAssertEqual(reloaded.updateFeedURL, "https://updates.example.com/appcast.xml")
         XCTAssertFalse(reloaded.automaticUpdateChecks)
         XCTAssertTrue(reloaded.automaticallyDownloadsUpdates)
+        XCTAssertEqual(reloaded.lastAIModelVersionCheckAt, modelVersionCheckDate)
+    }
+
+    func testAIModelVersionCheckUsesPersistent24HourTTL() {
+        let settings = AppSettings(store: store)
+        let checkedAt = Date(timeIntervalSince1970: 1_750_000_000)
+
+        XCTAssertTrue(settings.shouldCheckAIModelVersions(at: checkedAt))
+
+        settings.setLastAIModelVersionCheckAt(checkedAt)
+
+        XCTAssertFalse(settings.shouldCheckAIModelVersions(
+            at: checkedAt.addingTimeInterval(23 * 60 * 60)
+        ))
+        XCTAssertTrue(settings.shouldCheckAIModelVersions(
+            at: checkedAt.addingTimeInterval(24 * 60 * 60)
+        ))
+        XCTAssertEqual(AppSettings(store: store).lastAIModelVersionCheckAt, checkedAt)
+    }
+
+    func testQuickSearchShortcutRejectsModifierFreeCombinations() {
+        let settings = AppSettings(store: store)
+
+        settings.setQuickSearchShortcut(QuickSearchShortcut(keyCode: 0, modifiers: 0))
+
+        XCTAssertEqual(settings.quickSearchShortcutKeyCode, QuickSearchShortcut.defaultValue.keyCode)
+        XCTAssertEqual(settings.quickSearchShortcutModifiers, QuickSearchShortcut.defaultValue.modifiers)
     }
 
     @MainActor
@@ -192,6 +230,7 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertTrue(settings.ollamaFlashAttentionEnabled)
         XCTAssertEqual(settings.cloudContextWindowTokens, 0)
         XCTAssertEqual(settings.vectorChunkWords, 600)
+        XCTAssertEqual(settings.vectorRetrievalChunkTokens, 300)
         XCTAssertEqual(settings.vectorChunkOverlap, 80)
         XCTAssertEqual(settings.ragResultLimit, 10)
         XCTAssertEqual(settings.ocrSource, AppSettings.OCRSource.local.rawValue)
@@ -264,6 +303,24 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(
             OllamaServiceManager.managedServiceProcessIDs(from: processes, executablePath: path),
             [101, 104]
+        )
+    }
+
+    func testManagedRerankerProcessParsingOnlyMatchesFileNestServer() {
+        let scriptPath = "/Users/test/Library/Application Support/FileNest/Reranker/reranker_server.py"
+        let processes = """
+          201 /usr/bin/python3 \(scriptPath) --model /tmp/model --port 11435
+          202 /usr/bin/python3 /tmp/reranker_server.py --model /tmp/model --port 11435
+          203 /usr/bin/python3 \(scriptPath) --model /tmp/model --port 9999
+          204 /usr/bin/python3 \(scriptPath) --port 11435 --model /tmp/model
+        """
+
+        XCTAssertEqual(
+            RerankerServiceManager.managedServiceProcessIDs(
+                from: processes,
+                serverScriptPath: scriptPath
+            ),
+            [201, 204]
         )
     }
 
@@ -511,6 +568,22 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(settings.effectiveCloudEmbeddingAPIKey, "chat-key")
         XCTAssertEqual(settings.effectiveCloudOCRBaseURL, "https://chat.example/v1")
         XCTAssertEqual(settings.effectiveCloudOCRAPIKey, "chat-key")
+    }
+
+    func testCloudServiceRootURLsAutomaticallyUseV1Endpoints() {
+        let settings = AppSettings(store: store)
+
+        settings.setCloudBaseURL("https://api.autogateway.cc")
+        settings.setCloudEmbeddingBaseURL("https://embedding.example/")
+        settings.setCloudOCRBaseURL("https://ocr.example")
+
+        XCTAssertEqual(settings.cloudBaseURL, "https://api.autogateway.cc")
+        XCTAssertEqual(settings.effectiveCloudBaseURL, "https://api.autogateway.cc/v1")
+        XCTAssertEqual(settings.effectiveCloudEmbeddingBaseURL, "https://embedding.example/v1")
+        XCTAssertEqual(settings.effectiveCloudOCRBaseURL, "https://ocr.example/v1")
+
+        settings.setCloudBaseURL("https://gateway.example/custom-api")
+        XCTAssertEqual(settings.effectiveCloudBaseURL, "https://gateway.example/custom-api")
     }
 
     func testSearchOnlyProviderUsesSelectedApplicationLanguage() async throws {

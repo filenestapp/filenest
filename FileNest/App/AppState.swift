@@ -33,6 +33,24 @@ enum IndexingTaskState: Equatable, Sendable {
     var blocksReindexButtons: Bool { isActive }
 }
 
+enum OrganizationTaskState: Equatable, Sendable {
+    case idle
+    case running
+    case paused
+    case stopping
+    case stopped
+    case completed
+    case failed
+
+    var isActive: Bool {
+        self == .running || self == .paused || self == .stopping
+    }
+
+    var isAnimating: Bool {
+        self == .running || self == .stopping
+    }
+}
+
 enum IndexingTaskKind: Equatable, Sendable {
     case automatic
     case fullReindex
@@ -54,6 +72,126 @@ enum ReindexConfirmationStep: Int, Identifiable, Sendable {
     var id: Int { rawValue }
 }
 
+enum RAGReindexStage: Int, CaseIterable, Identifiable, Sendable {
+    case parsingAndOCR
+    case structuredChunking
+    case embeddings
+    case retrievalIndex
+    case rerankerRuntime
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .parsingAndOCR: return "Document parsing & OCR"
+        case .structuredChunking: return "Structured chunking"
+        case .embeddings: return "Embedding vectors"
+        case .retrievalIndex: return "SQLite vector index"
+        case .rerankerRuntime: return "Reranker runtime"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .parsingAndOCR: return "Reread source files with Docling and the selected OCR engine"
+        case .structuredChunking: return "Rebuild parent sections and retrieval chunks"
+        case .embeddings: return "Regenerate vectors from existing chunks when possible"
+        case .retrievalIndex: return "Recreate sqlite-vec from stored vectors without calling AI"
+        case .rerankerRuntime: return "Restart the local query-time reranker; document data is unchanged"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .parsingAndOCR: return "doc.text.viewfinder"
+        case .structuredChunking: return "square.split.2x1"
+        case .embeddings: return "point.3.connected.trianglepath.dotted"
+        case .retrievalIndex: return "cylinder.split.1x2"
+        case .rerankerRuntime: return "arrow.up.arrow.down.square"
+        }
+    }
+
+    var downstreamStages: Set<RAGReindexStage> {
+        switch self {
+        case .parsingAndOCR: return [.parsingAndOCR, .structuredChunking, .embeddings, .retrievalIndex]
+        case .structuredChunking: return [.structuredChunking, .embeddings, .retrievalIndex]
+        case .embeddings: return [.embeddings, .retrievalIndex]
+        case .retrievalIndex: return [.retrievalIndex]
+        case .rerankerRuntime: return [.rerankerRuntime]
+        }
+    }
+}
+
+struct LibrarySearchRequest: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let query: String
+}
+
+enum FileChatReturnDestination: Equatable {
+    case chat
+    case library
+}
+
+/// Transient presentation state for one in-flight chat request.
+///
+/// The database remains the source of truth for completed messages. This snapshot keeps an
+/// optimistic user message, the streaming assistant message, and the current pipeline stage
+/// available while the user navigates between conversations.
+struct ChatExecutionPresentation: Equatable {
+    var userMessage: ChatMessage?
+    var assistantMessage: ChatMessage
+    var progress: ChatProgress?
+}
+
+struct AutomaticFileProcessingItem: Identifiable, Equatable {
+    let id: Int64
+    var fileName: String
+    var stage: AutomaticFileProcessingStage
+    var detail: String?
+    var updatedAt: Date
+
+    var isActive: Bool {
+        switch stage {
+        case .completed, .failed: return false
+        default: return true
+        }
+    }
+
+    var title: String {
+        switch stage {
+        case .queued: return "Queued for processing"
+        case .indexing: return "Indexing file"
+        case .waitingForOrganization: return "Waiting to organize"
+        case .organizing: return "Organizing file"
+        case .completed: return "Processing complete"
+        case .failed: return "Processing failed"
+        }
+    }
+
+    var subtitle: String {
+        switch stage {
+        case let .indexing(indexingStage): return indexingStage.statusText
+        case let .failed(message): return detail ?? message
+        default: return detail ?? fileName
+        }
+    }
+
+    var progress: Double? {
+        switch stage {
+        case .queued: return 0.04
+        case let .indexing(indexingStage):
+            if case let .embedding(completed, total) = indexingStage, total > 0 {
+                return 0.2 + 0.55 * Double(completed) / Double(total)
+            }
+            return 0.18
+        case .waitingForOrganization: return 0.8
+        case .organizing: return 0.92
+        case .completed: return 1
+        case .failed: return nil
+        }
+    }
+}
+
 /// Application-wide state that owns service instances and drives reactive UI updates.
 @MainActor
 final class AppState: ObservableObject {
@@ -70,6 +208,7 @@ final class AppState: ObservableObject {
     let indexer: IndexerService
     let chat: ChatService
     let ollama: OllamaServiceManager
+    let reranker: RerankerServiceManager
     let docling: DoclingServiceManager
     let paddleOCR: PaddleOCRServiceManager
     let updates: AppUpdateService
@@ -88,12 +227,19 @@ final class AppState: ObservableObject {
     @Published var chatMessages: [ChatMessage] = []
     @Published private(set) var runningChatSessionIDs = Set<Int64>()
     @Published private(set) var completedChatSessionIDs = Set<Int64>()
+    @Published private(set) var chatExecutionPresentations = [Int64: ChatExecutionPresentation]()
     @Published private(set) var draftChatAttachmentPath: String?
     @Published private(set) var chatComposerInput = ""
+    @Published private(set) var librarySearchRequest: LibrarySearchRequest?
+    @Published private(set) var librarySearchHistory: [LibrarySearchHistoryEntry] = []
+    @Published private(set) var quickSearchShortcutRegistrationError: String?
     @Published var statistics: AppStatistics = .empty
     @Published var selectedSettingsSection: SettingsSection = .general
     @Published var isOnboardingPresented = false
     @Published private(set) var indexingState: IndexingTaskState = .idle
+    @Published private(set) var organizationState: OrganizationTaskState = .idle
+    @Published private(set) var organizationProgress: OrganizationJobProgress?
+    @Published private(set) var automaticFileProcessingItems: [AutomaticFileProcessingItem] = []
     @Published private(set) var indexingKind: IndexingTaskKind = .automatic
     @Published private(set) var vectorIndexRebuildProgress: VectorIndexRebuildProgress?
     @Published private(set) var isIndexConfigurationPromptPresented = false
@@ -103,23 +249,47 @@ final class AppState: ObservableObject {
     @Published private(set) var selectedAdvancedReindexCategories = Set<IndexContentChangeCategory>()
     @Published private(set) var isEmbeddingChangeReindexSelected = true
     @Published private(set) var isUnindexedFilesReindexSelected = true
+    @Published private(set) var reindexUnindexedFileCount = 0
+    @Published private(set) var selectedRAGReindexStages = Set<RAGReindexStage>()
+    @Published private(set) var isFullPipelineReindexSelected = false
     @Published var isReindexAdvancedExpanded = false
 
     private var cancellables = Set<AnyCancellable>()
     private var managedSyncIndexIDs = Set<Int64>()
     private var managedSyncIndexTask: Task<Void, Never>?
+    private var scheduledRefreshTask: Task<Void, Never>?
+    private var backgroundRefreshTask: Task<Void, Never>?
+    private var refreshGeneration: UInt64 = 0
+    private var statisticsTask: Task<Void, Never>?
+    private var activeStatisticsDays: Int?
+    private var pendingStatisticsDays: Int?
+    private var modelServiceStatusRefreshTask: Task<Void, Never>?
+    private var modelVersionCheckTask: Task<Void, Never>?
     private var reindexTask: Task<Void, Never>?
+    private var organizationTask: Task<Void, Never>?
+    private var organizationJobToken: UUID?
+    private var organizationPhaseBeforePause: OrganizationJobPhase = .preparing
     private var notePostSaveTasks = [Int64: Task<Void, Never>]()
     private var notePostSaveTokens = [Int64: UUID]()
+    private var pendingCompletedProcessingCount = 0
+    private var lastCompletedProcessingFileName: String?
     private let indexingGate = IndexingExecutionGate()
+    private let organizationGate = OrganizationExecutionGate()
     private var lastRebuildVectorSpace = false
     private var lastOnlyUnindexedFiles = false
     private var lastIncludeUnindexedFiles = false
+    private var lastRetrievalIndexOnly = false
+    private var lastForceSourceReprocessing = false
     private var lastIndexingKind: IndexingTaskKind = .fullReindex
     private var lastReindexContentCategories = Set<IndexContentChangeCategory>()
     private var isDraftChat = false
     private var chatComposerDrafts: [String: String] = [:]
     private var activeChatComposerDraftKey = "new"
+    private var fileChatReturnSessionID: Int64?
+    private var fileChatReturnDestination: FileChatReturnDestination?
+    private let globalHotKeyService = GlobalHotKeyService()
+    private var quickSearchPanelController: QuickSearchPanelController?
+    private let systemNotificationsEnabled: Bool
     private let shouldSynchronizeManagedFiles: Bool
     private let shouldIndexManagedFiles: Bool
     private let startsServicesAutomatically: Bool
@@ -136,6 +306,30 @@ final class AppState: ObservableObject {
 
     var indexingProgress: VectorIndexRebuildProgress? { vectorIndexRebuildProgress }
     var reindexButtonsDisabled: Bool { indexingState.blocksReindexButtons }
+
+    var activeAutomaticFileProcessingItems: [AutomaticFileProcessingItem] {
+        automaticFileProcessingItems.filter(\.isActive)
+    }
+
+    var hasActiveAutomaticFileProcessing: Bool {
+        !activeAutomaticFileProcessingItems.isEmpty
+    }
+
+    var automaticProcessingStatusTitle: String {
+        guard let item = activeAutomaticFileProcessingItems.sorted(by: { $0.updatedAt > $1.updatedAt }).first else {
+            return "Processing queue idle"
+        }
+        return item.title
+    }
+
+    var automaticProcessingStatusSubtitle: String {
+        guard let item = activeAutomaticFileProcessingItems.sorted(by: { $0.updatedAt > $1.updatedAt }).first else {
+            return "No files are being processed"
+        }
+        let queued = activeAutomaticFileProcessingItems.count
+        let queueText = queued > 1 ? settings.localizedFormat("%d files in queue", queued) : item.fileName
+        return "\(item.subtitle) · \(queueText)"
+    }
 
     var activeWatchDirectoryCount: Int {
         watchDirectoryStatuses.filter(\.isWatching).count
@@ -229,6 +423,41 @@ final class AppState: ObservableObject {
         )
     }
 
+    var organizationStatusTitle: String {
+        switch organizationState {
+        case .idle: return "Ready to Organize"
+        case .running:
+            switch organizationProgress?.phase {
+            case .preparing: return "Preparing Organization"
+            case .waitingForStability: return "Waiting for Files to Stabilize"
+            case .indexing: return "Building Local Index"
+            case .organizing: return "Moving Files"
+            default: return "Organizing"
+            }
+        case .paused: return "Organization Paused"
+        case .stopping: return "Stopping Organization"
+        case .stopped: return "Organization Stopped"
+        case .completed: return "Organization Complete"
+        case .failed: return "Organization Finished with Errors"
+        }
+    }
+
+    var organizationStatusSubtitle: String {
+        guard let progress = organizationProgress else {
+            return "Only new eligible items in watched folders are processed."
+        }
+        if let fileName = progress.currentFileName,
+           organizationState == .running {
+            return settings.localizedFormat("Processing %@", fileName)
+        }
+        return settings.localizedFormat(
+            "%d moved · %d skipped · %d failed",
+            progress.moved,
+            progress.skipped,
+            progress.failed
+        )
+    }
+
     init(store: SQLiteStore = .shared,
          settings: AppSettings = .shared,
          organizeRoot: URL? = nil,
@@ -236,6 +465,7 @@ final class AppState: ObservableObject {
         self.store = store
         self.settings = settings
         self.startsServicesAutomatically = startAutomatically
+        self.systemNotificationsEnabled = startAutomatically
         self.updates = AppUpdateService(settings: settings, enabled: startAutomatically)
         self.shouldSynchronizeManagedFiles = organizeRoot != nil || !AppState.isRunningTests
         self.shouldIndexManagedFiles = startAutomatically
@@ -243,6 +473,7 @@ final class AppState: ObservableObject {
         let indexer = IndexerService(store: store, settings: settings)
         let chat = ChatService(store: store, settings: settings, vectorStore: indexer.vectorStore)
         let ollama = OllamaServiceManager()
+        let reranker = RerankerServiceManager()
         let docling = DoclingServiceManager()
         let paddleOCR = PaddleOCRServiceManager()
         // The watcher depends on the organizer and indexer, so create those first.
@@ -256,16 +487,41 @@ final class AppState: ObservableObject {
         self.indexer = indexer
         self.chat = chat
         self.ollama = ollama
+        self.reranker = reranker
         self.docling = docling
         self.paddleOCR = paddleOCR
         self.watcher = watcher
+        if startAutomatically {
+            SystemNotificationService.shared.configure()
+        }
+        AppLifecycleCoordinator.shared.register(self)
         watcher.onDirectoryStatusChange = { [weak self] statuses in
             Task { @MainActor [weak self] in
                 self?.applyWatchDirectoryStatuses(statuses)
             }
         }
+        watcher.onAutomaticFileProcessing = { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.applyAutomaticFileProcessing(event)
+            }
+        }
+        organizer.onAutomaticOrganizationUpdate = { [weak self] fileID, stage, detail in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let fileName = (try? self.store.file(id: fileID))?.name,
+                      !fileName.isEmpty else { return }
+                self.applyAutomaticFileProcessing(
+                    AutomaticFileProcessingEvent(
+                        fileID: fileID,
+                        fileName: fileName,
+                        stage: stage
+                    ),
+                    detail: detail
+                )
+            }
+        }
         organizer.onLibraryChange = { [weak self] in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor in self?.scheduleLibraryRefresh() }
         }
         self.settings.attach(store: store, organizer: organizer, indexer: indexer, chat: chat, watcher: watcher)
         // SwiftUI observes AppState; forward nested changes so settings, installation progress, and service state refresh immediately.
@@ -278,6 +534,9 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
         ollama.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        reranker.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
         docling.objectWillChange
@@ -299,6 +558,19 @@ final class AppState: ObservableObject {
         updates.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        if startAutomatically {
+            settings.$quickSearchShortcutKeyCode
+                .combineLatest(settings.$quickSearchShortcutModifiers)
+                .removeDuplicates { lhs, rhs in
+                    lhs.0 == rhs.0 && lhs.1 == rhs.1
+                }
+                .sink { [weak self] keyCode, modifiers in
+                    self?.registerQuickSearchShortcut(
+                        QuickSearchShortcut(keyCode: keyCode, modifiers: modifiers)
+                    )
+                }
+                .store(in: &cancellables)
+        }
         // Organizer batching and settings access the current indexer through a proxy.
         AppStateIndexerProxy.shared.indexer = indexer
         // The XCTest host constructs a default AppState; migrate persistent state only for production launches or explicitly injected test stores.
@@ -324,40 +596,191 @@ final class AppState: ObservableObject {
         // Insert default rules on first launch.
         try? store.seedDefaultRulesIfNeeded()
         // Queue missing indexes after warm-up to avoid processing the same file twice at startup.
-        refresh(allowManagedIndexing: false)
+        refreshInBackground(allowManagedIndexing: false)
         Task { [weak self] in
             guard let self else { return }
             await indexer.warmup()
             _ = await organizer.invalidateChangedManagedFileIndexes()
             if !self.refreshIndexConfigurationState() {
-                self.refresh()
+                self.refreshInBackground()
             }
         }
         refreshChatSessions()
+        refreshLibrarySearchHistory()
         // Do not scan folders before initial setup completes; the user must first decide how to handle existing files.
         if settings.onboardingCompleted {
             startWatching()
         }
-        Task {
-            async let ollamaRefresh: Void = ollama.refresh(host: settings.ollamaHost)
-            async let paddleRefresh: Void = paddleOCR.refresh()
-            _ = await (ollamaRefresh, paddleRefresh)
-            async let ollamaUpdates: Void = ollama.checkForUpdates()
-            async let doclingUpdates: Void = docling.checkForUpdates()
-            async let paddleUpdates: Void = paddleOCR.checkForUpdates()
-            _ = await (ollamaUpdates, doclingUpdates, paddleUpdates)
+        Task { [weak self] in
+            await self?.refreshModelServiceStatus()
+        }
+    }
+
+    private func applyAutomaticFileProcessing(
+        _ event: AutomaticFileProcessingEvent,
+        detail: String? = nil
+    ) {
+        let now = Date()
+        let previousStage = automaticFileProcessingItems.first(where: { $0.id == event.fileID })?.stage
+        let resolvedFileName: String?
+        if event.fileName == "File" || event.fileName.isEmpty {
+            resolvedFileName = (try? store.file(id: event.fileID))?.name
+        } else {
+            resolvedFileName = event.fileName
+        }
+        if let index = automaticFileProcessingItems.firstIndex(where: { $0.id == event.fileID }) {
+            if let resolvedFileName, !resolvedFileName.isEmpty {
+                automaticFileProcessingItems[index].fileName = resolvedFileName
+            }
+            automaticFileProcessingItems[index].stage = event.stage
+            automaticFileProcessingItems[index].detail = detail
+            automaticFileProcessingItems[index].updatedAt = now
+        } else {
+            // An unidentified organizer event is not useful in the recent activity UI.
+            guard let resolvedFileName, !resolvedFileName.isEmpty else { return }
+            automaticFileProcessingItems.append(AutomaticFileProcessingItem(
+                id: event.fileID,
+                fileName: resolvedFileName,
+                stage: event.stage,
+                detail: detail,
+                updatedAt: now
+            ))
+        }
+        automaticFileProcessingItems.sort { $0.updatedAt > $1.updatedAt }
+        // Preserve a compact recent history while keeping all work that is still active.
+        let active = automaticFileProcessingItems.filter(\.isActive)
+        let recent = automaticFileProcessingItems.filter { !$0.isActive }.prefix(8)
+        automaticFileProcessingItems = active + recent
+        if !indexingState.isActive {
+            statusText = hasActiveAutomaticFileProcessing
+                ? automaticProcessingStatusTitle
+                : watchStatusTitle
+        }
+        guard previousStage != event.stage else { return }
+        switch event.stage {
+        case .completed:
+            pendingCompletedProcessingCount += 1
+            lastCompletedProcessingFileName = resolvedFileName
+            if !hasActiveAutomaticFileProcessing && !organizationState.isActive {
+                postCompletedProcessingNotification()
+            }
+        case .failed:
+            let fileName = resolvedFileName ?? event.fileName
+            postSystemNotification(
+                titleKey: "File Processing Failed",
+                body: settings.localizedFormat(
+                    "FileNest could not process %@. Open FileNest for details.",
+                    fileName
+                ),
+                identifier: "filenest.processing.failed.\(event.fileID)"
+            )
+        case .queued, .indexing, .waitingForOrganization, .organizing:
+            break
+        }
+    }
+
+    private func postCompletedProcessingNotification() {
+        guard pendingCompletedProcessingCount > 0 else { return }
+        let body: String
+        if pendingCompletedProcessingCount == 1, let fileName = lastCompletedProcessingFileName {
+            body = settings.localizedFormat("%@ finished indexing and processing.", fileName)
+        } else {
+            body = settings.localizedFormat(
+                "%d files finished indexing and processing.",
+                pendingCompletedProcessingCount
+            )
+        }
+        postSystemNotification(
+            titleKey: "File Processing Complete",
+            body: body,
+            identifier: "filenest.processing.complete"
+        )
+        pendingCompletedProcessingCount = 0
+        lastCompletedProcessingFileName = nil
+    }
+
+    private func postSystemNotification(titleKey: String, body: String, identifier: String) {
+        guard systemNotificationsEnabled else { return }
+        SystemNotificationService.shared.post(
+            title: settings.localized(titleKey),
+            body: body,
+            identifier: identifier
+        )
+    }
+
+    private func scheduleLibraryRefresh() {
+        scheduledRefreshTask?.cancel()
+        scheduledRefreshTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 150_000_000)
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.refreshInBackground()
+            self.scheduledRefreshTask = nil
         }
     }
 
     func refresh(allowManagedIndexing: Bool = true) {
+        refreshGeneration &+= 1
         _ = try? store.removeTransientFiles(preservingRoot: organizer.organizeRoot)
+        let refreshedFiles: [FileRecord]
         if shouldSynchronizeManagedFiles {
-            files = FileRecord.sortedByNewestAdded(organizer.reconcileManagedFiles())
+            refreshedFiles = organizer.reconcileManagedFiles()
         } else {
-            files = FileRecord.sortedByNewestAdded(((try? store.allFiles()) ?? []).filter {
+            refreshedFiles = ((try? store.allFiles()) ?? []).filter {
                 FileManager.default.fileExists(atPath: $0.path)
-            })
+            }
         }
+        applyLibrarySnapshot(
+            files: refreshedFiles,
+            rules: (try? store.allRules()) ?? [],
+            allowManagedIndexing: allowManagedIndexing
+        )
+    }
+
+    func refreshInBackground(allowManagedIndexing: Bool = true) {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        backgroundRefreshTask?.cancel()
+        let store = store
+        let organizer = organizer
+        let organizeRoot = organizer.organizeRoot
+        let shouldSynchronizeManagedFiles = shouldSynchronizeManagedFiles
+        backgroundRefreshTask = Task { [weak self] in
+            let refreshedFiles: [FileRecord]
+            if shouldSynchronizeManagedFiles {
+                refreshedFiles = await organizer.reconcileManagedFilesAsync()
+            } else {
+                refreshedFiles = await Task.detached(priority: .utility) {
+                    _ = try? store.removeTransientFiles(preservingRoot: organizeRoot)
+                    return ((try? store.allFiles()) ?? []).filter {
+                        FileManager.default.fileExists(atPath: $0.path)
+                    }
+                }.value
+            }
+            let refreshedRules = await Task.detached(priority: .utility) {
+                (try? store.allRules()) ?? []
+            }.value
+            guard let self,
+                  !Task.isCancelled,
+                  self.refreshGeneration == generation else { return }
+            self.applyLibrarySnapshot(
+                files: refreshedFiles,
+                rules: refreshedRules,
+                allowManagedIndexing: allowManagedIndexing
+            )
+            self.backgroundRefreshTask = nil
+        }
+    }
+
+    private func applyLibrarySnapshot(
+        files refreshedFiles: [FileRecord],
+        rules refreshedRules: [Rule],
+        allowManagedIndexing: Bool
+    ) {
+        files = FileRecord.sortedByNewestAdded(refreshedFiles)
         if let previewedFile {
             let refreshedPreview = files.first { candidate in
                 if let id = previewedFile.id { return candidate.id == id }
@@ -367,7 +790,7 @@ final class AppState: ObservableObject {
                 FileManager.default.fileExists(atPath: previewedFile.path) ? previewedFile : nil
             )
         }
-        rules = (try? store.allRules()) ?? []
+        rules = refreshedRules
         indexedCount = files.filter { $0.indexedAt != nil }.count
         if shouldIndexManagedFiles && allowManagedIndexing { indexNewManagedFilesIfNeeded() }
         refreshStatistics()
@@ -551,8 +974,79 @@ final class AppState: ObservableObject {
         previewedFile = file
     }
 
+    func presentAttachedFilePreview(path: String) {
+        if let record = files.first(where: { $0.path == path }) ?? (try? store.file(path: path)) {
+            presentFilePreview(record)
+            return
+        }
+
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        let record = FileRecord(
+            id: nil,
+            path: path,
+            name: url.lastPathComponent,
+            ext: url.pathExtension,
+            size: (attributes?[.size] as? NSNumber)?.int64Value ?? 0,
+            mtime: (attributes?[.modificationDate] as? Date) ?? Date(),
+            category: FileCategory.from(extension: url.pathExtension).rawValue,
+            sourceDir: url.deletingLastPathComponent().path,
+            indexedAt: nil,
+            contentHash: nil,
+            title: nil,
+            contentText: nil
+        )
+        presentFilePreview(record)
+    }
+
     func closeFilePreview() {
         previewedFile = nil
+    }
+
+    func toggleQuickSearchPanel() {
+        if quickSearchPanelController == nil {
+            quickSearchPanelController = QuickSearchPanelController(
+                settings: settings,
+                submitSearch: { [weak self] query in
+                    guard let self else { return }
+                    self.requestLibrarySearch(query)
+                    MainWindowPresenter.shared.present()
+                }
+            )
+        }
+        quickSearchPanelController?.toggle()
+    }
+
+    func requestLibrarySearch(_ rawQuery: String) {
+        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        closeFilePreview()
+        librarySearchRequest = LibrarySearchRequest(query: query)
+    }
+
+    func consumeLibrarySearchRequest(_ requestID: UUID) {
+        guard librarySearchRequest?.id == requestID else { return }
+        librarySearchRequest = nil
+    }
+
+    private func registerQuickSearchShortcut(_ shortcut: QuickSearchShortcut) {
+        let status = globalHotKeyService.register(shortcut: shortcut) { [weak self] in
+            self?.toggleQuickSearchPanel()
+        }
+        quickSearchShortcutRegistrationError = status == noErr
+            ? nil
+            : "The shortcut could not be registered. Choose a different combination."
+        guard status != noErr else { return }
+        AppLogService.shared.write(
+            "quick search shortcut registration failed",
+            category: .appConfiguration,
+            level: .warning,
+            metadata: [
+                "shortcut": shortcut.displayName,
+                "status": "\(status)",
+            ]
+        )
     }
 
     @discardableResult
@@ -560,11 +1054,28 @@ final class AppState: ObservableObject {
         guard !reindexButtonsDisabled,
               let id = file.id,
               FileManager.default.fileExists(atPath: file.path) else { return false }
+        applyAutomaticFileProcessing(AutomaticFileProcessingEvent(
+            fileID: id,
+            fileName: file.name,
+            stage: .queued
+        ))
         let succeeded = await indexer.indexFile(
             id: id,
             force: true,
-            forceVectorization: true
+            forceVectorization: true,
+            stageProgress: { [weak self] stage in
+                await self?.applyAutomaticFileProcessing(AutomaticFileProcessingEvent(
+                    fileID: id,
+                    fileName: file.name,
+                    stage: .indexing(stage)
+                ))
+            }
         )
+        applyAutomaticFileProcessing(AutomaticFileProcessingEvent(
+            fileID: id,
+            fileName: file.name,
+            stage: succeeded ? .completed : .failed("Indexing failed")
+        ))
         refresh(allowManagedIndexing: false)
         return succeeded
     }
@@ -618,9 +1129,98 @@ final class AppState: ObservableObject {
     }
 
     func managedSearchResults(matching keyword: String) async -> [LibrarySearchResult] {
-        await chat.searchLibrary(keyword).filter {
-            organizer.isManagedPath($0.file.path) && FileManager.default.fileExists(atPath: $0.file.path)
+        await chat.searchLibrary(
+            keyword,
+            managedRootPath: organizer.organizeRoot.standardizedFileURL.path
+        )
+    }
+
+    func cachedLibrarySearch(
+        matching query: String,
+        isSmartSearch: Bool
+    ) -> CachedLibrarySearch? {
+        guard let revision = try? store.libraryRevision(),
+              let record = try? store.cachedLibrarySearch(
+                query: query,
+                isSmartSearch: isSmartSearch
+              ),
+              record.revision == revision,
+              let cached = try? JSONDecoder().decode(CachedLibrarySearchPayload.self, from: record.payload) else {
+            return nil
         }
+
+        let currentFiles = files.isEmpty ? ((try? store.allFiles()) ?? []) : files
+        let filesByID = Dictionary(uniqueKeysWithValues: currentFiles.compactMap { file in
+            file.id.map { ($0, file) }
+        })
+        let filesByPath = Dictionary(uniqueKeysWithValues: currentFiles.map { ($0.path, $0) })
+        let hydratedResults = cached.results.compactMap { result -> LibrarySearchResult? in
+            let currentFile = result.fileID.flatMap { filesByID[$0] } ?? filesByPath[result.path]
+            guard let currentFile,
+                  FileManager.default.fileExists(atPath: currentFile.path) else { return nil }
+            return LibrarySearchResult(
+                file: currentFile,
+                score: result.score,
+                confidence: result.confidence,
+                matchKind: result.matchKind,
+                snippet: result.snippet,
+                sectionPath: result.sectionPath,
+                pageStart: result.pageStart,
+                pageEnd: result.pageEnd
+            )
+        }
+        return CachedLibrarySearch(
+            results: hydratedResults,
+            smartPlan: cached.smartPlan,
+            usedAI: cached.usedAI
+        )
+    }
+
+    func saveLibrarySearch(
+        query: String,
+        results: [LibrarySearchResult],
+        smartPlan: SmartLibrarySearchPlan? = nil,
+        usedAI: Bool = false,
+        recordHistory: Bool = true
+    ) {
+        let cached = CachedLibrarySearchPayload(
+            results: results.map(CachedLibrarySearchResult.init),
+            smartPlan: smartPlan,
+            usedAI: usedAI
+        )
+        guard let payload = try? JSONEncoder().encode(cached),
+              let revision = try? store.libraryRevision() else { return }
+        do {
+            try store.saveLibrarySearch(
+                query: query,
+                isSmartSearch: smartPlan != nil,
+                resultCount: results.count,
+                revision: revision,
+                payload: payload,
+                recordHistory: recordHistory
+            )
+            refreshLibrarySearchHistory()
+        } catch {
+            AppLogService.shared.write(
+                "failed to save library search cache: \(error)",
+                category: .appConfiguration,
+                level: .warning
+            )
+        }
+    }
+
+    func refreshLibrarySearchHistory() {
+        librarySearchHistory = (try? store.librarySearchHistory(limit: 20)) ?? []
+    }
+
+    func deleteLibrarySearchHistory(_ id: Int64) {
+        try? store.deleteLibrarySearchHistory(id: id)
+        refreshLibrarySearchHistory()
+    }
+
+    func clearLibrarySearchHistory() {
+        try? store.clearLibrarySearchHistory()
+        refreshLibrarySearchHistory()
     }
 
     func managedSmartSearchResults(
@@ -629,16 +1229,10 @@ final class AppState: ObservableObject {
     ) async -> SmartLibrarySearchResponse {
         let response = await chat.smartSearchLibrary(
             query,
+            managedRootPath: organizer.organizeRoot.standardizedFileURL.path,
             onIntentUpdate: onIntentUpdate
         )
-        let results = response.results.filter {
-            organizer.isManagedPath($0.file.path) && FileManager.default.fileExists(atPath: $0.file.path)
-        }
-        return SmartLibrarySearchResponse(
-            results: results,
-            plan: response.plan,
-            usedAI: response.usedAI
-        )
+        return response
     }
 
     func indexedChunks(fileID: Int64) -> [IndexedDocumentChunk] {
@@ -662,7 +1256,87 @@ final class AppState: ObservableObject {
     }
 
     func refreshStatistics(days: Int = 14) {
-        statistics = (try? store.statistics(days: days)) ?? .empty
+        let safeDays = max(1, days)
+        guard startsServicesAutomatically else {
+            statistics = (try? store.statistics(days: safeDays)) ?? .empty
+            return
+        }
+        if statisticsTask != nil {
+            if activeStatisticsDays != safeDays { pendingStatisticsDays = safeDays }
+            return
+        }
+        pendingStatisticsDays = safeDays
+        startStatisticsRefreshIfNeeded()
+    }
+
+    private func startStatisticsRefreshIfNeeded() {
+        guard statisticsTask == nil, let days = pendingStatisticsDays else { return }
+        pendingStatisticsDays = nil
+        activeStatisticsDays = days
+        let store = store
+        statisticsTask = Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                (try? store.statistics(days: days)) ?? .empty
+            }.value
+            guard let self else { return }
+            self.statistics = result
+            self.statisticsTask = nil
+            self.activeStatisticsDays = nil
+            self.startStatisticsRefreshIfNeeded()
+        }
+    }
+
+    func refreshModelServicesIfNeeded(force: Bool = false) async {
+        await refreshModelServiceStatus()
+
+        if let task = modelVersionCheckTask {
+            await task.value
+            return
+        }
+        guard force || settings.shouldCheckAIModelVersions() else { return }
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            async let ollamaUpdates: Void = ollama.checkForUpdates()
+            async let doclingUpdates: Void = docling.checkForUpdates()
+            async let paddleUpdates: Void = paddleOCR.checkForUpdates()
+            _ = await (ollamaUpdates, doclingUpdates, paddleUpdates)
+        }
+        modelVersionCheckTask = task
+        await task.value
+        settings.setLastAIModelVersionCheckAt(Date())
+        modelVersionCheckTask = nil
+    }
+
+    private func refreshModelServiceStatus() async {
+        if let task = modelServiceStatusRefreshTask {
+            await task.value
+            return
+        }
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            async let ollamaRefresh: Void = ollama.refresh(host: settings.ollamaHost)
+            async let paddleRefresh: Void = paddleOCR.refresh()
+            docling.refresh()
+            async let rerankerRefresh: Void = reranker.refresh()
+            _ = await (ollamaRefresh, paddleRefresh, rerankerRefresh)
+            if settings.rerankerSource == AppSettings.RerankerSource.local.rawValue,
+               RerankerServiceManager.isModelInstalled,
+               !reranker.isRunning {
+                await reranker.start()
+            }
+        }
+        modelServiceStatusRefreshTask = task
+        await task.value
+        modelServiceStatusRefreshTask = nil
+    }
+
+    /// Long-lived local runtimes are owned by FileNest and must not outlive it.
+    /// Docling and PaddleOCR use short-lived job subprocesses, so they have no daemon to stop here.
+    func shutdownManagedServices() async {
+        await reranker.shutdown()
+        await ollama.stop(host: settings.ollamaHost)
     }
 
     func refreshChatSessions(selecting preferredID: Int64? = nil) {
@@ -707,12 +1381,108 @@ final class AppState: ObservableObject {
         completedChatSessionIDs.remove(sessionID)
     }
 
+    func beginChatExecution(
+        sessionID: Int64,
+        userMessage: ChatMessage?,
+        assistantMessage: ChatMessage,
+        progress: ChatProgress
+    ) {
+        chatExecutionPresentations[sessionID] = ChatExecutionPresentation(
+            userMessage: userMessage,
+            assistantMessage: assistantMessage,
+            progress: progress
+        )
+        markChatRunning(sessionID)
+    }
+
+    func updateChatExecutionUserMessage(sessionID: Int64, message: ChatMessage) {
+        guard var presentation = chatExecutionPresentations[sessionID] else { return }
+        presentation.userMessage = message
+        chatExecutionPresentations[sessionID] = presentation
+    }
+
+    func updateChatExecutionProgress(sessionID: Int64, progress: ChatProgress?) {
+        guard var presentation = chatExecutionPresentations[sessionID] else { return }
+        presentation.progress = progress
+        chatExecutionPresentations[sessionID] = presentation
+    }
+
+    func appendChatExecutionDelta(sessionID: Int64, delta: String) {
+        guard var presentation = chatExecutionPresentations[sessionID] else { return }
+        presentation.progress = nil
+        presentation.assistantMessage.content += delta
+        chatExecutionPresentations[sessionID] = presentation
+    }
+
+    func completeChatExecution(sessionID: Int64, message: ChatMessage) {
+        guard var presentation = chatExecutionPresentations[sessionID] else { return }
+        presentation.progress = nil
+        presentation.assistantMessage = message
+        chatExecutionPresentations[sessionID] = presentation
+    }
+
+    func clearChatExecution(sessionID: Int64) {
+        chatExecutionPresentations.removeValue(forKey: sessionID)
+    }
+
+    func presentedChatMessages(sessionID: Int64, persistedMessages: [ChatMessage]) -> [ChatMessage] {
+        guard let presentation = chatExecutionPresentations[sessionID] else {
+            return persistedMessages
+        }
+        var messages = persistedMessages
+        if let userMessage = presentation.userMessage {
+            upsertPresentedMessage(userMessage, into: &messages)
+        }
+        upsertPresentedMessage(presentation.assistantMessage, into: &messages)
+        return messages
+    }
+
+    func refreshChatSessionsPreservingSelection() {
+        refreshChatSessions(selecting: selectedChatSessionID)
+    }
+
+    private func upsertPresentedMessage(_ message: ChatMessage, into messages: inout [ChatMessage]) {
+        if let id = message.id,
+           let index = messages.firstIndex(where: { $0.id == id }) {
+            messages[index] = message
+        } else {
+            messages.append(message)
+        }
+    }
+
     func newChat(attachedFilePath: String? = nil) {
+        fileChatReturnSessionID = nil
+        fileChatReturnDestination = nil
         switchChatComposerDraft(to: "new", resetDestination: true)
         isDraftChat = true
         draftChatAttachmentPath = attachedFilePath
         selectedChatSessionID = nil
         chatMessages = []
+    }
+
+    func startFileChat(
+        attachedFilePath: String,
+        returnDestination: FileChatReturnDestination
+    ) {
+        let previousSessionID = selectedChatSessionID
+        newChat(attachedFilePath: attachedFilePath)
+        fileChatReturnSessionID = previousSessionID
+        fileChatReturnDestination = returnDestination
+    }
+
+    @discardableResult
+    func returnFromFileChat() -> FileChatReturnDestination {
+        let destination = fileChatReturnDestination ?? .chat
+        let previousSessionID = fileChatReturnSessionID
+        fileChatReturnSessionID = nil
+        fileChatReturnDestination = nil
+
+        if let previousSessionID {
+            selectChat(previousSessionID)
+        } else {
+            newChat()
+        }
+        return destination
     }
 
     func persistChatForQuestion() -> Int64? {
@@ -729,6 +1499,8 @@ final class AppState: ObservableObject {
 
     func selectChat(_ id: Int64) {
         guard selectedChatSessionID != id else { return }
+        fileChatReturnSessionID = nil
+        fileChatReturnDestination = nil
         switchChatComposerDraft(to: chatComposerDraftKey(sessionID: id))
         isDraftChat = false
         draftChatAttachmentPath = nil
@@ -756,6 +1528,7 @@ final class AppState: ObservableObject {
     func deleteChat(_ id: Int64) {
         runningChatSessionIDs.remove(id)
         completedChatSessionIDs.remove(id)
+        chatExecutionPresentations.removeValue(forKey: id)
         chatComposerDrafts.removeValue(forKey: chatComposerDraftKey(sessionID: id))
         chat.deleteSession(id: id)
         refreshChatSessions()
@@ -764,6 +1537,7 @@ final class AppState: ObservableObject {
     func clearAllChats() {
         runningChatSessionIDs.removeAll()
         completedChatSessionIDs.removeAll()
+        chatExecutionPresentations.removeAll()
         chat.clearHistory()
         chatComposerDrafts.removeAll()
         activeChatComposerDraftKey = "new"
@@ -869,10 +1643,8 @@ final class AppState: ObservableObject {
             level: .notice,
             metadata: ["directories": "\(paths.count)"]
         )
-        if !isWatching { startWatching() }
-        statusText = "Organizing Existing Files"
-        watcher.organizeExistingEntries(in: paths)
-        restoreSteadyStatus(after: 2_000_000_000)
+        watcher.clearPreservedEntries(in: paths)
+        organizeNow(in: paths, includePreservedEntries: true)
     }
 
     func startWatching() {
@@ -889,16 +1661,148 @@ final class AppState: ObservableObject {
     }
 
     func organizeNow() {
-        statusText = "Organizing"
-        organizer.runOnce()
-        restoreSteadyStatus(after: 2_000_000_000)
+        organizeNow(in: nil, includePreservedEntries: false)
+    }
+
+    private func organizeNow(in directories: [String]?, includePreservedEntries: Bool) {
+        guard !organizationState.isActive,
+              !indexingState.isActive,
+              organizationTask == nil else { return }
+        let token = UUID()
+        organizationJobToken = token
+        organizationState = .running
+        organizationProgress = OrganizationJobProgress(
+            phase: .preparing,
+            completed: 0,
+            total: 0,
+            moved: 0,
+            skipped: 0,
+            failed: 0,
+            currentFileName: nil,
+            indexingStage: nil
+        )
+        statusText = organizationStatusTitle
+        AppLogService.shared.write(
+            "manual organization job started",
+            category: .organizeQueue,
+            level: .notice,
+            metadata: [
+                "directories": "\((directories ?? settings.watchDirs).count)",
+                "includePreservedEntries": "\(includePreservedEntries)",
+            ]
+        )
+
+        organizationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.organizationGate.reset()
+            let result = await self.watcher.organizePendingEntries(
+                in: directories,
+                includePreservedEntries: includePreservedEntries,
+                checkpoint: { [organizationGate = self.organizationGate] in
+                    await organizationGate.waitUntilRunnable()
+                }
+            ) { [weak self] progress in
+                guard let self, self.organizationJobToken == token else { return }
+                var displayedProgress = progress
+                if self.organizationState == .paused {
+                    self.organizationPhaseBeforePause = progress.phase
+                    displayedProgress.phase = .paused
+                }
+                self.organizationProgress = displayedProgress
+                if self.organizationState == .running {
+                    self.statusText = self.organizationStatusTitle
+                }
+            }
+            guard self.organizationJobToken == token else { return }
+            let wasStopped = result.stopped || self.organizationState == .stopping || Task.isCancelled
+            self.organizationState = wasStopped
+                ? .stopped
+                : (result.failed > 0 ? .failed : .completed)
+            if var finalProgress = self.organizationProgress {
+                finalProgress.phase = wasStopped
+                    ? .stopped
+                    : (result.failed > 0 ? .failed : .completed)
+                finalProgress.currentFileName = nil
+                finalProgress.indexingStage = nil
+                self.organizationProgress = finalProgress
+            }
+            self.organizationTask = nil
+            self.organizationJobToken = nil
+            self.statusText = self.organizationStatusTitle
+            self.refreshInBackground()
+            AppLogService.shared.write(
+                wasStopped ? "manual organization job stopped" : "manual organization job finished",
+                category: .organizeQueue,
+                level: result.failed > 0 ? .warning : .notice,
+                metadata: [
+                    "completed": "\(result.completed)",
+                    "total": "\(result.total)",
+                    "moved": "\(result.moved)",
+                    "skipped": "\(result.skipped)",
+                    "failed": "\(result.failed)",
+                ]
+            )
+            self.pendingCompletedProcessingCount = 0
+            self.lastCompletedProcessingFileName = nil
+            self.postSystemNotification(
+                titleKey: self.organizationStatusTitle,
+                body: self.settings.localizedFormat(
+                    "%d moved · %d skipped · %d failed",
+                    result.moved,
+                    result.skipped,
+                    result.failed
+                ),
+                identifier: "filenest.organization.status"
+            )
+        }
+    }
+
+    func pauseOrganization() {
+        guard organizationState == .running else { return }
+        organizationPhaseBeforePause = organizationProgress?.phase ?? .preparing
+        organizationState = .paused
+        if var progress = organizationProgress {
+            progress.phase = .paused
+            organizationProgress = progress
+        }
+        statusText = organizationStatusTitle
+        Task { await organizationGate.pause() }
+    }
+
+    func resumeOrganization() {
+        guard organizationState == .paused else { return }
+        organizationState = .running
+        if var progress = organizationProgress {
+            progress.phase = organizationPhaseBeforePause
+            organizationProgress = progress
+        }
+        statusText = organizationStatusTitle
+        Task { await organizationGate.resume() }
+    }
+
+    func stopOrganization() {
+        guard organizationState == .running || organizationState == .paused else { return }
+        organizationState = .stopping
+        if var progress = organizationProgress {
+            progress.phase = .stopping
+            organizationProgress = progress
+        }
+        statusText = organizationStatusTitle
+        organizationTask?.cancel()
+        Task {
+            await organizationGate.stop()
+            await indexer.cancelAll()
+        }
     }
 
     func reindexAll() {
+        reindexUnindexedFileCount = (try? store.fileIndexCounts().unindexed) ?? 0
         pendingAdvancedReindexCategories = changedContentCategories()
         selectedAdvancedReindexCategories = []
         isEmbeddingChangeReindexSelected = true
         isUnindexedFilesReindexSelected = true
+        selectedRAGReindexStages = hasEmbeddingConfigurationChange ? [.embeddings, .retrievalIndex] : []
+        isFullPipelineReindexSelected = false
         isReindexAdvancedExpanded = false
         isIndexConfigurationPromptPresented = false
         reindexConfirmationStep = .selection
@@ -916,17 +1820,23 @@ final class AppState: ObservableObject {
     }
 
     var unindexedFileCount: Int {
-        ((try? store.allFiles()) ?? []).filter { $0.id != nil && $0.indexedAt == nil }.count
+        reindexUnindexedFileCount
     }
 
     var canAdvanceReindexConfirmation: Bool {
         hasDefaultEmbeddingRebuildSelection
             || (isUnindexedFilesReindexSelected && unindexedFileCount > 0)
             || !selectedAdvancedReindexCategories.isEmpty
+            || !selectedRAGReindexStages.isEmpty
     }
 
     func setEmbeddingChangeReindexSelected(_ selected: Bool) {
         isEmbeddingChangeReindexSelected = selected
+        if selected && hasEmbeddingConfigurationChange {
+            selectedRAGReindexStages.formUnion(RAGReindexStage.embeddings.downstreamStages)
+        } else if !selected {
+            selectedRAGReindexStages.remove(.embeddings)
+        }
     }
 
     func setUnindexedFilesReindexSelected(_ selected: Bool) {
@@ -937,9 +1847,81 @@ final class AppState: ObservableObject {
         guard pendingAdvancedReindexCategories.contains(category) else { return }
         if selected {
             selectedAdvancedReindexCategories.insert(category)
+            selectedRAGReindexStages.formUnion(reindexStage(for: category).downstreamStages)
         } else {
             selectedAdvancedReindexCategories.remove(category)
         }
+    }
+
+    func setRAGReindexStage(_ stage: RAGReindexStage, selected: Bool) {
+        isFullPipelineReindexSelected = false
+        if selected {
+            selectedRAGReindexStages.formUnion(stage.downstreamStages)
+        } else {
+            for candidate in RAGReindexStage.allCases
+            where candidate.downstreamStages.contains(stage) {
+                selectedRAGReindexStages.remove(candidate)
+            }
+            if stage == .embeddings { isEmbeddingChangeReindexSelected = false }
+        }
+        synchronizeAdvancedCategoriesFromStages()
+    }
+
+    func setFullPipelineReindexSelected(_ selected: Bool) {
+        isFullPipelineReindexSelected = selected
+        if selected {
+            selectedRAGReindexStages = [
+                .parsingAndOCR, .structuredChunking, .embeddings, .retrievalIndex,
+            ]
+            if settings.rerankerSource == AppSettings.RerankerSource.local.rawValue,
+               RerankerServiceManager.isModelInstalled {
+                selectedRAGReindexStages.insert(.rerankerRuntime)
+            }
+        } else {
+            selectedRAGReindexStages = []
+        }
+        if selected {
+            selectedAdvancedReindexCategories = pendingAdvancedReindexCategories
+            isEmbeddingChangeReindexSelected = true
+            isUnindexedFilesReindexSelected = true
+        }
+    }
+
+    func hasDetectedChange(for stage: RAGReindexStage) -> Bool {
+        switch stage {
+        case .parsingAndOCR:
+            return !pendingAdvancedReindexCategories.intersection([
+                .documentParsing, .ocr, .indexingScope,
+            ]).isEmpty
+        case .structuredChunking:
+            return pendingAdvancedReindexCategories.contains(.chunking)
+        case .embeddings:
+            return hasEmbeddingConfigurationChange
+                || pendingAdvancedReindexCategories.contains(.serviceEndpoint)
+        case .retrievalIndex:
+            return false
+        case .rerankerRuntime:
+            if case .failed = reranker.state { return true }
+            return settings.rerankerSource == AppSettings.RerankerSource.local.rawValue
+                && RerankerServiceManager.isModelInstalled
+                && !reranker.isRunning
+        }
+    }
+
+    private func reindexStage(for category: IndexContentChangeCategory) -> RAGReindexStage {
+        switch category {
+        case .documentParsing, .ocr, .indexingScope: return .parsingAndOCR
+        case .chunking: return .structuredChunking
+        case .serviceEndpoint: return .embeddings
+        }
+    }
+
+    private func synchronizeAdvancedCategoriesFromStages() {
+        selectedAdvancedReindexCategories = Set(pendingAdvancedReindexCategories.filter {
+            selectedRAGReindexStages.contains(reindexStage(for: $0))
+        })
+        isEmbeddingChangeReindexSelected = selectedRAGReindexStages.contains(.embeddings)
+            && hasEmbeddingConfigurationChange
     }
 
     func advanceReindexConfirmation() {
@@ -955,25 +1937,53 @@ final class AppState: ObservableObject {
     func cancelReindexConfirmation() {
         reindexConfirmationStep = nil
         selectedAdvancedReindexCategories = []
+        selectedRAGReindexStages = []
+        isFullPipelineReindexSelected = false
     }
 
     func confirmReindex() {
         guard reindexConfirmationStep == .finalConfirmation else { return }
-        let rebuildEmbedding = hasDefaultEmbeddingRebuildSelection
+        let stages = selectedRAGReindexStages
+        let rebuildEmbedding = stages.contains(.embeddings)
         let includeUnindexedFiles = isUnindexedFilesReindexSelected && unindexedFileCount > 0
+        let forcesSourceReprocessing = stages.contains(.parsingAndOCR)
+            || stages.contains(.structuredChunking)
         let contentCategories = selectedAdvancedReindexCategories
             .intersection(pendingAdvancedReindexCategories)
-        guard rebuildEmbedding || includeUnindexedFiles || !contentCategories.isEmpty else { return }
+        let retrievalIndexOnly = stages.contains(.retrievalIndex)
+            && !forcesSourceReprocessing
+            && !rebuildEmbedding
+        let restartsReranker = stages.contains(.rerankerRuntime)
+        guard !stages.isEmpty || includeUnindexedFiles else { return }
         reindexConfirmationStep = nil
         selectedAdvancedReindexCategories = []
+        selectedRAGReindexStages = []
+        isFullPipelineReindexSelected = false
         isReindexAdvancedExpanded = false
-        _ = startReindex(
-            kind: rebuildEmbedding ? .vectorRebuild : .fullReindex,
-            rebuildVectorSpace: rebuildEmbedding,
-            contentCategoriesToAcknowledge: contentCategories,
-            onlyUnindexedFiles: includeUnindexedFiles && !rebuildEmbedding && contentCategories.isEmpty,
-            includeUnindexedFiles: includeUnindexedFiles && rebuildEmbedding && contentCategories.isEmpty
-        )
+        // Let SwiftUI commit the sheet dismissal before publishing indexing progress.
+        // This avoids redrawing the sheet's first step during its close animation and
+        // keeps index preparation out of the confirmation button's event cycle.
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            if restartsReranker {
+                Task { await self.reranker.restart() }
+            }
+            guard forcesSourceReprocessing || rebuildEmbedding || retrievalIndexOnly || includeUnindexedFiles else {
+                return
+            }
+            _ = self.startReindex(
+                kind: forcesSourceReprocessing
+                    ? .fullReindex
+                    : (rebuildEmbedding || retrievalIndexOnly ? .vectorRebuild : .fullReindex),
+                rebuildVectorSpace: rebuildEmbedding,
+                contentCategoriesToAcknowledge: contentCategories,
+                onlyUnindexedFiles: includeUnindexedFiles && !forcesSourceReprocessing && !rebuildEmbedding && !retrievalIndexOnly,
+                includeUnindexedFiles: includeUnindexedFiles && !forcesSourceReprocessing,
+                retrievalIndexOnly: retrievalIndexOnly,
+                forceSourceReprocessing: forcesSourceReprocessing
+            )
+        }
     }
 
     func rebuildVectorIndex() {
@@ -1039,7 +2049,9 @@ final class AppState: ObservableObject {
                 rebuildVectorSpace: lastRebuildVectorSpace,
                 contentCategoriesToAcknowledge: lastReindexContentCategories,
                 onlyUnindexedFiles: lastOnlyUnindexedFiles,
-                includeUnindexedFiles: lastIncludeUnindexedFiles
+                includeUnindexedFiles: lastIncludeUnindexedFiles,
+                retrievalIndexOnly: lastRetrievalIndexOnly,
+                forceSourceReprocessing: lastForceSourceReprocessing
             )
         }
     }
@@ -1050,7 +2062,9 @@ final class AppState: ObservableObject {
         rebuildVectorSpace: Bool,
         contentCategoriesToAcknowledge: Set<IndexContentChangeCategory> = [],
         onlyUnindexedFiles: Bool = false,
-        includeUnindexedFiles: Bool = false
+        includeUnindexedFiles: Bool = false,
+        retrievalIndexOnly: Bool = false,
+        forceSourceReprocessing: Bool = false
     ) -> Bool {
         guard !indexingState.blocksReindexButtons,
               managedSyncIndexTask == nil,
@@ -1059,19 +2073,26 @@ final class AppState: ObservableObject {
         lastRebuildVectorSpace = rebuildVectorSpace
         lastOnlyUnindexedFiles = onlyUnindexedFiles
         lastIncludeUnindexedFiles = includeUnindexedFiles
+        lastRetrievalIndexOnly = retrievalIndexOnly
+        lastForceSourceReprocessing = forceSourceReprocessing
         lastReindexContentCategories = contentCategoriesToAcknowledge
         let targetEmbeddingSignature = settings.embeddingSpaceSignature
-        let allFiles = (try? store.allFiles()) ?? []
+        let counts = (try? store.fileIndexCounts()) ?? (
+            total: files.count,
+            indexed: files.filter { $0.indexedAt != nil }.count,
+            unindexed: files.filter { $0.indexedAt == nil }.count
+        )
         let total: Int
-        if !contentCategoriesToAcknowledge.isEmpty {
-            total = allFiles.count
+        if retrievalIndexOnly {
+            total = indexer.vectorStore.count + (includeUnindexedFiles ? counts.unindexed : 0)
+        } else if forceSourceReprocessing {
+            total = counts.total
         } else if rebuildVectorSpace {
-            total = allFiles.filter { $0.indexedAt != nil }.count
-                + (includeUnindexedFiles ? allFiles.filter { $0.indexedAt == nil }.count : 0)
+            total = counts.indexed + (includeUnindexedFiles ? counts.unindexed : 0)
         } else if onlyUnindexedFiles {
-            total = allFiles.filter { $0.indexedAt == nil }.count
+            total = counts.unindexed
         } else {
-            total = allFiles.count
+            total = counts.total
         }
         AppLogService.shared.write(
             "reindex requested",
@@ -1086,6 +2107,8 @@ final class AppState: ObservableObject {
                 "includeUnindexedFiles": "\(includeUnindexedFiles)",
                 "onlyUnindexedFiles": "\(onlyUnindexedFiles)",
                 "rebuildVectorSpace": "\(rebuildVectorSpace)",
+                "retrievalIndexOnly": "\(retrievalIndexOnly)",
+                "forceSourceReprocessing": "\(forceSourceReprocessing)",
                 "total": "\(total)",
             ]
         )
@@ -1094,27 +2117,45 @@ final class AppState: ObservableObject {
         reindexTask = Task { [weak self] in
             guard let self else { return }
             await self.indexingGate.reset()
-            let succeeded = await self.indexer.rebuildAll(
-                rebuildVectorSpace: rebuildVectorSpace,
-                forceReprocessing: !contentCategoriesToAcknowledge.isEmpty,
-                onlyUnindexedFiles: onlyUnindexedFiles,
-                includeUnindexedFiles: includeUnindexedFiles,
-                checkpoint: { [indexingGate = self.indexingGate] in
-                    await indexingGate.waitUntilRunnable()
-                }
-            ) { [weak self] progress in
+            let progressHandler: @MainActor (VectorIndexRebuildProgress) -> Void = { [weak self] progress in
                 guard let self else { return }
                 self.vectorIndexRebuildProgress = progress
                 if self.indexingState != .paused && self.indexingState != .stopping {
                     self.statusText = self.indexingStatusTitle
                 }
             }
+            let succeeded: Bool
+            if retrievalIndexOnly {
+                let retrievalSucceeded = await self.indexer.rebuildRetrievalIndex(progress: progressHandler)
+                if retrievalSucceeded && includeUnindexedFiles {
+                    succeeded = await self.indexer.rebuildAll(
+                        onlyUnindexedFiles: true,
+                        checkpoint: { [indexingGate = self.indexingGate] in
+                            await indexingGate.waitUntilRunnable()
+                        },
+                        progress: progressHandler
+                    )
+                } else {
+                    succeeded = retrievalSucceeded
+                }
+            } else {
+                succeeded = await self.indexer.rebuildAll(
+                    rebuildVectorSpace: rebuildVectorSpace,
+                    forceReprocessing: forceSourceReprocessing,
+                    onlyUnindexedFiles: onlyUnindexedFiles,
+                    includeUnindexedFiles: includeUnindexedFiles,
+                    checkpoint: { [indexingGate = self.indexingGate] in
+                        await indexingGate.waitUntilRunnable()
+                    },
+                    progress: progressHandler
+                )
+            }
 
             let stopped = self.indexingState == .stopping || self.vectorIndexRebuildProgress?.phase == .stopped
             let progress = self.vectorIndexRebuildProgress
             self.reindexTask = nil
             if succeeded {
-                if kind == .vectorRebuild {
+                if rebuildVectorSpace {
                     self.store.setSetting(
                         Self.appliedEmbeddingSignatureKey,
                         targetEmbeddingSignature
@@ -1196,6 +2237,15 @@ final class AppState: ObservableObject {
             )
         }
         statusText = indexingStatusTitle
+        postSystemNotification(
+            titleKey: indexingStatusTitle,
+            body: settings.localizedFormat(
+                "Processed %d of %d files",
+                completed,
+                total
+            ),
+            identifier: "filenest.indexing.status"
+        )
     }
 
     private func updateProgressPhase(_ phase: VectorIndexRebuildProgress.Phase) {

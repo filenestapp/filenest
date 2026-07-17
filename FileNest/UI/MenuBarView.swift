@@ -95,6 +95,11 @@ struct MenuBarView: View {
                 Divider()
                 IndexingStatusProgressView(appState: appState)
             }
+
+            if !appState.automaticFileProcessingItems.isEmpty {
+                Divider()
+                AutomaticProcessingQueueView(appState: appState)
+            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 18)
@@ -115,13 +120,54 @@ struct MenuBarView: View {
 
     private var actions: some View {
         VStack(spacing: 10) {
-            Button {
-                appState.organizeNow()
-            } label: {
-                Label("Organize Now", systemImage: "sparkles")
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            if appState.organizationState == .running {
+                HStack(spacing: 8) {
+                    Button { appState.pauseOrganization() } label: {
+                        Label("Pause Organization", systemImage: "pause.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    Button(role: .destructive) { appState.stopOrganization() } label: {
+                        Label("Stop", systemImage: "stop.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(QuietButtonStyle())
+            } else if appState.organizationState == .paused {
+                HStack(spacing: 8) {
+                    Button { appState.resumeOrganization() } label: {
+                        Label("Resume Organization", systemImage: "play.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    Button(role: .destructive) { appState.stopOrganization() } label: {
+                        Label("Stop", systemImage: "stop.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(QuietButtonStyle())
+            } else {
+                Button {
+                    appState.organizeNow()
+                } label: {
+                    Label("Organize Now", systemImage: "sparkles")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(GradientButtonStyle())
+                .disabled(appState.indexingState.isActive)
             }
-            .buttonStyle(GradientButtonStyle())
+
+            if appState.organizationState.isActive,
+               let progress = appState.organizationProgress {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(LocalizedStringKey(appState.organizationStatusTitle))
+                        .font(.system(size: 11, weight: .medium))
+                    ProgressView(value: progress.fractionCompleted)
+                    Text(LocalizedStringKey(appState.organizationStatusSubtitle))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             Button {
                 appState.reindexAll()

@@ -36,10 +36,12 @@ import { translate } from "./i18n";
 
 export function ChatPage({
   snapshot,
+  active,
   onRefresh,
   onInspect,
 }: {
   snapshot: AppSnapshot;
+  active: boolean;
   onRefresh(): Promise<void>;
   onInspect(file: FileRecord): void;
 }): React.JSX.Element {
@@ -59,6 +61,10 @@ export function ChatPage({
   const [requestId, setRequestId] = useState<string | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [progressStage, setProgressStage] = useState<ChatStreamEvent["stage"]>();
+  const [searchIntent, setSearchIntent] = useState("");
+  const deltaBuffer = useRef("");
+  const deltaTimer = useRef<number | null>(null);
+  const activeRef = useRef(active);
   const endRef = useRef<HTMLDivElement>(null);
   const selectedSession = snapshot.chatSessions.find(
     (item) => item.id === snapshot.selectedSessionId,
@@ -69,30 +75,57 @@ export function ChatPage({
     setDrafts((current) => ({ ...current, [draftKey]: typeof value === "function" ? value(current[draftKey] ?? "") : value }));
   };
   useEffect(() => { sessionStorage.setItem("filenest-chat-drafts", JSON.stringify(drafts)); }, [drafts]);
+  useEffect(() => { activeRef.current = active; }, [active]);
   useEffect(() => {
     setAttachment(selectedSession?.attachedFilePath ?? snapshot.pendingChatAttachmentPath);
   }, [selectedSession?.id, selectedSession?.attachedFilePath, snapshot.pendingChatAttachmentPath]);
   useEffect(() => {
       const unsubscribe = window.fileNest.onChatStream((event: ChatStreamEvent) => {
         if (requestId && event.requestId !== requestId) return;
-        if (event.type === "delta")
-          setStreaming((value) => value + (event.delta ?? ""));
-        if (event.type === "progress") setProgressStage(event.stage);
+        if (event.type === "delta") {
+          deltaBuffer.current += event.delta ?? "";
+          if (deltaTimer.current == null) {
+            deltaTimer.current = window.setTimeout(() => {
+              const buffered = deltaBuffer.current;
+              deltaBuffer.current = "";
+              deltaTimer.current = null;
+              if (buffered) setStreaming((value) => value + buffered);
+            }, 50);
+          }
+        }
+        if (event.type === "progress") {
+          setProgressStage(event.stage);
+          if (event.searchIntent) setSearchIntent(event.searchIntent);
+        }
         if (event.type === "done") {
+          deltaBuffer.current = "";
+          if (deltaTimer.current != null) window.clearTimeout(deltaTimer.current);
+          deltaTimer.current = null;
           setStreaming("");
           setPendingQuestion(null);
           setRequestId(null);
           setProgressStage(undefined);
+          setSearchIntent("");
+          if (activeRef.current && event.sessionId != null) void window.fileNest.markChatSeen(event.sessionId);
           void onRefresh();
         }
         if (event.type === "error") {
           setStreaming(event.error ?? "Generation failed");
           setRequestId(null);
           setProgressStage(undefined);
+          setSearchIntent("");
         }
       });
-      return () => { if (typeof unsubscribe === "function") unsubscribe(); };
+      return () => {
+        if (deltaTimer.current != null) window.clearTimeout(deltaTimer.current);
+        if (typeof unsubscribe === "function") unsubscribe();
+      };
     }, [onRefresh, requestId]);
+  useEffect(() => {
+    if (active && snapshot.selectedSessionId != null && snapshot.completedChatSessionIds.includes(snapshot.selectedSessionId)) {
+      void window.fileNest.markChatSeen(snapshot.selectedSessionId);
+    }
+  }, [active, snapshot.completedChatSessionIds, snapshot.selectedSessionId]);
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [snapshot.messages.length, streaming, pendingQuestion]);
@@ -110,6 +143,7 @@ export function ChatPage({
     setPendingQuestion(question);
     setStreaming("");
     setProgressStage("searching");
+    setSearchIntent("");
     const result = await window.fileNest.sendChat({
       sessionId: snapshot.selectedSessionId,
       content: question,
@@ -268,6 +302,10 @@ export function ChatPage({
                         ? t("Generating response…")
                         : progressStage === "retrieved"
                           ? t("Preparing relevant context…")
+                          : progressStage === "planning" && searchIntent
+                            ? searchIntent
+                            : progressStage === "planning"
+                              ? t("Understanding your request…")
                           : t("Searching local files…")}
                     </div>
                   )}

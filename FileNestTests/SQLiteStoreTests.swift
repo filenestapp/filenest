@@ -30,6 +30,50 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(try store.file(id: firstId)?.title, "Updated")
     }
 
+    func testStoreStartupRemovesUnreferencedParentRows() throws {
+        let databasePath = temporaryDirectory.appendingPathComponent("test.sqlite").path
+        let fileID = try store.upsertFile(makeFile(path: filePath("parents.txt"), title: "Parents"))
+        try store.dbPool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO document_parents(file_id, parent_idx, text, contextual_text)
+                    VALUES (?, 0, 'referenced parent', 'referenced parent'),
+                           (?, 99, 'orphan parent', 'orphan parent')
+                    """,
+                arguments: [fileID, fileID]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO document_chunks(
+                        file_id, chunk_idx, text, contextual_text, parent_idx
+                    ) VALUES (?, 0, 'child', 'child', 0)
+                    """,
+                arguments: [fileID]
+            )
+        }
+
+        store = SQLiteStore(path: databasePath)
+
+        let parentIndexes = try store.dbPool.read { db in
+            try Int.fetchAll(
+                db,
+                sql: "SELECT parent_idx FROM document_parents WHERE file_id = ? ORDER BY parent_idx",
+                arguments: [fileID]
+            )
+        }
+        XCTAssertEqual(parentIndexes, [0])
+    }
+
+    func testBatchFileLookupHandlesMacOSTemporaryPathAliases() throws {
+        let storedPath = "/private/var/folders/example/report.txt"
+        let requestedPath = "/var/folders/example/report.txt"
+        let id = try store.upsertFile(makeFile(path: storedPath, title: "Report"))
+
+        let recordsByPath = try store.files(atPaths: [requestedPath])
+
+        XCTAssertEqual(recordsByPath[requestedPath]?.id, id)
+    }
+
     func testFileUpsertPreservesOrganizedTimestamp() throws {
         let path = filePath("organized.txt")
         var organized = makeFile(path: path, title: "Organized")
@@ -55,6 +99,19 @@ final class SQLiteStoreTests: XCTestCase {
         _ = try store.upsertFile(newer)
 
         XCTAssertEqual(try store.allFiles().map(\.name), ["newly-added.txt", "recently-reindexed.txt"])
+    }
+
+    func testFileIndexCountsPlansReindexWithoutLoadingFileRows() throws {
+        var indexed = makeFile(path: filePath("indexed.txt"), title: "Indexed")
+        indexed.indexedAt = Date(timeIntervalSince1970: 100)
+        _ = try store.upsertFile(indexed)
+        _ = try store.upsertFile(makeFile(path: filePath("pending.txt"), title: "Pending"))
+
+        let counts = try store.fileIndexCounts()
+
+        XCTAssertEqual(counts.total, 2)
+        XCTAssertEqual(counts.indexed, 1)
+        XCTAssertEqual(counts.unindexed, 1)
     }
 
     func testFileSearchTreatsSQLWildcardsAsLiteralCharacters() throws {
@@ -88,6 +145,58 @@ final class SQLiteStoreTests: XCTestCase {
         let updated = try XCTUnwrap(store.file(id: id))
         XCTAssertEqual(updated.indexedAt, record.indexedAt)
         XCTAssertEqual(updated.indexSignature, "content-signature")
+    }
+
+    func testLibrarySearchCachePersistsHistoryAndInvalidatesAfterLibraryChange() throws {
+        let fileID = try store.upsertFile(makeFile(path: filePath("invoice.pdf"), title: "Invoice"))
+        let revision = try store.libraryRevision()
+        let payload = Data("cached-results".utf8)
+
+        try store.saveLibrarySearch(
+            query: "latest invoice",
+            isSmartSearch: false,
+            resultCount: 3,
+            revision: revision,
+            payload: payload,
+            recordHistory: true
+        )
+
+        let entry = try XCTUnwrap(store.librarySearchHistory().first)
+        XCTAssertEqual(entry.query, "latest invoice")
+        XCTAssertEqual(entry.resultCount, 3)
+        XCTAssertTrue(entry.hasValidCache)
+        XCTAssertEqual(
+            try store.cachedLibrarySearch(query: "LATEST INVOICE", isSmartSearch: false)?.payload,
+            payload
+        )
+
+        try store.updateFileNote(id: fileID, note: "Updated note")
+
+        XCTAssertFalse(try XCTUnwrap(store.librarySearchHistory().first).hasValidCache)
+    }
+
+    func testAutomaticSearchCacheIsHiddenUntilExplicitlySearched() throws {
+        let revision = try store.libraryRevision()
+        let payload = Data("cached-results".utf8)
+        try store.saveLibrarySearch(
+            query: "invoice",
+            isSmartSearch: false,
+            resultCount: 1,
+            revision: revision,
+            payload: payload,
+            recordHistory: false
+        )
+        XCTAssertTrue(try store.librarySearchHistory().isEmpty)
+
+        try store.saveLibrarySearch(
+            query: "invoice",
+            isSmartSearch: false,
+            resultCount: 1,
+            revision: revision,
+            payload: payload,
+            recordHistory: true
+        )
+        XCTAssertEqual(try store.librarySearchHistory().map(\.query), ["invoice"])
     }
 
     func testFilePathParticipatesInFileLevelSearch() throws {

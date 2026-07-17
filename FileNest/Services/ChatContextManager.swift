@@ -135,7 +135,7 @@ enum ChatContextPlanner {
 
     private static func compressedSummary(_ turns: [ChatTurn], maxTokens: Int) -> String {
         guard maxTokens > 32, !turns.isEmpty else { return "" }
-        let header = "Earlier conversation (automatically compressed; recent messages take precedence):"
+        let header = PromptCatalog.Chat.compressedHistoryHeader
         let headerTokens = ChatService.estimatedTokens(in: header)
         guard headerTokens < maxTokens else { return truncated(header, maxTokens: maxTokens) }
 

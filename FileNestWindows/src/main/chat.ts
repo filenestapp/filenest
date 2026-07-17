@@ -4,6 +4,7 @@ import { FileNestDatabase } from './database'
 import { EmbeddingService, type SearchHit } from './embedding'
 import { estimateTokens, LlmService, type LlmTurn } from './llm'
 import { AppLogger } from './logger'
+import { resolveSmartSearchPlan, type SmartSearchPlan } from './smart-search-plan'
 
 interface RetrievedFile {
   file: FileRecord
@@ -60,9 +61,11 @@ export class ChatService {
   }
 
   private async run(requestId: string, request: SendChatRequest, settings: Settings, signal: AbortSignal, emit: (event: ChatStreamEvent) => void): Promise<void> {
+    let activeSessionId: number | undefined
     try {
       const startedAt = performance.now()
       const session = await this.ensureSession(request)
+      activeSessionId = session.id
       emit({ requestId, type: 'session', sessionId: session.id })
       const retryTarget = this.findRetryTarget(session.id, request.retryAssistantMessageId)
       const question = retryTarget?.question ?? request.content.trim()
@@ -74,8 +77,16 @@ export class ChatService {
         }
       }
 
-      emit({ requestId, type: 'progress', sessionId: session.id, stage: 'searching' })
-      const related = await this.retrieve(question, session, settings)
+      let searchPlan: SmartSearchPlan | null = null
+      if (!session.attachedFilePath) {
+        emit({ requestId, type: 'progress', sessionId: session.id, stage: 'planning' })
+        searchPlan = await resolveSmartSearchPlan(question, settings, this.llm, signal, (searchIntent) => {
+          emit({ requestId, type: 'progress', sessionId: session.id, stage: 'planning', searchIntent })
+        })
+        if (signal.aborted) throw new DOMException('Generation stopped', 'AbortError')
+      }
+      emit({ requestId, type: 'progress', sessionId: session.id, stage: 'searching', searchIntent: searchPlan?.intent })
+      const related = await this.retrieve(question, session, settings, searchPlan)
       const relatedFileIds = related.map((item) => item.file.id)
       emit({ requestId, type: 'progress', sessionId: session.id, stage: 'retrieved', relatedFileIds })
       if (signal.aborted) throw new DOMException('Generation stopped', 'AbortError')
@@ -123,10 +134,10 @@ export class ChatService {
       emit({ requestId, type: 'done', sessionId: session.id, message, relatedFileIds })
     } catch (error) {
       if (signal.aborted) {
-        emit({ requestId, type: 'error', error: 'Generation stopped' })
+        emit({ requestId, type: 'error', sessionId: activeSessionId, error: 'Generation stopped' })
       } else {
         await this.logger.log('chat', 'Chat failed', error)
-        emit({ requestId, type: 'error', error: error instanceof Error ? error.message : String(error) })
+        emit({ requestId, type: 'error', sessionId: activeSessionId, error: error instanceof Error ? error.message : String(error) })
       }
     }
   }
@@ -160,7 +171,7 @@ export class ChatService {
     return this.database.createChat(request.attachedFilePath ?? null)
   }
 
-  private async retrieve(query: string, session: ChatSession, settings: Settings): Promise<RetrievedFile[]> {
+  private async retrieve(query: string, session: ChatSession, settings: Settings, plan: SmartSearchPlan | null): Promise<RetrievedFile[]> {
     const limit = Math.max(1, Math.min(30, settings.ragResultLimit))
     if (session.attachedFilePath) {
       const file = this.database.getFileByPath(session.attachedFilePath)
@@ -174,7 +185,7 @@ export class ChatService {
 
     let hits: SearchHit[] = []
     try {
-      hits = await this.embeddings.search(query, settings, Math.min(limit * 4, 80))
+      hits = await this.embeddings.search(plan?.semanticQuery || query, settings, Math.min(limit * 4, 80))
     } catch (error) {
       await this.logger.log('chat', 'Semantic search failed; falling back to keyword search', error)
     }
@@ -182,13 +193,14 @@ export class ChatService {
     for (const hit of hits) {
       const file = this.database.getFile(hit.fileId)
       if (!file) continue
+      if (!matchesPlan(file, plan)) continue
       const existing = candidates.get(file.id) ?? { file, hits: [] }
       existing.hits.push(hit)
       candidates.set(file.id, existing)
     }
-    for (const keyword of query.split(/[\s，。！？、,.;:]+/).filter((item) => item.length > 1)) {
+    for (const keyword of [...query.split(/[\s，。！？、,.;:]+/), ...(plan?.keywords ?? [])].filter((item) => item.length > 1)) {
       for (const file of this.database.searchFiles(keyword, null, limit * 2)) {
-        if (!candidates.has(file.id)) candidates.set(file.id, { file, hits: [] })
+        if (matchesPlan(file, plan) && !candidates.has(file.id)) candidates.set(file.id, { file, hits: [] })
       }
     }
     return [...candidates.values()].slice(0, limit).map(({ file, hits: fileHits }) => ({
@@ -196,6 +208,15 @@ export class ChatService {
       chunks: selectNeighborChunks(this.database.listDocumentChunks(file.id), fileHits, Math.max(3, Math.ceil(limit / 2)))
     }))
   }
+}
+
+function matchesPlan(file: FileRecord, plan: SmartSearchPlan | null): boolean {
+  if (!plan) return true
+  if (plan.categories.length && !plan.categories.includes(file.category)) return false
+  const modified = new Date(file.mtime)
+  if (plan.dateFrom && modified < plan.dateFrom) return false
+  if (plan.dateTo && modified > plan.dateTo) return false
+  return true
 }
 
 function buildTurns(history: ChatMessage[], related: RetrievedFile[], settings: Settings): LlmTurn[] {

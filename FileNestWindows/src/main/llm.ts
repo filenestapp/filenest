@@ -1,6 +1,7 @@
 import type { ChatMessage, Settings } from '../shared/types'
 import { readFile } from 'node:fs/promises'
 import { extname } from 'node:path'
+import { estimateCanonicalTokens, GENERATION_FALLBACK_PROFILE, GENERATION_FALLBACK_VERSION } from './token-counter'
 
 export interface LlmTurn { role: 'system' | 'user' | 'assistant'; content: string }
 
@@ -168,5 +169,9 @@ async function* readSseData(stream: ReadableStream<Uint8Array>, signal: AbortSig
 }
 
 export function estimateTokens(messages: Array<Pick<ChatMessage, 'content'>> | LlmTurn[]): number {
-  return Math.max(1, Math.ceil(messages.reduce((sum, message) => sum + message.content.length, 0) / 3.2))
+  return messages.reduce((sum, message) => sum + estimateCanonicalTokens(
+    message.content,
+    GENERATION_FALLBACK_PROFILE,
+    GENERATION_FALLBACK_VERSION
+  ).count, 0)
 }

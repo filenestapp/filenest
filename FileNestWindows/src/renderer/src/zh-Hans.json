@@ -899,5 +899,18 @@
   "Fast": "快速",
   "Local Semantic Search": "本地语义搜索",
   "Cloud Semantic Search": "云端语义搜索",
-  "tokens": "tokens"
+  "tokens": "tokens",
+  "Not finding what you need?": "没有找到需要的内容？",
+  "Smart Search uses AI to understand your request more precisely and may take a little longer.": "Smart Search 使用 AI 更准确地理解请求，可能需要稍长时间。",
+  "Try Smart Search": "尝试 Smart Search",
+  "Confidence": "置信度",
+  "Understanding your request…": "正在理解你的请求…",
+  "Generation Model": "生成模型",
+  "Download Selected Models": "下载所选模型",
+  "Quick Search": "快速搜索",
+  "Use this shortcut from any app to open a centered FileNest search box.": "在任意应用中使用此快捷键，打开居中的 FileNest 搜索框。",
+  "Quick Search Shortcut": "快速搜索快捷键",
+  "Reset to Default": "恢复默认",
+  "Search FileNest": "搜索 FileNest",
+  "Press Enter to search · Esc to close": "按 Enter 搜索 · 按 Esc 关闭"
 }

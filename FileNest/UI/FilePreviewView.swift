@@ -554,12 +554,12 @@ private struct IndexedChunkPreviewRow: View {
 
                 HStack(spacing: 10) {
                     Label(
-                        appState.settings.localizedFormat(
-                            "About %d Tokens",
-                            ChatService.estimatedTokens(in: chunk.text)
-                        ),
+                        chunk.tokenCountAccuracy == .exact
+                            ? appState.settings.localizedFormat("%d tokens", chunk.tokenCount)
+                            : appState.settings.localizedFormat("About %d Tokens", chunk.tokenCount),
                         systemImage: "number"
                     )
+                    .help("\(chunk.tokenizerProfile) · \(chunk.tokenCountAccuracy.rawValue)")
                     Text(appState.settings.localizedFormat("%d Characters", chunk.text.count))
                     Spacer()
                 }
@@ -572,12 +572,25 @@ private struct IndexedChunkPreviewRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 8)
 
-                if chunk.contextualText != chunk.text {
-                    Text("Embedding Context")
+                if let embeddingPrefix {
+                    Text("Added Embedding Context")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .padding(.top, 10)
-                    Text(chunk.contextualText)
+                    Text(embeddingPrefix)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 3)
+                }
+
+                if let parentContext {
+                    Text("Parent Context")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 10)
+                    Text(parentContext)
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
@@ -592,6 +605,20 @@ private struct IndexedChunkPreviewRow: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isExpanded ? FileNestTheme.accent.opacity(0.28) : FileNestTheme.border, lineWidth: 1)
         }
+    }
+
+    private var embeddingPrefix: String? {
+        guard chunk.contextualText != chunk.text else { return nil }
+        guard chunk.contextualText.hasSuffix(chunk.text) else { return chunk.contextualText }
+        let prefix = chunk.contextualText.dropLast(chunk.text.count)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return prefix.isEmpty ? nil : prefix
+    }
+
+    private var parentContext: String? {
+        guard let parent = chunk.parentText?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !parent.isEmpty, parent != chunk.text else { return nil }
+        return parent
     }
 
     private var kindLabel: String {

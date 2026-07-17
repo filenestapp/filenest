@@ -14,7 +14,7 @@ enum IndexContentChangeCategory: String, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .chunking: return "Chunk tokens + overlap"
+        case .chunking: return "Semantic chunking"
         case .documentParsing: return "Document Parsing"
         case .ocr: return "OCR engine"
         case .indexingScope: return "Indexing Scope"
@@ -24,7 +24,7 @@ enum IndexContentChangeCategory: String, CaseIterable, Identifiable, Sendable {
 
     var detail: String {
         switch self {
-        case .chunking: return "Chunk tokens or overlap changed"
+        case .chunking: return "Parent, retrieval, or overlap settings changed"
         case .documentParsing: return "The Docling setting or parser version changed"
         case .ocr: return "The OCR engine, source, format, or model changed"
         case .indexingScope: return "Automatic vectorization or indexed file types changed"
@@ -49,6 +49,7 @@ enum IndexContentChangeCategory: String, CaseIterable, Identifiable, Sendable {
 /// which the UI calls through the SettingBinding adapter.
 final class AppSettings: ObservableObject {
     static let shared = AppSettings(store: .shared)
+    static let defaultAIModelVersionCheckTTL: TimeInterval = 24 * 60 * 60
 
     private let store: SQLiteStore
     private weak var organizer: OrganizerService?
@@ -78,8 +79,18 @@ final class AppSettings: ObservableObject {
     @Published var autoVectorize: Bool = true
     @Published var vectorizeExtensions: [String] = []
     @Published var vectorChunkWords: Int = 600
+    @Published var vectorRetrievalChunkTokens: Int = 300
     @Published var vectorChunkOverlap: Int = 80
+
+    /// Canonical token limit used by chunking. The stored `vectorChunkWords` key remains for
+    /// backward compatibility with existing installations and index signatures.
+    var chunkTokenLimit: Int { vectorChunkWords }
     @Published var ragResultLimit: Int = 10
+    @Published var rerankerSource: String = RerankerSource.disabled.rawValue
+    @Published var rerankerBaseURL: String = "http://127.0.0.1:11435/v1"
+    @Published var rerankerAPIKey: String = ""
+    @Published var rerankerModel: String = "Qwen/Qwen3-Reranker-0.6B"
+    @Published var rerankerReuseChatCredentials: Bool = true
     @Published var doclingEnabled: Bool = true
     @Published var embeddingSource: String = EmbeddingSource.ollama.rawValue
     @Published var ollamaEmbeddingModel: String = OllamaModelRecommendation.defaultEmbeddingModel
@@ -97,10 +108,13 @@ final class AppSettings: ObservableObject {
     @Published var thinkingMode: Bool = false
     @Published var appLanguage: String = AppLanguage.system.rawValue
     @Published var appearance: String = AppAppearance.system.rawValue
+    @Published var quickSearchShortcutKeyCode: UInt32 = QuickSearchShortcut.defaultValue.keyCode
+    @Published var quickSearchShortcutModifiers: UInt32 = QuickSearchShortcut.defaultValue.modifiers
     @Published var onboardingCompleted: Bool = false
     @Published var updateFeedURL: String = ""
     @Published var automaticUpdateChecks: Bool = true
     @Published var automaticallyDownloadsUpdates: Bool = false
+    @Published private(set) var lastAIModelVersionCheckAt: Date?
 
     enum LLMChoice: String, CaseIterable, Identifiable { case ollama, cloud, none
         var id: String { rawValue }
@@ -135,6 +149,18 @@ final class AppSettings: ObservableObject {
             case .local: return "Local Models"
             case .cloud: return "Cloud API"
             case .disabled: return "Disabled"
+            }
+        }
+    }
+
+    enum RerankerSource: String, CaseIterable, Identifiable {
+        case disabled, local, cloud
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .disabled: return "Disabled"
+            case .local: return "Local Model"
+            case .cloud: return "Cloud API"
             }
         }
     }
@@ -219,7 +245,9 @@ final class AppSettings: ObservableObject {
         cloudAPIFormat = CloudAPIFormat(rawValue: load(.cloudAPIFormat) ?? "")?.rawValue
             ?? CloudAPIFormat.openAI.rawValue
         cloudAPIKey = load(.cloudKey) ?? ""
-        cloudBaseURL = load(.cloudBaseURL) ?? "https://api.openai.com/v1"
+        let storedCloudBaseURL = load(.cloudBaseURL) ?? "https://api.openai.com/v1"
+        cloudBaseURL = Self.normalizedCloudBaseURL(storedCloudBaseURL)
+        if cloudBaseURL != storedCloudBaseURL { save(.cloudBaseURL, cloudBaseURL) }
         cloudModel = load(.cloudModel) ?? "gpt-4o-mini"
         cloudContextWindowTokens = Self.normalizedChatContextWindow(
             load(.cloudContextWindowTokens) ?? load(.legacyChatContextWindowTokens)
@@ -241,17 +269,31 @@ final class AppSettings: ObservableObject {
             save(.chunkDefaults600Migration, "1")
         }
         vectorChunkWords = Self.normalizedChunkWords(load(.vectorChunkWords))
+        vectorRetrievalChunkTokens = Self.normalizedRetrievalChunkTokens(
+            load(.vectorRetrievalChunkTokens),
+            parentTokens: vectorChunkWords
+        )
         vectorChunkOverlap = Self.normalizedChunkOverlap(
             load(.vectorChunkOverlap),
-            chunkWords: vectorChunkWords
+            retrievalTokens: vectorRetrievalChunkTokens
         )
         ragResultLimit = Self.normalizedRAGResultLimit(load(.ragResultLimit))
+        rerankerSource = RerankerSource(rawValue: load(.rerankerSource) ?? "")?.rawValue
+            ?? RerankerSource.disabled.rawValue
+        rerankerBaseURL = load(.rerankerBaseURL) ?? "http://127.0.0.1:11435/v1"
+        rerankerAPIKey = load(.rerankerAPIKey) ?? ""
+        rerankerModel = load(.rerankerModel) ?? "Qwen/Qwen3-Reranker-0.6B"
+        rerankerReuseChatCredentials = load(.rerankerReuseChatCredentials) != "0"
         doclingEnabled = load(.doclingEnabled) != "0"
         embeddingSource = EmbeddingSource(rawValue: load(.embeddingSource) ?? "")?.rawValue
             ?? EmbeddingSource.ollama.rawValue
         ollamaEmbeddingModel = load(.ollamaEmbeddingModel)
             ?? OllamaModelRecommendation.defaultEmbeddingModel
-        cloudEmbeddingBaseURL = load(.cloudEmbeddingBaseURL) ?? "https://api.openai.com/v1"
+        let storedCloudEmbeddingBaseURL = load(.cloudEmbeddingBaseURL) ?? "https://api.openai.com/v1"
+        cloudEmbeddingBaseURL = Self.normalizedCloudBaseURL(storedCloudEmbeddingBaseURL)
+        if cloudEmbeddingBaseURL != storedCloudEmbeddingBaseURL {
+            save(.cloudEmbeddingBaseURL, cloudEmbeddingBaseURL)
+        }
         cloudEmbeddingAPIKey = load(.cloudEmbeddingAPIKey) ?? ""
         cloudEmbeddingModel = load(.cloudEmbeddingModel) ?? "text-embedding-3-small"
         cloudEmbeddingReuseChatCredentials = load(.cloudEmbeddingReuseChatCredentials) == "1"
@@ -274,7 +316,9 @@ final class AppSettings: ObservableObject {
         }
         cloudOCRFormat = CloudAPIFormat(rawValue: load(.cloudOCRFormat) ?? "")?.rawValue
             ?? CloudAPIFormat.openAI.rawValue
-        cloudOCRBaseURL = load(.cloudOCRBaseURL) ?? "https://api.openai.com/v1"
+        let storedCloudOCRBaseURL = load(.cloudOCRBaseURL) ?? "https://api.openai.com/v1"
+        cloudOCRBaseURL = Self.normalizedCloudBaseURL(storedCloudOCRBaseURL)
+        if cloudOCRBaseURL != storedCloudOCRBaseURL { save(.cloudOCRBaseURL, cloudOCRBaseURL) }
         cloudOCRAPIKey = load(.cloudOCRAPIKey) ?? ""
         cloudOCRModel = load(.cloudOCRModel) ?? "gpt-4.1-mini"
         cloudOCRReuseChatCredentials = load(.cloudOCRReuseChatCredentials) == "1"
@@ -283,10 +327,22 @@ final class AppSettings: ObservableObject {
             ?? AppLanguage.system.rawValue
         appearance = AppAppearance(rawValue: load(.appearance) ?? "")?.rawValue
             ?? AppAppearance.system.rawValue
+        let storedShortcut = QuickSearchShortcut(
+            keyCode: UInt32(load(.quickSearchShortcutKeyCode) ?? "")
+                ?? QuickSearchShortcut.defaultValue.keyCode,
+            modifiers: UInt32(load(.quickSearchShortcutModifiers) ?? "")
+                ?? QuickSearchShortcut.defaultValue.modifiers
+        )
+        let shortcut = storedShortcut.isValid ? storedShortcut : .defaultValue
+        quickSearchShortcutKeyCode = shortcut.keyCode
+        quickSearchShortcutModifiers = shortcut.modifiers
         onboardingCompleted = load(.onboardingCompleted) == "1"
         updateFeedURL = load(.updateFeedURL) ?? ""
         automaticUpdateChecks = load(.automaticUpdateChecks) != "0"
         automaticallyDownloadsUpdates = load(.automaticallyDownloadsUpdates) == "1"
+        lastAIModelVersionCheckAt = load(.lastAIModelVersionCheckAt)
+            .flatMap(TimeInterval.init)
+            .map(Date.init(timeIntervalSince1970:))
     }
 
     func attach(store: SQLiteStore, organizer: OrganizerService, indexer: IndexerService,
@@ -337,7 +393,12 @@ final class AppSettings: ObservableObject {
         }
     }
     func setCloudKey(_ v: String) { cloudAPIKey = v; save(.cloudKey, v) }
-    func setCloudBaseURL(_ v: String) { cloudBaseURL = v; save(.cloudBaseURL, v) }
+    func setCloudBaseURL(_ v: String) {
+        // Keep the user's input intact while they are typing. The effective URL is
+        // normalized when a provider is created, so a root URL works immediately.
+        cloudBaseURL = v.trimmingCharacters(in: .whitespacesAndNewlines)
+        save(.cloudBaseURL, cloudBaseURL)
+    }
     func setCloudModel(_ v: String) { cloudModel = v; save(.cloudModel, v) }
     func setCloudContextWindowTokens(_ value: Int) {
         let normalized = Self.normalizedChatContextWindow(String(value))
@@ -380,12 +441,20 @@ final class AppSettings: ObservableObject {
         let normalized = max(600, min(value, 1_000))
         vectorChunkWords = normalized
         save(.vectorChunkWords, String(normalized))
+        if vectorRetrievalChunkTokens > normalized {
+            setVectorRetrievalChunkTokens(normalized)
+        }
+    }
+    func setVectorRetrievalChunkTokens(_ value: Int) {
+        let normalized = max(120, min(value, vectorChunkWords))
+        vectorRetrievalChunkTokens = normalized
+        save(.vectorRetrievalChunkTokens, String(normalized))
         if vectorChunkOverlap >= normalized {
             setVectorChunkOverlap(max(0, normalized / 5))
         }
     }
     func setVectorChunkOverlap(_ value: Int) {
-        let normalized = max(0, min(value, max(0, vectorChunkWords - 1)))
+        let normalized = max(0, min(value, max(0, vectorRetrievalChunkTokens - 1)))
         vectorChunkOverlap = normalized
         save(.vectorChunkOverlap, String(normalized))
     }
@@ -393,6 +462,24 @@ final class AppSettings: ObservableObject {
         let normalized = max(1, min(value, 30))
         ragResultLimit = normalized
         save(.ragResultLimit, String(normalized))
+    }
+    func setRerankerSource(_ value: String) {
+        let normalized = RerankerSource(rawValue: value)?.rawValue ?? RerankerSource.disabled.rawValue
+        rerankerSource = normalized
+        save(.rerankerSource, normalized)
+    }
+    func setRerankerBaseURL(_ value: String) {
+        rerankerBaseURL = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        save(.rerankerBaseURL, rerankerBaseURL)
+    }
+    func setRerankerAPIKey(_ value: String) { rerankerAPIKey = value; save(.rerankerAPIKey, value) }
+    func setRerankerModel(_ value: String) {
+        rerankerModel = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        save(.rerankerModel, rerankerModel)
+    }
+    func setRerankerReuseChatCredentials(_ value: Bool) {
+        rerankerReuseChatCredentials = value
+        save(.rerankerReuseChatCredentials, value ? "1" : "0")
     }
     func setThinkingMode(_ value: Bool) {
         thinkingMode = value
@@ -412,8 +499,8 @@ final class AppSettings: ObservableObject {
         save(.ollamaEmbeddingModel, ollamaEmbeddingModel)
     }
     func setCloudEmbeddingBaseURL(_ value: String) {
-        cloudEmbeddingBaseURL = value
-        save(.cloudEmbeddingBaseURL, value)
+        cloudEmbeddingBaseURL = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        save(.cloudEmbeddingBaseURL, cloudEmbeddingBaseURL)
     }
     func setCloudEmbeddingAPIKey(_ value: String) {
         cloudEmbeddingAPIKey = value
@@ -442,8 +529,8 @@ final class AppSettings: ObservableObject {
         save(.cloudOCRFormat, normalized)
     }
     func setCloudOCRBaseURL(_ value: String) {
-        cloudOCRBaseURL = value
-        save(.cloudOCRBaseURL, value)
+        cloudOCRBaseURL = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        save(.cloudOCRBaseURL, cloudOCRBaseURL)
     }
     func setCloudOCRAPIKey(_ value: String) {
         cloudOCRAPIKey = value
@@ -471,6 +558,13 @@ final class AppSettings: ObservableObject {
         appearance = normalized
         save(.appearance, normalized)
     }
+    func setQuickSearchShortcut(_ shortcut: QuickSearchShortcut) {
+        guard shortcut.isValid else { return }
+        quickSearchShortcutKeyCode = shortcut.keyCode
+        quickSearchShortcutModifiers = shortcut.modifiers
+        save(.quickSearchShortcutKeyCode, String(shortcut.keyCode))
+        save(.quickSearchShortcutModifiers, String(shortcut.modifiers))
+    }
     func setOnboardingCompleted(_ value: Bool) {
         onboardingCompleted = value
         save(.onboardingCompleted, value ? "1" : "0")
@@ -486,6 +580,18 @@ final class AppSettings: ObservableObject {
     func setAutomaticallyDownloadsUpdates(_ value: Bool) {
         automaticallyDownloadsUpdates = value
         save(.automaticallyDownloadsUpdates, value ? "1" : "0")
+    }
+    func setLastAIModelVersionCheckAt(_ value: Date) {
+        lastAIModelVersionCheckAt = value
+        save(.lastAIModelVersionCheckAt, String(value.timeIntervalSince1970))
+    }
+
+    func shouldCheckAIModelVersions(
+        at now: Date = Date(),
+        ttl: TimeInterval = AppSettings.defaultAIModelVersionCheckTTL
+    ) -> Bool {
+        guard let lastAIModelVersionCheckAt else { return true }
+        return now.timeIntervalSince(lastAIModelVersionCheckAt) >= max(0, ttl)
     }
 
     // MARK: - Keys and Persistence
@@ -511,8 +617,14 @@ final class AppSettings: ObservableObject {
         case autoVectorize = "auto_vectorize"
         case vectorizeExtensions = "vectorize_extensions"
         case vectorChunkWords = "vector_chunk_words"
+        case vectorRetrievalChunkTokens = "vector_retrieval_chunk_tokens"
         case vectorChunkOverlap = "vector_chunk_overlap"
         case ragResultLimit = "rag_result_limit"
+        case rerankerSource = "reranker_source"
+        case rerankerBaseURL = "reranker_base_url"
+        case rerankerAPIKey = "reranker_api_key"
+        case rerankerModel = "reranker_model"
+        case rerankerReuseChatCredentials = "reranker_reuse_chat_credentials"
         case chunkDefaults600Migration = "chunk_defaults_600_80_migration_v1"
         case doclingEnabled = "docling_enabled"
         case embeddingSource = "embedding_source"
@@ -532,10 +644,13 @@ final class AppSettings: ObservableObject {
         case thinkingMode = "thinking_mode"
         case appLanguage = "app_language"
         case appearance = "appearance"
+        case quickSearchShortcutKeyCode = "quick_search_shortcut_key_code"
+        case quickSearchShortcutModifiers = "quick_search_shortcut_modifiers"
         case onboardingCompleted = "onboarding_completed"
         case updateFeedURL = "update_feed_url"
         case automaticUpdateChecks = "automatic_update_checks"
         case automaticallyDownloadsUpdates = "automatically_downloads_updates"
+        case lastAIModelVersionCheckAt = "last_ai_model_version_check_at"
     }
     private func load(_ k: Key) -> String? { store.getSetting(k.rawValue) }
     private func save(_ k: Key, _ v: String) { store.setSetting(k.rawValue, v) }
@@ -552,11 +667,29 @@ final class AppSettings: ObservableObject {
     private static func normalizedChunkWords(_ raw: String?) -> Int {
         max(600, min(Int(raw ?? "") ?? 600, 1_000))
     }
-    private static func normalizedChunkOverlap(_ raw: String?, chunkWords: Int) -> Int {
-        max(0, min(Int(raw ?? "") ?? 80, max(0, chunkWords - 1)))
+    private static func normalizedRetrievalChunkTokens(_ raw: String?, parentTokens: Int) -> Int {
+        max(120, min(Int(raw ?? "") ?? 300, parentTokens))
+    }
+    private static func normalizedChunkOverlap(_ raw: String?, retrievalTokens: Int) -> Int {
+        max(0, min(Int(raw ?? "") ?? 80, max(0, retrievalTokens - 1)))
     }
     private static func normalizedRAGResultLimit(_ raw: String?) -> Int {
         max(1, min(Int(raw ?? "") ?? 10, 30))
+    }
+    /// Adds the OpenAI-compatible version prefix only for a service root.
+    /// Explicit paths (including custom gateway paths) are left untouched.
+    private static func normalizedCloudBaseURL(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              var components = URLComponents(string: trimmed),
+              components.scheme != nil,
+              components.host != nil else {
+            return trimmed
+        }
+
+        let normalizedPath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        components.path = normalizedPath.isEmpty ? "/v1" : "/\(normalizedPath)"
+        return components.string ?? trimmed
     }
     private static func normalizedExtensions(_ values: [String]) -> [String] {
         var seen = Set<String>()
@@ -616,14 +749,14 @@ final class AppSettings: ObservableObject {
             switch CloudAPIFormat(rawValue: cloudAPIFormat) ?? .openAI {
             case .openAI:
                 return OpenAICompatibleLLMProvider(
-                    baseURL: cloudBaseURL,
+                    baseURL: effectiveCloudBaseURL,
                     apiKey: cloudAPIKey,
                     model: modelOverride ?? cloudModel,
                     thinkingEnabled: thinkingMode
                 )
             case .anthropic:
                 return AnthropicLLMProvider(
-                    baseURL: cloudBaseURL,
+                    baseURL: effectiveCloudBaseURL,
                     apiKey: cloudAPIKey,
                     model: modelOverride ?? cloudModel,
                     thinkingEnabled: thinkingMode
@@ -645,8 +778,35 @@ final class AppSettings: ObservableObject {
         )
     }
 
+    func makeRerankingProvider() -> RerankingProvider? {
+        switch RerankerSource(rawValue: rerankerSource) ?? .disabled {
+        case .disabled:
+            return nil
+        case .local:
+            return CompatibleRerankingProvider(
+                baseURL: rerankerBaseURL,
+                apiKey: rerankerAPIKey,
+                model: rerankerModel,
+                name: "local-reranker"
+            )
+        case .cloud:
+            return CompatibleRerankingProvider(
+                baseURL: rerankerReuseChatCredentials ? effectiveCloudBaseURL : rerankerBaseURL,
+                apiKey: rerankerReuseChatCredentials ? cloudAPIKey : rerankerAPIKey,
+                model: rerankerModel,
+                name: "cloud-reranker"
+            )
+        }
+    }
+
+    var effectiveCloudBaseURL: String {
+        Self.normalizedCloudBaseURL(cloudBaseURL)
+    }
+
     var effectiveCloudEmbeddingBaseURL: String {
-        cloudEmbeddingReuseChatCredentials ? cloudBaseURL : cloudEmbeddingBaseURL
+        Self.normalizedCloudBaseURL(
+            cloudEmbeddingReuseChatCredentials ? cloudBaseURL : cloudEmbeddingBaseURL
+        )
     }
 
     var effectiveCloudEmbeddingAPIKey: String {
@@ -654,7 +814,9 @@ final class AppSettings: ObservableObject {
     }
 
     var effectiveCloudOCRBaseURL: String {
-        cloudOCRReuseChatCredentials ? cloudBaseURL : cloudOCRBaseURL
+        Self.normalizedCloudBaseURL(
+            cloudOCRReuseChatCredentials ? cloudBaseURL : cloudOCRBaseURL
+        )
     }
 
     var effectiveCloudOCRAPIKey: String {
@@ -751,15 +913,16 @@ final class AppSettings: ObservableObject {
         }
         return [
             .chunking: Self.signatureDigest([
-                "chunking-v3", String(vectorChunkWords), String(vectorChunkOverlap),
+                "chunking-v6-semantic-boundaries", String(vectorChunkWords),
+                String(vectorRetrievalChunkTokens), String(vectorChunkOverlap),
             ]),
             .documentParsing: Self.signatureDigest([
                 "document-parsing-v1", doclingConfiguration,
             ]),
             .ocr: Self.signatureDigest([
-                // v2: raster images always use the dedicated OCR pipeline and never Docling's
-                // native OpenCV image path.
-                "ocr-v2", ocrSource, ocrProviderConfiguration.joined(separator: ":"),
+                // v3: large and panoramic raster images use lossless overlapping tiles with
+                // positioned result merging and quality-aware provider fallback.
+                "ocr-v3-tiled", ocrSource, ocrProviderConfiguration.joined(separator: ":"),
             ]),
             .indexingScope: Self.signatureDigest([
                 "indexing-scope-v1",

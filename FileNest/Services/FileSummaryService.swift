@@ -101,7 +101,7 @@ final class FileSummaryService {
         if let image = normalizedImageData(at: url) {
             do {
                 let prompt = settings.localizedFormat(
-                    "Examine the image itself and write a concise note for the file. Summarize the visible subject, text, key information, and likely purpose in 1–3 sentences and no more than 180 words. Return only the note text without a Markdown heading.\n\nFile: %@\nImage metadata:\n%@\n\nAnswer in the current interface language.",
+                    PromptCatalog.Summary.imageUserFormat,
                     file.name,
                     metadata.text
                 )
@@ -110,7 +110,7 @@ final class FileSummaryService {
                     imageData: image.data,
                     mimeType: image.mimeType,
                     context: settings.localized(
-                        "You are FileNest’s image summary assistant. Base the note on content actually visible in the image. Do not merely repeat dimensions, color, or DPI, and do not invent information that is not visible."
+                        PromptCatalog.Summary.imageSystem
                     )
                 )
                 for try await fragment in stream {
@@ -154,7 +154,7 @@ final class FileSummaryService {
         }
 
         let fallbackSource = settings.localizedFormat(
-            "The image itself could not be read. The following details come only from file metadata. Clearly state this limitation in the note.\n\n%@",
+            PromptCatalog.Summary.unreadableImageFormat,
             metadata.text
         )
         try await streamText(
@@ -174,14 +174,14 @@ final class FileSummaryService {
         emit: @escaping (String) async throws -> Void
     ) async throws {
         let prompt = settings.localizedFormat(
-            "Write a concise note for this file. In 1–3 sentences, summarize its topic, key information, and purpose in no more than 180 words. Return only the note text without a Markdown heading.\n\nFile: %@\nTitle: %@\nContent or metadata:\n%@\n\nAnswer in the current interface language.",
+            PromptCatalog.Summary.fileUserFormat,
             file.name,
             title,
             String(source.prefix(8_000))
         )
         for try await fragment in provider.streamChat(
             [ChatTurn(role: .user, content: prompt)],
-            context: settings.localized("You are FileNest’s file summary assistant. Do not invent information that is not present in the source file.")
+            context: settings.localized(PromptCatalog.Summary.fileSystem)
         ) {
             try await emit(fragment)
         }

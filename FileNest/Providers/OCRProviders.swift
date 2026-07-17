@@ -367,15 +367,45 @@ final class FallbackOCRProvider: OCRProvider {
     }
 
     func recognize(imageData: Data, mimeType: String) async throws -> String {
+        try await recognizeResult(imageData: imageData, mimeType: mimeType).text
+    }
+
+    func recognizeResult(imageData: Data, mimeType: String) async throws -> OCRRecognitionResult {
         do {
-            let text = try await primary.recognize(imageData: imageData, mimeType: mimeType)
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return try await fallback.recognize(imageData: imageData, mimeType: mimeType)
-            }
-            return text
+            let result = try await primary.recognizeResult(
+                imageData: imageData,
+                mimeType: mimeType
+            )
+            guard Self.isWeak(result) else { return result }
+            return try await fallback.recognizeResult(
+                imageData: imageData,
+                mimeType: mimeType
+            )
         } catch {
-            return try await fallback.recognize(imageData: imageData, mimeType: mimeType)
+            return try await fallback.recognizeResult(
+                imageData: imageData,
+                mimeType: mimeType
+            )
         }
+    }
+
+    private static func isWeak(_ result: OCRRecognitionResult) -> Bool {
+        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return true }
+        guard !result.observations.isEmpty else { return false }
+
+        let confidences = result.observations.compactMap(\.confidence)
+        if !confidences.isEmpty,
+           confidences.reduce(0, +) / Double(confidences.count) < 0.55 {
+            return true
+        }
+        if result.observations.count == 1 {
+            let significantCharacters = text.unicodeScalars.filter {
+                CharacterSet.alphanumerics.contains($0)
+            }.count
+            if significantCharacters < 8 { return true }
+        }
+        return false
     }
 }
 
@@ -400,6 +430,11 @@ final class PaddleOCRProvider: OCRProvider, @unchecked Sendable {
     deinit { terminateWorker() }
 
     func recognize(imageData: Data, mimeType: String) async throws -> String {
+        try await recognizeResult(imageData: imageData, mimeType: mimeType).text
+    }
+
+    func recognizeResult(imageData: Data,
+                         mimeType: String) async throws -> OCRRecognitionResult {
         let python = pythonExecutableURL ?? PaddleOCRServiceManager.pythonExecutable
         guard FileManager.default.isExecutableFile(atPath: python.path) else {
             throw PaddleOCRProviderError.unavailable
@@ -427,7 +462,9 @@ final class PaddleOCRProvider: OCRProvider, @unchecked Sendable {
         }
     }
 
-    private func run(python: URL, imageData: Data, mimeType: String) throws -> String {
+    private func run(python: URL,
+                     imageData: Data,
+                     mimeType: String) throws -> OCRRecognitionResult {
         guard let input = ensureWorker(python: python) else { throw PaddleOCRProviderError.unavailable }
         let requestID = UUID().uuidString
         let payload: [String: Any] = [
@@ -458,7 +495,36 @@ final class PaddleOCRProvider: OCRProvider, @unchecked Sendable {
                 throw PaddleOCRProviderError.invalidResponse
             }
             clearActiveRequest(requestID)
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let observations = (object["observations"] as? [[String: Any]] ?? []).compactMap {
+                observationObject -> OCRTextObservation? in
+                guard let observationText = observationObject["text"] as? String,
+                      !observationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                let confidence = (observationObject["confidence"] as? NSNumber)?.doubleValue
+                let box = observationObject["box"] as? [NSNumber]
+                let bounds: OCRBoundingBox?
+                if let box, box.count >= 4 {
+                    bounds = OCRBoundingBox(
+                        x: box[0].doubleValue,
+                        y: box[1].doubleValue,
+                        width: max(0, box[2].doubleValue - box[0].doubleValue),
+                        height: max(0, box[3].doubleValue - box[1].doubleValue)
+                    )
+                } else {
+                    bounds = nil
+                }
+                return OCRTextObservation(
+                    text: observationText.trimmingCharacters(in: .whitespacesAndNewlines),
+                    confidence: confidence,
+                    bounds: bounds
+                )
+            }
+            let normalizedObservations = observations.isEmpty && !trimmedText.isEmpty
+                ? [OCRTextObservation(text: trimmedText, confidence: nil, bounds: nil)]
+                : observations
+            return OCRRecognitionResult(text: trimmedText, observations: normalizedObservations)
         } catch {
             clearActiveRequest(requestID)
             terminateWorker()
@@ -547,19 +613,32 @@ pipeline = PaddleOCR(
     use_textline_orientation=False,
 )
 
-def collect_text(value):
+def collect_observations(value):
     if isinstance(value, dict):
         if isinstance(value.get("rec_texts"), list):
-            return [str(item) for item in value["rec_texts"] if str(item).strip()]
-        texts = []
+            texts = value["rec_texts"]
+            scores = value.get("rec_scores", [])
+            boxes = value.get("rec_boxes", [])
+            observations = []
+            for index, text in enumerate(texts):
+                text = str(text).strip()
+                if not text:
+                    continue
+                score = float(scores[index]) if index < len(scores) else None
+                box = boxes[index] if index < len(boxes) else None
+                if box is not None:
+                    box = [float(component) for component in box[:4]]
+                observations.append({"text": text, "confidence": score, "box": box})
+            return observations
+        observations = []
         for nested in value.values():
-            texts.extend(collect_text(nested))
-        return texts
+            observations.extend(collect_observations(nested))
+        return observations
     if isinstance(value, (list, tuple)):
-        texts = []
+        observations = []
         for nested in value:
-            texts.extend(collect_text(nested))
-        return texts
+            observations.extend(collect_observations(nested))
+        return observations
     return []
 
 for line in sys.stdin:
@@ -574,13 +653,18 @@ for line in sys.stdin:
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as image_file:
             image_file.write(base64.b64decode(request["image"]))
             path = image_file.name
-        texts = []
+        observations = []
         for result in pipeline.predict(path):
             payload = getattr(result, "json", result)
             if callable(payload):
                 payload = payload()
-            texts.extend(collect_text(payload))
-        response = {"id": request.get("id"), "ok": True, "text": "\n".join(texts)}
+            observations.extend(collect_observations(payload))
+        response = {
+            "id": request.get("id"),
+            "ok": True,
+            "text": "\n".join(item["text"] for item in observations),
+            "observations": observations,
+        }
     except Exception as error:
         response = {
             "id": request.get("id") if isinstance(request, dict) else None,
@@ -634,7 +718,7 @@ final class OllamaOCRProvider: OCRProvider {
             "stream": false,
             "messages": [[
                 "role": "user",
-                "content": "Text Recognition: Extract all visible text in reading order. Return only the recognized text.",
+                "content": PromptCatalog.OCR.recognizeText,
                 "images": [imageData.base64EncodedString()],
             ]],
         ])
@@ -693,7 +777,7 @@ final class CloudOCRProvider: OCRProvider {
             "messages": [[
                 "role": "user",
                 "content": [
-                    ["type": "text", "text": "Extract all visible text in reading order. Return only the recognized text."],
+                    ["type": "text", "text": PromptCatalog.OCR.recognizeText],
                     ["type": "image_url", "image_url": ["url": dataURL]],
                 ],
             ]],
@@ -726,7 +810,7 @@ final class CloudOCRProvider: OCRProvider {
                         "type": "base64", "media_type": mimeType,
                         "data": imageData.base64EncodedString(),
                     ]],
-                    ["type": "text", "text": "Extract all visible text in reading order. Return only the recognized text."],
+                    ["type": "text", "text": PromptCatalog.OCR.recognizeText],
                 ],
             ]],
         ])

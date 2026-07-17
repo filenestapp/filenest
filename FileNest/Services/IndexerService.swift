@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import NaturalLanguage
 
 enum IndexingStage: Equatable, Sendable {
     case hashing
@@ -62,6 +63,11 @@ struct IndexBatchResult: Equatable, Sendable {
     let completed: Int
     let failed: Int
     let stopped: Bool
+}
+
+enum IndexWriteTarget: String, Sendable {
+    case active
+    case shadow
 }
 
 private actor IndexTaskCoordinator {
@@ -237,12 +243,14 @@ final class IndexerService {
     @discardableResult
     func indexFile(id: Int64, overridePath: URL? = nil, force: Bool = false,
                    forceVectorization: Bool = false,
+                   writeTarget: IndexWriteTarget = .active,
                    checkpoint: (@Sendable () async -> Bool)? = nil,
                    stageProgress: (@Sendable (IndexingStage) async -> Void)? = nil) async -> Bool {
         await withTaskCancellationHandler {
             let requestKey = [
                 force ? "force" : "incremental",
                 forceVectorization ? "vector" : "configured",
+                writeTarget.rawValue,
                 overridePath?.standardizedFileURL.path ?? "stored-path",
                 settings.indexConfigurationSignature,
             ].joined(separator: "|")
@@ -253,6 +261,7 @@ final class IndexerService {
                     overridePath: overridePath,
                     force: force,
                     forceVectorization: forceVectorization,
+                    writeTarget: writeTarget,
                     checkpoint: checkpoint,
                     stageProgress: stageProgress
                 )
@@ -325,6 +334,7 @@ final class IndexerService {
         overridePath: URL?,
         force: Bool,
         forceVectorization: Bool,
+        writeTarget: IndexWriteTarget,
         checkpoint: (@Sendable () async -> Bool)?,
         stageProgress: (@Sendable (IndexingStage) async -> Void)?
     ) async -> Bool {
@@ -352,6 +362,7 @@ final class IndexerService {
                 url: url,
                 inspection: inspection,
                 force: force,
+                writeTarget: writeTarget,
                 checkpoint: checkpoint,
                 stageProgress: stageProgress
             )
@@ -397,7 +408,7 @@ final class IndexerService {
             ? await doclingProcessor.process(
                 url: url,
                 ext: file.ext,
-                maxTokens: settings.vectorChunkWords,
+                maxTokens: settings.chunkTokenLimit,
                 pdfAnalysis: pdfAnalysis,
                 disableBuiltInOCR: settings.ocrSource != AppSettings.OCRSource.disabled.rawValue
             )
@@ -433,16 +444,18 @@ final class IndexerService {
         updated.contentHash = contentHash
         updated.indexedAt = nil
         updated.indexSignature = nil
-        do {
-            guard try upsertIfCurrent(updated, fileId: id, generation: generation) else {
-                Self.log("indexing superseded before metadata update", level: .notice,
-                         metadata: ["file": file.name])
+        if writeTarget == .active {
+            do {
+                guard try upsertIfCurrent(updated, fileId: id, generation: generation) else {
+                    Self.log("indexing superseded before metadata update", level: .notice,
+                             metadata: ["file": file.name])
+                    return false
+                }
+            } catch {
+                Self.log("metadata update failed: \(error)", category: .indexPersistence,
+                         level: .error, metadata: ["file": file.name])
                 return false
             }
-        } catch {
-            Self.log("metadata update failed: \(error)", category: .indexPersistence,
-                     level: .error, metadata: ["file": file.name])
-            return false
         }
 
         let note = (updated.note ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -453,15 +466,18 @@ final class IndexerService {
         if !forceVectorization && !settings.shouldVectorize(extension: file.ext) {
             guard Self.contentHashMatches(url, expectedHash: contentHash),
                   isCurrentGeneration(fileId: id, generation: generation),
-                  await vectorStore.remove(fileId: id, revision: generation) else {
+                  await removeIndex(fileId: id, revision: generation, writeTarget: writeTarget) else {
                 return false
             }
             updated.indexedAt = Date()
             updated.indexSignature = indexSignature
-            do {
-                guard try upsertIfCurrent(updated, fileId: id, generation: generation) else { return false }
-            } catch {
-                Self.log("metadata-only completion failed: \(error)", category: .indexPersistence,
+            guard await persistCompletedMetadata(
+                updated,
+                fileId: id,
+                generation: generation,
+                writeTarget: writeTarget
+            ) else {
+                Self.log("metadata-only completion failed", category: .indexPersistence,
                          level: .error, metadata: ["file": file.name])
                 return false
             }
@@ -483,7 +499,7 @@ final class IndexerService {
                 Self.log("index superseded \(file.name) before vector removal")
                 return false
             }
-            guard await vectorStore.remove(fileId: id, revision: generation) else {
+            guard await removeIndex(fileId: id, revision: generation, writeTarget: writeTarget) else {
                 Self.log("vector removal rejected", category: .indexPersistence, level: .error,
                          metadata: ["file": file.name])
                 return false
@@ -494,13 +510,13 @@ final class IndexerService {
             }
             updated.indexedAt = Date()
             updated.indexSignature = indexSignature
-            do {
-                guard try upsertIfCurrent(updated, fileId: id, generation: generation) else {
-                    Self.log("index superseded \(file.name) before completion")
-                    return false
-                }
-            } catch {
-                Self.log("index completion metadata failed: \(error)", category: .indexPersistence,
+            guard await persistCompletedMetadata(
+                updated,
+                fileId: id,
+                generation: generation,
+                writeTarget: writeTarget
+            ) else {
+                Self.log("index completion metadata failed", category: .indexPersistence,
                          level: .error, metadata: ["file": file.name])
                 return false
             }
@@ -510,19 +526,26 @@ final class IndexerService {
         }
         guard await canContinue(checkpoint) else { return false }
         await stageProgress?(.chunking)
-        let chunks = Self.contentChunks(
+        var chunks = Self.contentChunks(
             doclingChunks: docling?.chunks,
             extractedText: extracted.text,
             appendedOCRText: appendedOCRText,
-            maxTokens: settings.vectorChunkWords,
-            overlap: settings.vectorChunkOverlap
+            maxTokens: settings.chunkTokenLimit
         )
+        if docling != nil, !extractedTitle.isEmpty, !chunks.isEmpty {
+            chunks = chunks.map {
+                Self.addDocumentTitleContext(extractedTitle, to: $0, maxTokens: settings.chunkTokenLimit)
+            }
+        }
         // Put the note first so explicit user-supplied information has stable retrieval weight.
         var indexChunks = [StructuredDocumentChunk]()
         if !note.isEmpty {
             indexChunks.append(StructuredDocumentChunk(text: "User note: \(note)", kind: .note))
         }
-        if !extractedTitle.isEmpty {
+        // A standalone title is useful only when no body could be extracted. For normal
+        // documents the title is embedded as context on body chunks instead of becoming a
+        // tiny, weak semantic result by itself.
+        if (docling == nil || chunks.isEmpty), !extractedTitle.isEmpty {
             indexChunks.append(StructuredDocumentChunk(text: extractedTitle, kind: .title))
         }
         indexChunks.append(contentsOf: chunks)
@@ -558,11 +581,12 @@ final class IndexerService {
             return false
         }
         await stageProgress?(.saving)
-        guard await vectorStore.replace(
+        guard await replaceIndex(
             fileId: id,
             chunks: embeddings,
             model: embedder.name,
-            revision: generation
+            revision: generation,
+            writeTarget: writeTarget
         ) else {
             Self.log("vector replacement rejected", category: .indexPersistence, level: .error,
                      metadata: ["file": file.name])
@@ -574,13 +598,13 @@ final class IndexerService {
         }
         updated.indexedAt = Date()
         updated.indexSignature = indexSignature
-        do {
-            guard try upsertIfCurrent(updated, fileId: id, generation: generation) else {
-                Self.log("index superseded \(file.name) before completion")
-                return false
-            }
-        } catch {
-            Self.log("index completion metadata failed: \(error)", category: .indexPersistence,
+        guard await persistCompletedMetadata(
+            updated,
+            fileId: id,
+            generation: generation,
+            writeTarget: writeTarget
+        ) else {
+            Self.log("index completion metadata failed", category: .indexPersistence,
                      level: .error, metadata: ["file": file.name])
             return false
         }
@@ -611,6 +635,7 @@ final class IndexerService {
                                 url: URL,
                                 inspection: DirectoryInspection,
                                 force: Bool,
+                                writeTarget: IndexWriteTarget,
                                 checkpoint: (@Sendable () async -> Bool)?,
                                 stageProgress: (@Sendable (IndexingStage) async -> Void)?) async -> Bool {
         guard let id = file.id else { return false }
@@ -656,12 +681,14 @@ final class IndexerService {
         updated.contentHash = inspection.snapshot.signature
         updated.indexedAt = nil
         updated.indexSignature = nil
-        do {
-            guard try upsertIfCurrent(updated, fileId: id, generation: generation) else { return false }
-        } catch {
-            Self.log("directory metadata update failed: \(error)", category: .indexPersistence,
-                     level: .error, metadata: ["entry": file.name])
-            return false
+        if writeTarget == .active {
+            do {
+                guard try upsertIfCurrent(updated, fileId: id, generation: generation) else { return false }
+            } catch {
+                Self.log("directory metadata update failed: \(error)", category: .indexPersistence,
+                         level: .error, metadata: ["entry": file.name])
+                return false
+            }
         }
 
         guard await canContinue(checkpoint) else { return false }
@@ -676,8 +703,8 @@ final class IndexerService {
         }
         chunks.append(contentsOf: Self.chunk(
             text: updated.contentText ?? "",
-            maxWords: settings.vectorChunkWords,
-            overlap: settings.vectorChunkOverlap
+            maxWords: settings.chunkTokenLimit,
+            overlap: 0
         ).map { StructuredDocumentChunk(text: $0) })
 
         let embedder = activeEmbedder()
@@ -697,11 +724,12 @@ final class IndexerService {
         guard
               DirectoryInspector.inspect(url)?.snapshot.signature == inspection.snapshot.signature,
               isCurrentGeneration(fileId: id, generation: generation),
-              await vectorStore.replace(
+              await replaceIndex(
                 fileId: id,
                 chunks: embeddings,
                 model: embedder.name,
-                revision: generation
+                revision: generation,
+                writeTarget: writeTarget
               ),
               DirectoryInspector.inspect(url)?.snapshot.signature == inspection.snapshot.signature else {
             Self.log("directory index aborted \(file.name): directory changed during indexing")
@@ -709,10 +737,13 @@ final class IndexerService {
         }
         updated.indexedAt = Date()
         updated.indexSignature = settings.indexConfigurationSignature
-        do {
-            guard try upsertIfCurrent(updated, fileId: id, generation: generation) else { return false }
-        } catch {
-            Self.log("directory completion metadata failed: \(error)", category: .indexPersistence,
+        guard await persistCompletedMetadata(
+            updated,
+            fileId: id,
+            generation: generation,
+            writeTarget: writeTarget
+        ) else {
+            Self.log("directory completion metadata failed", category: .indexPersistence,
                      level: .error, metadata: ["entry": file.name])
             return false
         }
@@ -724,12 +755,80 @@ final class IndexerService {
         return true
     }
 
+    private func replaceIndex(
+        fileId: Int64,
+        chunks: [EmbeddingChunk],
+        model: String,
+        revision: UInt64,
+        writeTarget: IndexWriteTarget
+    ) async -> Bool {
+        switch writeTarget {
+        case .active:
+            return await vectorStore.replace(
+                fileId: fileId,
+                chunks: chunks,
+                model: model,
+                revision: revision
+            )
+        case .shadow:
+            return await vectorStore.replaceShadow(
+                fileId: fileId,
+                chunks: chunks,
+                model: model
+            )
+        }
+    }
+
+    private func removeIndex(
+        fileId: Int64,
+        revision: UInt64,
+        writeTarget: IndexWriteTarget
+    ) async -> Bool {
+        switch writeTarget {
+        case .active:
+            return await vectorStore.remove(fileId: fileId, revision: revision)
+        case .shadow:
+            // A shadow generation starts empty, so a file without vectors needs only metadata.
+            return true
+        }
+    }
+
+    private func persistCompletedMetadata(
+        _ file: FileRecord,
+        fileId: Int64,
+        generation: UInt64,
+        writeTarget: IndexWriteTarget
+    ) async -> Bool {
+        guard isCurrentGeneration(fileId: fileId, generation: generation) else { return false }
+        switch writeTarget {
+        case .active:
+            do {
+                return try upsertIfCurrent(file, fileId: fileId, generation: generation)
+            } catch {
+                Self.log(
+                    "index metadata persistence failed: \(error)",
+                    category: .indexPersistence,
+                    level: .error,
+                    metadata: ["fileID": "\(fileId)"]
+                )
+                return false
+            }
+        case .shadow:
+            return await vectorStore.stageShadowMetadata(file)
+        }
+    }
+
     private func embed(
         chunks: [StructuredDocumentChunk],
         using provider: EmbeddingProvider,
         checkpoint: (@Sendable () async -> Bool)?,
         stageProgress: (@Sendable (IndexingStage) async -> Void)?
     ) async -> [EmbeddingChunk] {
+        let chunks = Self.retrievalChildren(
+            from: chunks,
+            targetTokens: settings.vectorRetrievalChunkTokens,
+            overlapTokens: settings.vectorChunkOverlap
+        )
         let batchSize = max(1, provider.maximumBatchSize)
         var result = [EmbeddingChunk]()
         result.reserveCapacity(chunks.count)
@@ -794,7 +893,14 @@ final class IndexerService {
                     sectionPath: chunk.sectionPath,
                     pageStart: chunk.pageStart,
                     pageEnd: chunk.pageEnd,
-                    kind: chunk.kind
+                    kind: chunk.kind,
+                    parentIndex: chunk.parentIndex,
+                    parentText: chunk.parentText,
+                    entityTerms: chunk.entityTerms,
+                    tokenCount: chunk.tokenCount,
+                    tokenizerProfile: chunk.tokenizerProfile,
+                    tokenizerVersion: chunk.tokenizerVersion,
+                    tokenCountAccuracy: chunk.tokenCountAccuracy
                 ))
             }
             return result
@@ -903,16 +1009,157 @@ final class IndexerService {
                 sectionPath: chunk.sectionPath,
                 pageStart: chunk.pageStart,
                 pageEnd: chunk.pageEnd,
-                kind: chunk.kind
+                kind: chunk.kind,
+                parentIndex: chunk.parentIndex,
+                parentText: chunk.parentText,
+                entityTerms: chunk.entityTerms
             )
         }
     }
 
+    /// Builds small retrieval units while retaining the larger Docling section as the unit
+    /// supplied to the answer model. This improves recall without fragmenting answer context.
+    static func retrievalChildren(
+        from parents: [StructuredDocumentChunk],
+        targetTokens: Int = 280,
+        overlapTokens: Int = 48
+    ) -> [StructuredDocumentChunk] {
+        var children = [StructuredDocumentChunk]()
+        for (parentIndex, parent) in parents.enumerated() {
+            let resolvedParentIndex = parent.parentIndex ?? parentIndex
+            let parentText = parent.parentText ?? parent.text
+            let pieces: [String]
+            if estimatedTokenCount(parent.text) > Double(max(360, targetTokens)) {
+                pieces = parent.kind == .table
+                    ? tableRetrievalPieces(parent.text, targetTokens: targetTokens)
+                    : chunk(
+                        text: parent.text,
+                        maxWords: max(120, targetTokens),
+                        overlap: min(max(0, overlapTokens), max(119, targetTokens - 1))
+                    )
+            } else {
+                pieces = [parent.text]
+            }
+
+            let prefix: String
+            if parent.contextualText.hasSuffix(parent.text) {
+                prefix = String(parent.contextualText.dropLast(parent.text.count))
+            } else if !parent.sectionPath.isEmpty {
+                prefix = parent.sectionPath.joined(separator: " > ") + "\n"
+            } else {
+                prefix = ""
+            }
+            for piece in pieces where !piece.isEmpty {
+                children.append(StructuredDocumentChunk(
+                    text: piece,
+                    contextualText: prefix + piece,
+                    sectionPath: parent.sectionPath,
+                    pageStart: parent.pageStart,
+                    pageEnd: parent.pageEnd,
+                    kind: parent.kind,
+                    parentIndex: resolvedParentIndex,
+                    parentText: parentText,
+                    entityTerms: extractedEntityTerms(from: piece)
+                ))
+            }
+        }
+        return children
+    }
+
+    /// Splits large tables by rows and repeats the header so each child remains meaningful.
+    private static func tableRetrievalPieces(_ text: String, targetTokens: Int) -> [String] {
+        let rows = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        guard rows.count > 2 else {
+            return chunk(text: text, maxWords: targetTokens, overlap: 0)
+        }
+        let header = rows[0]
+        var result = [String]()
+        var current = [header]
+        var currentTokens = estimatedTokenCount(header)
+        for row in rows.dropFirst() {
+            let rowTokens = estimatedTokenCount(row)
+            if current.count > 1, currentTokens + rowTokens > Double(targetTokens) {
+                result.append(current.joined(separator: "\n"))
+                current = [header]
+                currentTokens = estimatedTokenCount(header)
+            }
+            current.append(row)
+            currentTokens += rowTokens
+        }
+        if current.count > 1 { result.append(current.joined(separator: "\n")) }
+        return result.isEmpty ? [text] : result
+    }
+
+    /// Extract high-precision identifiers before semantic retrieval. These terms are useful
+    /// for invoice numbers, registration IDs, email addresses, dates, and monetary values.
+    static func extractedEntityTerms(from text: String) -> [String] {
+        let patterns = [
+            #"\b[A-Z0-9][A-Z0-9._/-]{2,}\d[A-Z0-9._/-]*\b"#,
+            #"\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b"#,
+            #"\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b"#,
+            #"(?:[$€£¥]|SGD|USD|EUR|CNY|RMB)\s*\d[\d,.]*"#,
+        ]
+        var matches = Set<String>()
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(
+                pattern: pattern,
+                options: [.caseInsensitive]
+            ) else { continue }
+            for result in expression.matches(in: text, range: range) {
+                guard let matchRange = Range(result.range, in: text) else { continue }
+                let value = text[matchRange]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                if value.count >= 3 { matches.insert(value) }
+            }
+        }
+        return matches.sorted()
+    }
+
     private static func splitInHalf(_ text: String) -> [String] {
+        let paragraphs = semanticParagraphs(in: text)
+        if paragraphs.count > 1 {
+            return balancedSemanticHalves(paragraphs, separator: "\n\n")
+        }
+        let sentences = semanticSentences(in: text)
+        if sentences.count > 1 {
+            return balancedSemanticHalves(sentences, separator: " ")
+        }
+
+        // Emergency fallback for a single oversized sentence: preserve every complete word.
+        // Boundary-free CJK or generated data has no smaller linguistic unit to preserve, so
+        // the final fallback uses an extended-grapheme boundary rather than a raw byte offset.
         let characters = Array(text)
         guard characters.count > 1 else { return [] }
         let middle = characters.count / 2
-        return [String(characters[..<middle]), String(characters[middle...])]
+        let candidateOffsets = (0..<characters.count).filter { characters[$0].isWhitespace }
+        let split = candidateOffsets.min { abs($0 - middle) < abs($1 - middle) } ?? middle
+        guard split > 0, split < characters.count else { return [] }
+        let left = String(characters[..<split]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let right = String(characters[split...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return left.isEmpty || right.isEmpty ? [] : [left, right]
+    }
+
+    private static func balancedSemanticHalves(_ units: [String], separator: String) -> [String] {
+        guard units.count > 1 else { return [] }
+        let target = units.reduce(0) { $0 + $1.count } / 2
+        var bestIndex = 1
+        var accumulated = units[0].count
+        var bestDistance = abs(accumulated - target)
+        for index in 1..<units.count {
+            accumulated += separator.count + units[index].count
+            let distance = abs(accumulated - target)
+            if distance < bestDistance {
+                bestDistance = distance
+                bestIndex = index + 1
+            }
+        }
+        bestIndex = min(max(1, bestIndex), units.count - 1)
+        return [
+            units[..<bestIndex].joined(separator: separator),
+            units[bestIndex...].joined(separator: separator),
+        ]
     }
 
     private static func isCancellation(_ error: Error) -> Bool {
@@ -980,6 +1227,27 @@ final class IndexerService {
         }
     }
 
+    @discardableResult
+    func rebuildRetrievalIndex(
+        progress: (@MainActor (VectorIndexRebuildProgress) -> Void)? = nil
+    ) async -> Bool {
+        let total = vectorStore.count
+        await progress?(VectorIndexRebuildProgress(
+            phase: .preparing, completed: 0, total: total,
+            currentFileName: nil, failed: 0, stage: .saving
+        ))
+        let succeeded = await vectorStore.rebuildRetrievalIndex()
+        await progress?(VectorIndexRebuildProgress(
+            phase: succeeded ? .completed : .failed,
+            completed: succeeded ? total : 0,
+            total: total,
+            currentFileName: nil,
+            failed: succeeded ? 0 : total,
+            stage: .saving
+        ))
+        return succeeded
+    }
+
     /// Waits for all indexing tasks and reports progress using the actual file count.
     @discardableResult
     func rebuildAll(
@@ -1015,23 +1283,14 @@ final class IndexerService {
                 progress: progress
             )
         }
-        if rebuildVectorSpace {
-            await progress?(VectorIndexRebuildProgress(
-                phase: .clearing, completed: 0, total: total, currentFileName: nil, failed: 0
-            ))
-            guard await vectorStore.removeAll() else {
-                await progress?(VectorIndexRebuildProgress(
-                    phase: .failed,
-                    completed: 0,
-                    total: total,
-                    currentFileName: nil,
-                    failed: total
-                ))
-                return false
-            }
-        } else {
-            await vectorStore.loadAll()
+        if rebuildVectorSpace && forceReprocessing {
+            return await rebuildSourcesUsingShadowIndex(
+                files: files,
+                checkpoint: checkpoint,
+                progress: progress
+            )
         }
+        await vectorStore.loadAll()
 
         let result = await indexFiles(
             files,
@@ -1057,6 +1316,73 @@ final class IndexerService {
             failed: result.failed
         ))
         return result.failed == 0
+    }
+
+    /// Rebuilds parsing, chunks, and vectors into an isolated generation.
+    /// The active RAG index remains queryable until the final atomic commit.
+    private func rebuildSourcesUsingShadowIndex(
+        files: [FileRecord],
+        checkpoint: (@Sendable () async -> Bool)?,
+        progress: (@MainActor (VectorIndexRebuildProgress) -> Void)?
+    ) async -> Bool {
+        let total = files.count
+        guard await vectorStore.beginShadowRebuild() else {
+            await progress?(VectorIndexRebuildProgress(
+                phase: .failed, completed: 0, total: total,
+                currentFileName: nil, failed: total, stage: .saving
+            ))
+            return false
+        }
+
+        let result = await indexFiles(
+            files,
+            force: true,
+            writeTarget: .shadow,
+            checkpoint: checkpoint,
+            progress: progress
+        )
+        guard !result.stopped, result.failed == 0, await canContinue(checkpoint) else {
+            await vectorStore.discardShadowRebuild()
+            await progress?(VectorIndexRebuildProgress(
+                phase: result.stopped || Task.isCancelled ? .stopped : .failed,
+                completed: result.completed,
+                total: total,
+                currentFileName: nil,
+                failed: result.failed
+            ))
+            return false
+        }
+
+        await progress?(VectorIndexRebuildProgress(
+            phase: .clearing,
+            completed: result.completed,
+            total: total,
+            currentFileName: nil,
+            failed: 0,
+            stage: .saving
+        ))
+        let committed = await vectorStore.commitShadowRebuild(expectedFileCount: total)
+        guard committed else {
+            await vectorStore.discardShadowRebuild()
+            await progress?(VectorIndexRebuildProgress(
+                phase: .failed,
+                completed: result.completed,
+                total: total,
+                currentFileName: nil,
+                failed: total,
+                stage: .saving
+            ))
+            return false
+        }
+        await progress?(VectorIndexRebuildProgress(
+            phase: .completed,
+            completed: total,
+            total: total,
+            currentFileName: nil,
+            failed: 0,
+            stage: .saving
+        ))
+        return true
     }
 
     /// Reuses persisted chunks and calls only the embedding provider, atomically replacing old vectors after every call succeeds.
@@ -1184,6 +1510,7 @@ final class IndexerService {
     func indexFiles(
         _ files: [FileRecord],
         force: Bool = false,
+        writeTarget: IndexWriteTarget = .active,
         checkpoint: (@Sendable () async -> Bool)? = nil,
         progress: (@MainActor (VectorIndexRebuildProgress) -> Void)? = nil
     ) async -> IndexBatchResult {
@@ -1203,6 +1530,7 @@ final class IndexerService {
                     let succeeded = await self.indexFile(
                         id: id,
                         force: force,
+                        writeTarget: writeTarget,
                         checkpoint: checkpoint,
                         stageProgress: { stage in
                             await reporter.report(fileName: file.name, stage: stage)
@@ -1241,49 +1569,168 @@ final class IndexerService {
         return await checkpoint?() ?? true
     }
 
-    /// Model-independent local estimate: 1 token is about 0.75 English words or 1.5 CJK characters.
-    /// Docling uses its model tokenizer; this estimate serves only the native parser's sliding-window fallback.
+    private struct SemanticChunkUnit {
+        let text: String
+        let paragraphIndex: Int
+    }
+
+    /// Splits on semantic boundaries in descending order of strength: paragraphs first, then
+    /// complete sentences. A single sentence is never divided merely to satisfy a soft target.
+    /// Overlap also consists only of complete semantic units, so no chunk can begin mid-word.
     static func chunk(text: String, maxWords: Int, overlap: Int) -> [String] {
         guard maxWords > 0 else { return [] }
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return [] }
-        let characters = Array(normalized)
-        let weights = estimatedTokenWeights(characters)
-        let maxTokens = Double(maxWords)
-        let overlapTokens = Double(min(max(overlap, 0), maxWords - 1))
-        var chunks = [String]()
-        var start = 0
+        if maxWords >= 64,
+           estimatedTokenCount(normalized) > Double(maxWords),
+           semanticParagraphs(in: normalized).count == 1,
+           semanticSentences(in: normalized).count == 1 {
+            return emergencyLexicalChunks(
+                normalized,
+                maxTokens: maxWords,
+                overlapTokens: min(max(overlap, 0), maxWords - 1)
+            )
+        }
+        let units = semanticChunkUnits(in: normalized, maxTokens: maxWords)
+        guard !units.isEmpty else { return [] }
 
-        while start < characters.count {
-            var end = start
-            var tokens = 0.0
-            while end < characters.count, tokens + weights[end] <= maxTokens + 0.000_001 {
-                tokens += weights[end]
-                end += 1
+        let overlapBudget = min(max(overlap, 0), maxWords - 1)
+        var result = [String]()
+        var current = [SemanticChunkUnit]()
+
+        for unit in units {
+            if current.isEmpty {
+                current = [unit]
+                continue
             }
-            if end == start { end += 1 }
-            if end < characters.count {
-                let minimumBoundary = start + max(1, (end - start) * 3 / 4)
-                if let whitespace = stride(from: end - 1, through: minimumBoundary, by: -1)
-                    .first(where: { characters[$0].isWhitespace }) {
-                    end = whitespace
+            let candidate = renderedSemanticUnits(current + [unit])
+            if estimatedTokenCount(candidate) <= Double(maxWords) {
+                current.append(unit)
+                continue
+            }
+
+            result.append(renderedSemanticUnits(current))
+            var next = trailingSemanticOverlap(from: current, tokenBudget: overlapBudget)
+            while !next.isEmpty,
+                  estimatedTokenCount(renderedSemanticUnits(next + [unit])) > Double(maxWords) {
+                next.removeFirst()
+            }
+            next.append(unit)
+            current = next
+        }
+        if !current.isEmpty { result.append(renderedSemanticUnits(current)) }
+        return result
+    }
+
+    private static func semanticChunkUnits(in text: String, maxTokens: Int) -> [SemanticChunkUnit] {
+        semanticParagraphs(in: text).enumerated().flatMap { paragraphIndex, paragraph in
+            guard estimatedTokenCount(paragraph) > Double(maxTokens) else {
+                return [SemanticChunkUnit(text: paragraph, paragraphIndex: paragraphIndex)]
+            }
+            let sentences = semanticSentences(in: paragraph)
+            guard sentences.count > 1 else {
+                return [SemanticChunkUnit(text: paragraph, paragraphIndex: paragraphIndex)]
+            }
+            return sentences.map {
+                SemanticChunkUnit(text: $0, paragraphIndex: paragraphIndex)
+            }
+        }
+    }
+
+    /// Emergency path for generated run-on text. It keeps complete lexical units and applies
+    /// overlap using the same canonical token counter as normal semantic chunking.
+    private static func emergencyLexicalChunks(
+        _ text: String,
+        maxTokens: Int,
+        overlapTokens: Int
+    ) -> [String] {
+        let words = text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let usesWords = words.count > 1
+        let units = usesWords ? words : Array(text).map(String.init)
+        let separator = usesWords ? " " : ""
+        guard !units.isEmpty else { return [] }
+
+        func render(_ values: [String]) -> String { values.joined(separator: separator) }
+        var chunks = [String]()
+        var current = [String]()
+        for unit in units {
+            if current.isEmpty || estimatedTokenCount(render(current + [unit])) <= Double(maxTokens) {
+                current.append(unit)
+                continue
+            }
+            chunks.append(render(current))
+            var next = [String]()
+            if overlapTokens > 0 {
+                for candidate in current.reversed() {
+                    let suffix = [candidate] + next
+                    guard estimatedTokenCount(render(suffix)) <= Double(overlapTokens) else { break }
+                    next = suffix
                 }
             }
-            let value = String(characters[start..<end])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !value.isEmpty { chunks.append(value) }
-            if end >= characters.count { break }
-
-            var nextStart = end
-            var retainedTokens = 0.0
-            while nextStart > start,
-                  retainedTokens + weights[nextStart - 1] <= overlapTokens + 0.000_001 {
-                nextStart -= 1
-                retainedTokens += weights[nextStart]
+            while !next.isEmpty,
+                  estimatedTokenCount(render(next + [unit])) > Double(maxTokens) {
+                next.removeFirst()
             }
-            start = max(start + 1, nextStart)
+            next.append(unit)
+            current = next
         }
+        if !current.isEmpty { chunks.append(render(current)) }
         return chunks
+    }
+
+    private static func semanticParagraphs(in text: String) -> [String] {
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+        guard let expression = try? NSRegularExpression(pattern: #"\n[\t ]*\n+"#) else {
+            return [normalized]
+        }
+        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        let separated = expression.stringByReplacingMatches(
+            in: normalized,
+            range: range,
+            withTemplate: "\u{001E}"
+        )
+        return separated.split(separator: "\u{001E}").compactMap { value in
+            let paragraph = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return paragraph.isEmpty ? nil : paragraph
+        }
+    }
+
+    private static func semanticSentences(in text: String) -> [String] {
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
+        var sentences = [String]()
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            let sentence = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !sentence.isEmpty { sentences.append(sentence) }
+            return true
+        }
+        return sentences.isEmpty ? [text] : sentences
+    }
+
+    private static func renderedSemanticUnits(_ units: [SemanticChunkUnit]) -> String {
+        guard let first = units.first else { return "" }
+        var result = first.text
+        for (previous, current) in zip(units, units.dropFirst()) {
+            result += previous.paragraphIndex == current.paragraphIndex ? " " : "\n\n"
+            result += current.text
+        }
+        return result
+    }
+
+    private static func trailingSemanticOverlap(
+        from units: [SemanticChunkUnit],
+        tokenBudget: Int
+    ) -> [SemanticChunkUnit] {
+        guard tokenBudget > 0 else { return [] }
+        var suffix = [SemanticChunkUnit]()
+        for unit in units.reversed() {
+            let candidate = [unit] + suffix
+            guard estimatedTokenCount(renderedSemanticUnits(candidate)) <= Double(tokenBudget) else {
+                break
+            }
+            suffix = candidate
+        }
+        return suffix
     }
 
     /// Docling chunks do not include OCR text appended afterwards, while the native fallback
@@ -1293,21 +1740,267 @@ final class IndexerService {
         doclingChunks: [StructuredDocumentChunk]?,
         extractedText: String,
         appendedOCRText: String?,
-        maxTokens: Int,
-        overlap: Int
+        maxTokens: Int
     ) -> [StructuredDocumentChunk] {
-        guard var chunks = doclingChunks else {
-            return chunk(text: extractedText, maxWords: maxTokens, overlap: overlap)
+        guard let doclingChunks else {
+            return chunk(text: extractedText, maxWords: maxTokens, overlap: 0)
                 .map { StructuredDocumentChunk(text: $0) }
         }
+        var chunks = postProcessDoclingChunks(doclingChunks, maxTokens: maxTokens)
         if let appendedOCRText, !appendedOCRText.isEmpty {
             chunks.append(contentsOf: chunk(
                 text: appendedOCRText,
                 maxWords: maxTokens,
-                overlap: overlap
+                overlap: 0
             ).map { StructuredDocumentChunk(text: $0) })
         }
         return chunks
+    }
+
+    /// Docling preserves document boundaries and enforces a maximum size, but it can still
+    /// return tiny titles, list tails, or layout fragments. This pass removes unambiguous
+    /// noise and merges short compatible neighbors without crossing semantic boundaries.
+    static func postProcessDoclingChunks(
+        _ source: [StructuredDocumentChunk],
+        maxTokens: Int,
+        minimumTokens: Int? = nil
+    ) -> [StructuredDocumentChunk] {
+        let minimum = max(24, min(minimumTokens ?? 80, max(24, maxTokens / 4)))
+        let normalized = source.compactMap(normalizedChunk).filter { !isUnambiguousNoise($0.text) }
+        guard normalized.count > 1 else { return normalized }
+        let sentenceRepaired = repairSplitSentences(in: normalized)
+
+        // A short heading belongs with the following content. Resolve it before the general
+        // forward merge so it cannot accidentally attach to the previous section.
+        var titleAttached = [StructuredDocumentChunk]()
+        var index = 0
+        while index < sentenceRepaired.count {
+            let current = sentenceRepaired[index]
+            if current.kind == .title,
+               estimatedTokenCount(current.text) < Double(minimum),
+               index + 1 < sentenceRepaired.count {
+                let next = sentenceRepaired[index + 1]
+                let candidate = mergeChunks(current, next)
+                if canAttachTitle(current, to: next),
+                   estimatedTokenCount(candidate.contextualText) <= Double(maxTokens) {
+                    titleAttached.append(candidate)
+                    index += 2
+                    continue
+                }
+            }
+            titleAttached.append(current)
+            index += 1
+        }
+
+        var merged = [StructuredDocumentChunk]()
+        for current in titleAttached {
+            guard let previous = merged.last else {
+                merged.append(current)
+                continue
+            }
+            let eitherIsShort = estimatedTokenCount(previous.text) < Double(minimum)
+                || estimatedTokenCount(current.text) < Double(minimum)
+            let candidate = mergeChunks(previous, current)
+            if eitherIsShort,
+               canMergePeerChunks(previous, current),
+               estimatedTokenCount(candidate.contextualText) <= Double(maxTokens) {
+                merged[merged.count - 1] = candidate
+            } else {
+                merged.append(current)
+            }
+        }
+
+        if merged.count != source.count {
+            log(
+                "Docling chunks post-processed",
+                category: .indexExtraction,
+                level: .debug,
+                metadata: [
+                    "before": "\(source.count)",
+                    "after": "\(merged.count)",
+                    "minimumTokens": "\(minimum)",
+                    "maxTokens": "\(maxTokens)",
+                ]
+            )
+        }
+        return merged
+    }
+
+    private static func repairSplitSentences(
+        in chunks: [StructuredDocumentChunk]
+    ) -> [StructuredDocumentChunk] {
+        var repaired = [StructuredDocumentChunk]()
+        for current in chunks {
+            guard let previous = repaired.last,
+                  boundarySplitsSentence(previous, current) else {
+                repaired.append(current)
+                continue
+            }
+            repaired[repaired.count - 1] = mergeSentenceFragments(previous, current)
+        }
+        return repaired
+    }
+
+    private static func boundarySplitsSentence(
+        _ first: StructuredDocumentChunk,
+        _ second: StructuredDocumentChunk
+    ) -> Bool {
+        guard first.kind == .text, second.kind == .text,
+              first.sectionPath == second.sectionPath,
+              pagesAreAdjacent(first, second) else { return false }
+        let firstText = first.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let secondText = second.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let leading = secondText.first, leading.isLowercase,
+              let trailing = firstText.last else { return false }
+        return !".!?。！？".contains(trailing)
+    }
+
+    private static func mergeSentenceFragments(
+        _ first: StructuredDocumentChunk,
+        _ second: StructuredDocumentChunk
+    ) -> StructuredDocumentChunk {
+        let text = first.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            + " "
+            + second.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let firstPrefix = contextualPrefix(of: first)
+        let secondPrefix = contextualPrefix(of: second)
+        let prefix = firstPrefix == secondPrefix
+            ? firstPrefix
+            : (firstPrefix.isEmpty ? secondPrefix : firstPrefix)
+        return StructuredDocumentChunk(
+            text: text,
+            contextualText: prefix + text,
+            sectionPath: second.sectionPath.isEmpty ? first.sectionPath : second.sectionPath,
+            pageStart: [first.pageStart, second.pageStart].compactMap { $0 }.min(),
+            pageEnd: [first.pageEnd, second.pageEnd].compactMap { $0 }.max(),
+            kind: .text
+        )
+    }
+
+    private static func contextualPrefix(of chunk: StructuredDocumentChunk) -> String {
+        guard chunk.contextualText.hasSuffix(chunk.text) else {
+            return chunk.sectionPath.isEmpty ? "" : chunk.sectionPath.joined(separator: " > ") + "\n"
+        }
+        return String(chunk.contextualText.dropLast(chunk.text.count))
+    }
+
+    private static func normalizedChunk(_ chunk: StructuredDocumentChunk) -> StructuredDocumentChunk? {
+        let text = chunk.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        let contextual = chunk.contextualText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return StructuredDocumentChunk(
+            text: text,
+            contextualText: contextual.isEmpty ? text : contextual,
+            sectionPath: chunk.sectionPath.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            pageStart: chunk.pageStart,
+            pageEnd: chunk.pageEnd,
+            kind: chunk.kind,
+            parentIndex: chunk.parentIndex,
+            parentText: chunk.parentText,
+            entityTerms: chunk.entityTerms,
+            tokenCount: chunk.tokenCount,
+            tokenizerProfile: chunk.tokenizerProfile,
+            tokenizerVersion: chunk.tokenizerVersion,
+            tokenCountAccuracy: chunk.tokenCountAccuracy
+        )
+    }
+
+    private static func isUnambiguousNoise(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return true }
+        // Preserve short words, identifiers, amounts, and numeric values. Only symbol-only
+        // fragments and explicit page labels are safe to remove without OCR confidence data.
+        if normalized.allSatisfy({ !$0.isLetter && !$0.isNumber }) { return true }
+        return normalized.range(
+            of: #"^(?:page|p\.?|页)\s*\d{1,4}(?:\s*(?:of|/|共)\s*\d{1,4})?$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private static func canAttachTitle(
+        _ title: StructuredDocumentChunk,
+        to content: StructuredDocumentChunk
+    ) -> Bool {
+        guard content.kind != .table && content.kind != .picture && pagesAreAdjacent(title, content) else {
+            return false
+        }
+        if title.sectionPath == content.sectionPath { return true }
+        let normalizedTitle = normalizedTextFingerprint(title.text)
+        return content.sectionPath.contains { heading in
+            let normalizedHeading = normalizedTextFingerprint(heading)
+            return !normalizedTitle.isEmpty
+                && (normalizedHeading.contains(normalizedTitle) || normalizedTitle.contains(normalizedHeading))
+        }
+    }
+
+    private static func canMergePeerChunks(
+        _ first: StructuredDocumentChunk,
+        _ second: StructuredDocumentChunk
+    ) -> Bool {
+        guard first.sectionPath == second.sectionPath, pagesAreAdjacent(first, second) else { return false }
+        let compatibleKinds: Set<DocumentChunkKind> = [.text, .list]
+        return compatibleKinds.contains(first.kind) && compatibleKinds.contains(second.kind)
+    }
+
+    private static func pagesAreAdjacent(
+        _ first: StructuredDocumentChunk,
+        _ second: StructuredDocumentChunk
+    ) -> Bool {
+        guard let firstEnd = first.pageEnd ?? first.pageStart,
+              let secondStart = second.pageStart ?? second.pageEnd else { return true }
+        return secondStart >= firstEnd && secondStart <= firstEnd + 1
+    }
+
+    private static func mergeChunks(
+        _ first: StructuredDocumentChunk,
+        _ second: StructuredDocumentChunk
+    ) -> StructuredDocumentChunk {
+        let text = [first.text, second.text].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        let contextual = mergeContextualText(first.contextualText, second.contextualText, fallback: text)
+        let sectionPath = second.sectionPath.isEmpty ? first.sectionPath : second.sectionPath
+        let kind: DocumentChunkKind = first.kind == second.kind ? first.kind : .text
+        return StructuredDocumentChunk(
+            text: text,
+            contextualText: contextual,
+            sectionPath: sectionPath,
+            pageStart: [first.pageStart, second.pageStart].compactMap { $0 }.min(),
+            pageEnd: [first.pageEnd, second.pageEnd].compactMap { $0 }.max(),
+            kind: kind
+        )
+    }
+
+    private static func mergeContextualText(_ first: String, _ second: String, fallback: String) -> String {
+        let first = first.trimmingCharacters(in: .whitespacesAndNewlines)
+        let second = second.trimmingCharacters(in: .whitespacesAndNewlines)
+        if first.isEmpty { return second.isEmpty ? fallback : second }
+        if second.isEmpty || first == second { return first }
+        if first.contains(second) { return first }
+        if second.contains(first) { return second }
+        return first + "\n\n" + second
+    }
+
+    private static func addDocumentTitleContext(
+        _ title: String,
+        to chunk: StructuredDocumentChunk,
+        maxTokens: Int
+    ) -> StructuredDocumentChunk {
+        let normalizedTitle = normalizedTextFingerprint(title)
+        let contextualFingerprint = normalizedTextFingerprint(chunk.contextualText)
+        guard !normalizedTitle.isEmpty, !contextualFingerprint.contains(normalizedTitle) else { return chunk }
+        let contextualText = "Document: \(title)\n\n\(chunk.contextualText)"
+        guard estimatedTokenCount(contextualText) <= Double(maxTokens) else { return chunk }
+        return StructuredDocumentChunk(
+            text: chunk.text,
+            contextualText: contextualText,
+            sectionPath: chunk.sectionPath,
+            pageStart: chunk.pageStart,
+            pageEnd: chunk.pageEnd,
+            kind: chunk.kind
+        )
+    }
+
+    static func estimatedTokenCount(_ text: String) -> Double {
+        Double(TokenCounter.estimate(text).count)
     }
 
     static func shouldAppendOCRText(_ candidate: String, to existing: String) -> Bool {
@@ -1319,54 +2012,6 @@ final class IndexerService {
 
     private static func normalizedTextFingerprint(_ text: String) -> String {
         String(text.lowercased().filter { $0.isLetter || $0.isNumber })
-    }
-
-    private static func estimatedTokenWeights(_ characters: [Character]) -> [Double] {
-        var weights = Array(repeating: 0.0, count: characters.count)
-        var index = 0
-        while index < characters.count {
-            let character = characters[index]
-            if character.isWhitespace {
-                index += 1
-            } else if isChineseCharacter(character) {
-                weights[index] = 2.0 / 3.0
-                index += 1
-            } else if isEnglishWordCharacter(character) {
-                let start = index
-                while index < characters.count, isEnglishWordCharacter(characters[index]) {
-                    index += 1
-                }
-                let perCharacter = (4.0 / 3.0) / Double(index - start)
-                for wordIndex in start..<index { weights[wordIndex] = perCharacter }
-            } else {
-                // Punctuation and other symbols often form individual tokens; using 1 avoids underestimating dense CSV or source code.
-                weights[index] = 1
-                index += 1
-            }
-        }
-        return weights
-    }
-
-    private static func isEnglishWordCharacter(_ character: Character) -> Bool {
-        character.unicodeScalars.allSatisfy { scalar in
-            guard scalar.isASCII else { return false }
-            return CharacterSet.alphanumerics.contains(scalar)
-                || scalar.value == 0x27
-                || scalar.value == 0x2D
-                || scalar.value == 0x5F
-        }
-    }
-
-    private static func isChineseCharacter(_ character: Character) -> Bool {
-        character.unicodeScalars.allSatisfy { scalar in
-            switch scalar.value {
-            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF,
-                 0x20000...0x2A6DF, 0x2A700...0x2EBEF, 0x30000...0x323AF:
-                return true
-            default:
-                return false
-            }
-        }
     }
 
     static func log(

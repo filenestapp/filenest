@@ -18,6 +18,7 @@ A capability is complete only when all applicable layers agree:
 | Finder | File Explorer |
 | Trash | Recycle Bin |
 | MenuBarExtra | system tray |
+| Carbon global hot key + NSPanel | Electron `globalShortcut` + frameless always-on-top search window |
 | Quick Look | allowlisted embedded preview plus native open |
 | Apple NLEmbedding | built-in offline Windows embedding implementation |
 | Sparkle | electron-updater |
@@ -27,7 +28,7 @@ A capability is complete only when all applicable layers agree:
 
 | Capability group | macOS baseline | Windows implementation status | Evidence gate |
 | --- | --- | --- | --- |
-| App shell and tray | complete | implemented; native behavior pending Windows acceptance | build + Windows smoke |
+| App shell, tray, and Quick Search | complete | implemented, including configurable global shortcut, centered floating search, and routing into Library; native shortcut conflicts pending Windows acceptance | build + Windows smoke |
 | Onboarding and watched-folder policy | complete | implemented, including per-folder process/preserve choice and persistent baseline | integration tests passed |
 | Stable file/directory watching | complete | implemented, including stop generations and offline arrival reconciliation | watcher tests passed; Windows filesystem smoke pending |
 | Extraction, Docling, OCR | complete | implemented with Windows-native legacy Office fallback, iWork package fallback, managed Docling, Tesseract, Ollama, and cloud OCR | code-level tests passed; provider/runtime matrix pending Windows |
@@ -54,6 +55,7 @@ A capability is complete only when all applicable layers agree:
 - Added local OCR fallback through the configured Ollama vision model and legacy Office/iWork best-effort extraction paths.
 - Moved library filtering from renderer-only snapshots into a typed main-process search service with lexical, semantic, date, sorting, and paging behavior.
 - Added settings normalization for chunk, overlap, RAG limit, context window, scheduling, extensions, folders, and cloud provider defaults.
+- Added configurable global Quick Search with registration-conflict reporting, a centered floating query window, and automatic main-window Library routing.
 - Added an integration-oriented parity suite covering structured chunks, note-only reindexing, query intent, safe organization, bounded chat context, retry replacement, metrics, cancellation, and watcher baselines.
 
 ## Verification truth
@@ -73,6 +75,6 @@ Therefore, the source implementation now targets complete functional parity, whi
 ## Latest code-level verification — 2026-07-17
 
 - TypeScript strict type check: passed.
-- Vitest: 16 tests passed across 2 files, 0 failed.
+- Vitest: 21 tests passed across 2 files, 0 failed.
 - Electron production build: main, preload, and renderer bundles passed.
 - Windows-native installer, shell, DPAPI, tray, startup, and signed update gates remain pending.

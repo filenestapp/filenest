@@ -10,19 +10,22 @@ struct ChatView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
     let isActive: Bool
-    @State private var sending = false
-    @State private var sendTask: Task<Void, Never>?
-    @State private var streamingMessageID: Int64?
-    @State private var pendingStreamDelta = ""
-    @State private var streamFlushTask: Task<Void, Never>?
-    @State private var optimisticUserID: Int64?
-    @State private var progressByMessageID: [Int64: ChatProgress] = [:]
+    let returnFromFileChat: () -> Void
+    @State private var sendTasks = [Int64: Task<Void, Never>]()
+    @State private var pendingStreamDeltas = [Int64: String]()
+    @State private var streamFlushTasks = [Int64: Task<Void, Never>]()
     @State private var composerTextHeight = ChatComposerTextView.defaultHeight
-    @State private var activeFallbackRequest: ChatFallbackRequest?
+    @State private var activeFallbackRequests = [Int64: ChatFallbackRequest]()
     @State private var pendingCloudFallback: ChatFallbackRequest?
+    @State private var editingContext: ChatEditingContext?
 
     private var messages: [ChatMessage] {
-        FileNestEnvironment.isUIPreview ? UIShowcaseData.messages : appState.chatMessages
+        if FileNestEnvironment.isUIPreview { return UIShowcaseData.messages }
+        guard let sessionID = appState.selectedChatSessionID else { return appState.chatMessages }
+        return appState.presentedChatMessages(
+            sessionID: sessionID,
+            persistedMessages: appState.chatMessages
+        )
     }
 
     private var lastUserMessageID: Int64? {
@@ -31,9 +34,25 @@ struct ChatView: View {
 
     private var composerInput: Binding<String> {
         Binding(
-            get: { appState.chatComposerInput },
-            set: { appState.updateChatComposerInput($0) }
+            get: { editingContext?.text ?? appState.chatComposerInput },
+            set: { value in
+                if var context = editingContext {
+                    context.text = value
+                    editingContext = context
+                } else {
+                    appState.updateChatComposerInput(value)
+                }
+            }
         )
+    }
+
+    private var composerText: String {
+        editingContext?.text ?? appState.chatComposerInput
+    }
+
+    private var sending: Bool {
+        guard let sessionID = appState.selectedChatSessionID else { return false }
+        return appState.runningChatSessionIDs.contains(sessionID)
     }
 
     private var isFileChat: Bool {
@@ -48,13 +67,23 @@ struct ChatView: View {
                     ? "Analyze only the current file without searching or mixing in content from the library."
                     : "Find files naturally, or attach one file and chat with it directly."
             ) {
-                Button {
-                    appState.newChat()
-                } label: {
-                    Label("New Chat", systemImage: "square.and.pencil")
+                HStack(spacing: 8) {
+                    if isFileChat {
+                        Button(action: returnFromFileChat) {
+                            Label("Back", systemImage: "chevron.left")
+                        }
+                        .buttonStyle(QuietButtonStyle(compact: true, foreground: .secondary))
+                        .help("Back to previous view")
+                    }
+
+                    Button {
+                        appState.newChat()
+                    } label: {
+                        Label("New Chat", systemImage: "square.and.pencil")
+                    }
+                    .buttonStyle(QuietButtonStyle(compact: true, foreground: FileNestTheme.accent))
+                    .keyboardShortcut("n", modifiers: .command)
                 }
-                .buttonStyle(QuietButtonStyle(compact: true, foreground: FileNestTheme.accent))
-                .keyboardShortcut("n", modifiers: .command)
             }
 
             conversation
@@ -71,14 +100,13 @@ struct ChatView: View {
             markSelectedChatSeenIfActive()
         }
         .onChange(of: appState.selectedChatSessionID) { _ in
+            if editingContext?.sessionID != appState.selectedChatSessionID {
+                editingContext = nil
+            }
             markSelectedChatSeenIfActive()
         }
         .onChange(of: appState.completedChatSessionIDs) { _ in
             markSelectedChatSeenIfActive()
-        }
-        .onDisappear {
-            sendTask?.cancel()
-            discardPendingStreamDelta()
         }
         .alert(
             "Cloud AI Is Temporarily Unavailable",
@@ -95,7 +123,7 @@ struct ChatView: View {
                 startFallback(request, mode: .vectorOnly(cloudFailure: request.failureMessage))
             }
             Button("Cancel", role: .cancel) {
-                appState.refreshChatSessions(selecting: request.sessionID)
+                appState.refreshChatSessionsPreservingSelection()
             }
         } message: { request in
             Text(appState.settings.localizedFormat(
@@ -111,22 +139,26 @@ struct ChatView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if messages.isEmpty {
                         if let path = appState.currentChatAttachmentPath {
-                            EmptyFileChatState(path: path) { query in send(query) }
+                            EmptyFileChatState(path: path) { query in submit(query) }
                                 .frame(maxWidth: .infinity, minHeight: 430)
                         } else {
-                            EmptyChatState { query in send(query) }
+                            EmptyChatState { query in submit(query) }
                                 .frame(maxWidth: .infinity, minHeight: 430)
                         }
                     } else {
                         ForEach(messages) { message in
                             MessageRow(
                                 message: message,
-                                progress: message.id.flatMap { progressByMessageID[$0] },
+                                progress: progress(for: message),
                                 openSettings: openSettings,
                                 retry: retryLastQuestion,
-                                showsUserRetry: !sending && message.id == lastUserMessageID,
+                                edit: { beginEditing(message) },
+                                showsLastUserActions: !sending && message.id == lastUserMessageID,
                                 startFileChat: { file in
-                                    appState.newChat(attachedFilePath: file.path)
+                                    appState.startFileChat(
+                                        attachedFilePath: file.path,
+                                        returnDestination: .chat
+                                    )
                                 }
                             )
                             .id(message.id)
@@ -168,12 +200,39 @@ struct ChatView: View {
         }
     }
 
+    private func progress(for message: ChatMessage) -> ChatProgress? {
+        guard let sessionID = appState.selectedChatSessionID,
+              let presentation = appState.chatExecutionPresentations[sessionID],
+              presentation.assistantMessage.id == message.id else { return nil }
+        return presentation.progress
+    }
+
     private var composer: some View {
         VStack(spacing: 7) {
-            if let path = appState.currentChatAttachmentPath {
-                AttachedFileChip(path: path) {
-                    appState.attachFileToSelectedChat(nil)
+            if editingContext != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "pencil.line")
+                        .foregroundStyle(FileNestTheme.accent)
+                    Text("Editing your last question")
+                        .font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    Button("Cancel") {
+                        editingContext = nil
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
                 }
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .background(FileNestTheme.selection.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
+            }
+
+            if let path = appState.currentChatAttachmentPath {
+                AttachedFileChip(
+                    path: path,
+                    preview: { appState.presentAttachedFilePreview(path: path) },
+                    remove: { appState.attachFileToSelectedChat(nil) }
+                )
             }
 
             VStack(spacing: 0) {
@@ -181,11 +240,11 @@ struct ChatView: View {
                     ChatComposerTextView(
                         text: composerInput,
                         height: $composerTextHeight,
-                        onSubmit: { send(appState.chatComposerInput) }
+                        onSubmit: { submit(composerText) }
                     )
                     .frame(height: composerTextHeight)
 
-                    if appState.chatComposerInput.isEmpty {
+                    if composerText.isEmpty {
                         Text(isFileChat ? "Ask about this file…" : "Describe the file you're looking for…")
                             .font(.system(size: 14, weight: .regular))
                             .foregroundStyle(Color.secondary.opacity(0.38))
@@ -248,14 +307,14 @@ struct ChatView: View {
                         .help("Use system dictation")
 
                         Button {
-                            sending ? stopStreaming() : send(appState.chatComposerInput)
+                            sending ? stopStreaming() : submit(composerText)
                         } label: {
                             Image(systemName: sending ? "stop.fill" : "arrow.up")
                                 .font(.system(size: sending ? 10 : 13, weight: .bold))
                                 .foregroundStyle(.white)
                                 .frame(width: 30, height: 30)
                                 .background {
-                                    if sending || !appState.chatComposerInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    if sending || !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                         Circle().fill(FileNestTheme.primaryGradient)
                                     } else {
                                         Circle().fill(Color.primary.opacity(0.78))
@@ -263,7 +322,7 @@ struct ChatView: View {
                                 }
                         }
                         .buttonStyle(.plain)
-                        .disabled(!sending && appState.chatComposerInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(!sending && composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .keyboardShortcut(.return, modifiers: [.command])
                 }
                 .font(.system(size: 13))
@@ -294,52 +353,62 @@ struct ChatView: View {
         openWindow(id: "settings")
     }
 
-    private func send(_ rawQuestion: String) {
+    private func submit(_ rawQuestion: String) {
+        if editingContext != nil {
+            resendEditedLastQuestion(rawQuestion)
+        } else {
+            sendNewQuestion(rawQuestion)
+        }
+    }
+
+    private func sendNewQuestion(_ rawQuestion: String) {
         let question = rawQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, !sending, !FileNestEnvironment.isUIPreview else { return }
         guard let sessionID = appState.persistChatForQuestion() else { return }
 
-        discardPendingStreamDelta()
+        discardPendingStreamDelta(sessionID: sessionID)
         appState.updateChatComposerInput("")
-        sending = true
-        appState.markChatRunning(sessionID)
 
         let seed = Int64(Date().timeIntervalSince1970 * 1_000_000)
         let userID = -max(seed, 1)
         let assistantID = userID - 1
-        optimisticUserID = userID
-        streamingMessageID = assistantID
-        appState.chatMessages.append(ChatMessage(
+        let userMessage = ChatMessage(
             id: userID,
             role: ChatRole.user.rawValue,
             content: question,
             ts: Date(),
             relatedFileIds: nil,
             sessionId: sessionID
-        ))
-        progressByMessageID[assistantID] = ChatProgress(
-            phase: isFileChat ? .readingFile : .planningSearch,
-            scope: isFileChat ? .attachedFile : .library
         )
-        appState.chatMessages.append(ChatMessage(
+        let assistantMessage = ChatMessage(
             id: assistantID,
             role: ChatRole.assistant.rawValue,
             content: "",
             ts: Date(),
             relatedFileIds: nil,
             sessionId: sessionID
-        ))
+        )
 
         let attachment = appState.currentChatAttachmentPath
+        let progress = ChatProgress(
+            phase: attachment == nil ? .planningSearch : .readingFile,
+            scope: attachment == nil ? .library : .attachedFile
+        )
+        appState.beginChatExecution(
+            sessionID: sessionID,
+            userMessage: userMessage,
+            assistantMessage: assistantMessage,
+            progress: progress
+        )
         let model = currentModel
-        activeFallbackRequest = ChatFallbackRequest(
+        activeFallbackRequests[sessionID] = ChatFallbackRequest(
             question: question,
             sessionID: sessionID,
             attachment: attachment,
             replacingAssistantMessageID: nil,
             failureMessage: ""
         )
-        sendTask = Task {
+        sendTasks[sessionID] = Task {
             for await update in appState.chat.streamAnswer(
                 question,
                 sessionId: sessionID,
@@ -360,8 +429,47 @@ struct ChatView: View {
                   $0.role == ChatRole.user.rawValue
               }) else { return }
 
-        discardPendingStreamDelta()
-        let question = appState.chatMessages[userIndex].content
+        startRetry(
+            question: appState.chatMessages[userIndex].content,
+            sessionID: sessionID,
+            userIndex: userIndex
+        )
+    }
+
+    private func beginEditing(_ message: ChatMessage) {
+        guard !sending,
+              let sessionID = appState.selectedChatSessionID,
+              message.id == lastUserMessageID,
+              let messageID = message.id else { return }
+        editingContext = ChatEditingContext(
+            sessionID: sessionID,
+            messageID: messageID,
+            text: message.content
+        )
+    }
+
+    private func resendEditedLastQuestion(_ rawQuestion: String) {
+        let question = rawQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty,
+              !sending,
+              let context = editingContext,
+              context.sessionID == appState.selectedChatSessionID,
+              let userIndex = appState.chatMessages.firstIndex(where: { $0.id == context.messageID }),
+              let updatedMessage = appState.chat.editUserMessage(
+                  id: context.messageID,
+                  sessionId: context.sessionID,
+                  content: question
+              ) else { return }
+
+        appState.chatMessages[userIndex] = updatedMessage
+        editingContext = nil
+        startRetry(question: question, sessionID: context.sessionID, userIndex: userIndex)
+    }
+
+    private func startRetry(question: String, sessionID: Int64, userIndex: Int) {
+        guard !appState.runningChatSessionIDs.contains(sessionID) else { return }
+
+        discardPendingStreamDelta(sessionID: sessionID)
         let assistantIndex = appState.chatMessages.indices
             .dropFirst(userIndex + 1)
             .first(where: { appState.chatMessages[$0].role == ChatRole.assistant.rawValue })
@@ -377,30 +485,25 @@ struct ChatView: View {
             sessionId: sessionID
         )
 
-        if let assistantIndex {
-            appState.chatMessages[assistantIndex] = placeholder
-        } else {
-            appState.chatMessages.append(placeholder)
-        }
-        optimisticUserID = nil
-        streamingMessageID = placeholderID
-        progressByMessageID[placeholderID] = ChatProgress(
-            phase: isFileChat ? .readingFile : .planningSearch,
-            scope: isFileChat ? .attachedFile : .library
-        )
-        sending = true
-        appState.markChatRunning(sessionID)
-
         let attachment = appState.currentChatAttachmentPath
+        appState.beginChatExecution(
+            sessionID: sessionID,
+            userMessage: nil,
+            assistantMessage: placeholder,
+            progress: ChatProgress(
+                phase: attachment == nil ? .planningSearch : .readingFile,
+                scope: attachment == nil ? .library : .attachedFile
+            )
+        )
         let model = currentModel
-        activeFallbackRequest = ChatFallbackRequest(
+        activeFallbackRequests[sessionID] = ChatFallbackRequest(
             question: question,
             sessionID: sessionID,
             attachment: attachment,
             replacingAssistantMessageID: replacingAssistantID,
             failureMessage: ""
         )
-        sendTask = Task {
+        sendTasks[sessionID] = Task {
             for await update in appState.chat.retryAnswer(
                 question,
                 sessionId: sessionID,
@@ -425,31 +528,19 @@ struct ChatView: View {
     private func handle(_ update: ChatStreamUpdate, sessionID: Int64) {
         switch update {
         case let .userSaved(message):
-            guard let optimisticUserID,
-                  let index = appState.chatMessages.firstIndex(where: { $0.id == optimisticUserID }) else { return }
-            appState.chatMessages[index] = message
-            self.optimisticUserID = nil
+            appState.updateChatExecutionUserMessage(sessionID: sessionID, message: message)
         case let .progress(progress):
-            guard let streamingMessageID,
-                  let index = appState.chatMessages.firstIndex(where: { $0.id == streamingMessageID }) else { return }
-            _ = index
-            progressByMessageID[streamingMessageID] = progress
+            appState.updateChatExecutionProgress(sessionID: sessionID, progress: progress)
         case let .delta(chunk):
-            guard let streamingMessageID else { return }
-            progressByMessageID.removeValue(forKey: streamingMessageID)
-            enqueueStreamDelta(chunk)
+            appState.updateChatExecutionProgress(sessionID: sessionID, progress: nil)
+            enqueueStreamDelta(chunk, sessionID: sessionID)
         case let .completed(message):
-            discardPendingStreamDelta()
-            if let streamingMessageID,
-               let index = appState.chatMessages.firstIndex(where: { $0.id == streamingMessageID }) {
-                appState.chatMessages[index] = message
-                progressByMessageID.removeValue(forKey: streamingMessageID)
-            }
+            discardPendingStreamDelta(sessionID: sessionID)
+            appState.completeChatExecution(sessionID: sessionID, message: message)
             finishStreaming(sessionID: sessionID)
         case let .cloudProviderFailed(message):
-            handleCloudProviderFailure(message)
+            handleCloudProviderFailure(message, sessionID: sessionID)
         case .cancelled:
-            appState.refreshChatSessions(selecting: sessionID)
             finishStreaming(sessionID: sessionID, reload: false, completed: false)
         }
     }
@@ -459,33 +550,29 @@ struct ChatView: View {
         reload: Bool = true,
         completed: Bool = true
     ) {
-        discardPendingStreamDelta()
-        sending = false
-        sendTask = nil
-        if let streamingMessageID { progressByMessageID.removeValue(forKey: streamingMessageID) }
-        streamingMessageID = nil
-        optimisticUserID = nil
-        activeFallbackRequest = nil
+        discardPendingStreamDelta(sessionID: sessionID)
+        sendTasks.removeValue(forKey: sessionID)
+        activeFallbackRequests.removeValue(forKey: sessionID)
         if completed {
             appState.markChatCompleted(sessionID)
         } else {
             appState.markChatStopped(sessionID)
         }
+        appState.clearChatExecution(sessionID: sessionID)
         if reload {
-            appState.refreshChatSessions(selecting: sessionID)
+            appState.refreshChatSessionsPreservingSelection()
             appState.refreshStatistics()
         }
     }
 
     private func stopStreaming() {
-        flushPendingStreamDelta()
-        sendTask?.cancel()
-        if let streamingMessageID { progressByMessageID.removeValue(forKey: streamingMessageID) }
-        sending = false
-        activeFallbackRequest = nil
-        if let sessionID = appState.selectedChatSessionID {
-            appState.markChatStopped(sessionID)
-        }
+        guard let sessionID = appState.selectedChatSessionID else { return }
+        flushPendingStreamDelta(sessionID: sessionID)
+        sendTasks.removeValue(forKey: sessionID)?.cancel()
+        activeFallbackRequests.removeValue(forKey: sessionID)
+        appState.clearChatExecution(sessionID: sessionID)
+        appState.markChatStopped(sessionID)
+        appState.refreshChatSessionsPreservingSelection()
     }
 
     private var localChatModels: [OllamaModelInfo] {
@@ -495,20 +582,15 @@ struct ChatView: View {
         )
     }
 
-    private func handleCloudProviderFailure(_ message: String) {
-        guard var request = activeFallbackRequest else { return }
-        discardPendingStreamDelta()
+    private func handleCloudProviderFailure(_ message: String, sessionID: Int64) {
+        guard var request = activeFallbackRequests[sessionID] else { return }
+        discardPendingStreamDelta(sessionID: sessionID)
         request.failureMessage = message
-        if let streamingMessageID {
-            progressByMessageID.removeValue(forKey: streamingMessageID)
-            appState.chatMessages.removeAll { $0.id == streamingMessageID }
-        }
-        sending = false
-        sendTask = nil
-        streamingMessageID = nil
-        optimisticUserID = nil
-        activeFallbackRequest = nil
+        sendTasks.removeValue(forKey: sessionID)
+        activeFallbackRequests.removeValue(forKey: sessionID)
+        appState.clearChatExecution(sessionID: sessionID)
         appState.markChatStopped(request.sessionID)
+        appState.refreshChatSessionsPreservingSelection()
 
         guard !localChatModels.isEmpty else {
             startFallback(request, mode: .vectorOnly(cloudFailure: message))
@@ -531,27 +613,30 @@ struct ChatView: View {
 
     private func startFallback(_ request: ChatFallbackRequest, mode: ChatProviderMode) {
         pendingCloudFallback = nil
-        guard !sending else { return }
-        discardPendingStreamDelta()
+        guard !appState.runningChatSessionIDs.contains(request.sessionID) else { return }
+        discardPendingStreamDelta(sessionID: request.sessionID)
         let placeholderID = request.replacingAssistantMessageID
             ?? -max(Int64(Date().timeIntervalSince1970 * 1_000_000), 1)
-        streamingMessageID = placeholderID
-        activeFallbackRequest = request
-        progressByMessageID[placeholderID] = ChatProgress(
-            phase: isFileChat ? .readingFile : .planningSearch,
-            scope: isFileChat ? .attachedFile : .library
-        )
-        appState.chatMessages.append(ChatMessage(
+        let isAttachedFile = !(request.attachment?.isEmpty ?? true)
+        let placeholder = ChatMessage(
             id: placeholderID,
             role: ChatRole.assistant.rawValue,
             content: "",
             ts: Date(),
             relatedFileIds: nil,
             sessionId: request.sessionID
-        ))
-        sending = true
-        appState.markChatRunning(request.sessionID)
-        sendTask = Task {
+        )
+        appState.beginChatExecution(
+            sessionID: request.sessionID,
+            userMessage: nil,
+            assistantMessage: placeholder,
+            progress: ChatProgress(
+                phase: isAttachedFile ? .readingFile : .planningSearch,
+                scope: isAttachedFile ? .attachedFile : .library
+            )
+        )
+        activeFallbackRequests[request.sessionID] = request
+        sendTasks[request.sessionID] = Task {
             for await update in appState.chat.retryAnswer(
                 request.question,
                 sessionId: request.sessionID,
@@ -565,34 +650,28 @@ struct ChatView: View {
         }
     }
 
-    private func enqueueStreamDelta(_ chunk: String) {
-        pendingStreamDelta += chunk
-        guard streamFlushTask == nil else { return }
-        streamFlushTask = Task { @MainActor in
+    private func enqueueStreamDelta(_ chunk: String, sessionID: Int64) {
+        pendingStreamDeltas[sessionID, default: ""] += chunk
+        guard streamFlushTasks[sessionID] == nil else { return }
+        streamFlushTasks[sessionID] = Task { @MainActor in
             do {
                 try await Task.sleep(nanoseconds: 50_000_000)
             } catch {
                 return
             }
-            flushPendingStreamDelta()
+            flushPendingStreamDelta(sessionID: sessionID)
         }
     }
 
-    private func flushPendingStreamDelta() {
-        streamFlushTask?.cancel()
-        streamFlushTask = nil
-        guard !pendingStreamDelta.isEmpty else { return }
-        let delta = pendingStreamDelta
-        pendingStreamDelta = ""
-        guard let streamingMessageID,
-              let index = appState.chatMessages.firstIndex(where: { $0.id == streamingMessageID }) else { return }
-        appState.chatMessages[index].content += delta
+    private func flushPendingStreamDelta(sessionID: Int64) {
+        streamFlushTasks.removeValue(forKey: sessionID)?.cancel()
+        guard let delta = pendingStreamDeltas.removeValue(forKey: sessionID), !delta.isEmpty else { return }
+        appState.appendChatExecutionDelta(sessionID: sessionID, delta: delta)
     }
 
-    private func discardPendingStreamDelta() {
-        streamFlushTask?.cancel()
-        streamFlushTask = nil
-        pendingStreamDelta = ""
+    private func discardPendingStreamDelta(sessionID: Int64) {
+        streamFlushTasks.removeValue(forKey: sessionID)?.cancel()
+        pendingStreamDeltas.removeValue(forKey: sessionID)
     }
 
     private func chooseFile() {
@@ -624,6 +703,12 @@ private struct ChatFallbackRequest {
     let attachment: String?
     let replacingAssistantMessageID: Int64?
     var failureMessage: String
+}
+
+private struct ChatEditingContext: Equatable {
+    let sessionID: Int64
+    let messageID: Int64
+    var text: String
 }
 
 /// A narrow AppKit bridge for native multiline editing and content-driven height.
@@ -942,36 +1027,46 @@ private struct ChatModelMenu: View {
 
 private struct AttachedFileChip: View {
     let path: String
+    let preview: () -> Void
     let remove: () -> Void
 
     var body: some View {
         HStack(spacing: 9) {
-            FileIconView(
-                file: FileRecord(
-                    id: nil,
-                    path: path,
-                    name: URL(fileURLWithPath: path).lastPathComponent,
-                    ext: URL(fileURLWithPath: path).pathExtension,
-                    size: 0,
-                    mtime: Date(),
-                    category: FileCategory.from(extension: URL(fileURLWithPath: path).pathExtension).rawValue,
-                    sourceDir: URL(fileURLWithPath: path).deletingLastPathComponent().path,
-                    indexedAt: nil,
-                    contentHash: nil,
-                    title: nil,
-                    contentText: nil
-                ),
-                size: 26
-            )
-            VStack(alignment: .leading, spacing: 1) {
-                Text(URL(fileURLWithPath: path).lastPathComponent)
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                Text("Chatting with this file")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+            Button(action: preview) {
+                HStack(spacing: 9) {
+                    FileIconView(
+                        file: FileRecord(
+                            id: nil,
+                            path: path,
+                            name: URL(fileURLWithPath: path).lastPathComponent,
+                            ext: URL(fileURLWithPath: path).pathExtension,
+                            size: 0,
+                            mtime: Date(),
+                            category: FileCategory.from(extension: URL(fileURLWithPath: path).pathExtension).rawValue,
+                            sourceDir: URL(fileURLWithPath: path).deletingLastPathComponent().path,
+                            indexedAt: nil,
+                            contentHash: nil,
+                            title: nil,
+                            contentText: nil
+                        ),
+                        size: 26
+                    )
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(URL(fileURLWithPath: path).lastPathComponent)
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
+                        Text("Chatting with this file")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
             }
-            Spacer()
+            .buttonStyle(.plain)
+            .contentShape(Rectangle())
+            .help("Show file details")
+            .pointingHandOnHover()
+
             Button(action: remove) {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
@@ -996,7 +1091,8 @@ private struct MessageRow: View {
     let progress: ChatProgress?
     let openSettings: () -> Void
     let retry: () -> Void
-    let showsUserRetry: Bool
+    let edit: () -> Void
+    let showsLastUserActions: Bool
     let startFileChat: (FileRecord) -> Void
 
     @State private var feedback: MessageFeedback?
@@ -1063,7 +1159,8 @@ private struct MessageRow: View {
                         message: message,
                         feedback: $feedback,
                         retry: retry,
-                        showsUserRetry: showsUserRetry,
+                        edit: edit,
+                        showsLastUserActions: showsLastUserActions,
                         startFileChat: message.relatedFiles.first(where: \.supportsDocumentChat).map { file in
                             { startFileChat(file) }
                         }
@@ -1114,13 +1211,21 @@ private struct ChatProgressSteps: View {
                     )
                 }
 
-                if progress.phase != .planningSearch && progress.phase != .queryingIndex {
+                if progress.phase == .reranking {
+                    progressRow("Reranking the strongest matches", completed: false)
+                }
+
+                if progress.phase != .planningSearch
+                    && progress.phase != .queryingIndex
+                    && progress.phase != .reranking {
                     progressRow(
                         appState.settings.localizedFormat(
                             "Matched %d related files",
                             progress.matchedFileCount
                         ),
-                        completed: progress.phase == .analyzing || progress.phase == .thinking
+                        completed: progress.phase == .analyzing
+                            || progress.phase == .thinking
+                            || progress.phase == .verifying
                     )
                 }
 
@@ -1140,6 +1245,8 @@ private struct ChatProgressSteps: View {
                 progressRow("AI is analyzing and organizing the answer", completed: false)
             } else if progress.phase == .thinking {
                 progressRow("Thinking Mode: performing deeper analysis", completed: false)
+            } else if progress.phase == .verifying {
+                progressRow("Verifying answer citations", completed: false)
             }
         }
         .font(.system(size: 12))
@@ -1170,10 +1277,10 @@ private struct ChatResponseMetricsView: View {
                 Label(model, systemImage: "cpu")
             }
             if let input = message.inputTokens {
-                metric("↑ \(formatTokens(input))")
+                metric("≈↑ \(formatTokens(input))")
             }
             if let output = message.outputTokens {
-                metric("↓ \(formatTokens(output))")
+                metric("≈↓ \(formatTokens(output))")
             }
             if let first = message.firstResponseDuration {
                 metric(appState.settings.localizedFormat("First response %.2fs", first))
@@ -1383,7 +1490,8 @@ private struct MessageActionBar: View {
     let message: ChatMessage
     @Binding var feedback: MessageFeedback?
     let retry: () -> Void
-    let showsUserRetry: Bool
+    let edit: () -> Void
+    let showsLastUserActions: Bool
     let startFileChat: (() -> Void)?
 
     private var isUser: Bool { message.role == ChatRole.user.rawValue }
@@ -1396,7 +1504,8 @@ private struct MessageActionBar: View {
                 pasteboard.setString(message.content, forType: .string)
             }
 
-            if isUser && showsUserRetry {
+            if isUser && showsLastUserActions {
+                actionButton("pencil", help: "Edit and resend this question", action: edit)
                 actionButton("arrow.clockwise", help: "Retry this question", action: retry)
             }
 

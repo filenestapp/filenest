@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { ChatStreamEvent, FileCategory, FileNestApi, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { ChatStreamEvent, FileCategory, FileNestApi, LibrarySearchProgressEvent, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 
 const api: FileNestApi = {
   getSnapshot: () => ipcRenderer.invoke('app:snapshot'),
@@ -21,6 +21,8 @@ const api: FileNestApi = {
   cancelIndexing: () => ipcRenderer.invoke('indexer:cancel'),
   searchFiles: (query: string, category?: FileCategory | null) => ipcRenderer.invoke('files:search', query, category),
   searchLibrary: (request: LibrarySearchRequest) => ipcRenderer.invoke('files:smart-search', request),
+  submitQuickSearch: (query: string) => ipcRenderer.invoke('quick-search:submit', query),
+  consumeLibrarySearch: (id: string) => ipcRenderer.invoke('quick-search:consume', id),
   openFile: (path: string) => ipcRenderer.invoke('files:open', path),
   showInExplorer: (path: string) => ipcRenderer.invoke('files:show-in-explorer', path),
   trashFile: (id: number) => ipcRenderer.invoke('files:trash', id),
@@ -35,6 +37,7 @@ const api: FileNestApi = {
   createChat: (path?: string | null) => ipcRenderer.invoke('chat:create', path),
   beginChat: (path?: string | null) => ipcRenderer.invoke('chat:begin', path),
   selectChat: (id: number) => ipcRenderer.invoke('chat:select', id),
+  markChatSeen: (id: number) => ipcRenderer.invoke('chat:seen', id),
   deleteChat: (id: number) => ipcRenderer.invoke('chat:delete', id),
   clearChats: () => ipcRenderer.invoke('chat:clear'),
   sendChat: (request: SendChatRequest) => ipcRenderer.invoke('chat:send', request),
@@ -43,6 +46,15 @@ const api: FileNestApi = {
     const listener = (_event: Electron.IpcRendererEvent, value: ChatStreamEvent): void => callback(value)
     ipcRenderer.on('chat:stream', listener)
     return () => { ipcRenderer.removeListener('chat:stream', listener) }
+  },
+  onLibrarySearchProgress: (callback: (event: LibrarySearchProgressEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: LibrarySearchProgressEvent): void => callback(value)
+    ipcRenderer.on('library:search-progress', listener)
+    return () => { ipcRenderer.removeListener('library:search-progress', listener) }
+  },
+  onQuickSearchFocus: (callback: () => void) => {
+    ipcRenderer.on('quick-search:focus', callback)
+    return () => { ipcRenderer.removeListener('quick-search:focus', callback) }
   },
   refreshOllama: () => ipcRenderer.invoke('ollama:refresh'),
   pullOllamaModel: (model: string) => ipcRenderer.invoke('ollama:pull', model),

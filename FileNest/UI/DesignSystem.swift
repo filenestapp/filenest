@@ -21,8 +21,8 @@ enum FileNestTheme {
     )
 }
 
-/// SwiftUI does not expose AppKit's overlay scroller controls. This tiny bridge keeps
-/// scrolling native while using the compact, auto-hiding macOS overlay treatment.
+/// SwiftUI does not expose AppKit's overlay scroller controls. This bridge applies
+/// a compact, low-contrast overlay style to every scroller in its containing window.
 private struct FileNestOverlayScrollerConfigurator: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -35,20 +35,45 @@ private struct FileNestOverlayScrollerConfigurator: NSViewRepresentable {
     }
 
     private func configureEnclosingScrollView(from view: NSView) {
-        DispatchQueue.main.async {
+        let applyStyle = { [weak view] in
+            guard let view else { return }
+            if let contentView = view.window?.contentView {
+                configureScrollViews(in: contentView)
+                return
+            }
+
             var ancestor = view.superview
             while let current = ancestor {
                 if let scrollView = current as? NSScrollView {
-                    scrollView.scrollerStyle = .overlay
-                    scrollView.autohidesScrollers = true
-                    scrollView.hasHorizontalScroller = false
-                    scrollView.hasVerticalScroller = true
-                    scrollView.verticalScroller?.controlSize = .mini
+                    configure(scrollView)
                     return
                 }
                 ancestor = current.superview
             }
         }
+
+        // SwiftUI often creates an NSScrollView after its surrounding view hierarchy.
+        // Reapplying after layout covers lazy panels such as the file preview inspector.
+        DispatchQueue.main.async(execute: applyStyle)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: applyStyle)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: applyStyle)
+    }
+
+    private func configureScrollViews(in view: NSView) {
+        if let scrollView = view as? NSScrollView {
+            configure(scrollView)
+        }
+        view.subviews.forEach(configureScrollViews(in:))
+    }
+
+    private func configure(_ scrollView: NSScrollView) {
+        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = true
+        scrollView.verticalScroller?.controlSize = .mini
+        scrollView.horizontalScroller?.controlSize = .mini
+        // The reduced alpha prevents the overlay thumb from competing with content.
+        scrollView.verticalScroller?.alphaValue = 0.42
+        scrollView.horizontalScroller?.alphaValue = 0.42
     }
 }
 
@@ -273,7 +298,7 @@ struct IndexingActivitySymbol: View {
     var weight: Font.Weight = .medium
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: !isAnimating)) { timeline in
+        TimelineView(.animation(minimumInterval: 0.1, paused: !isAnimating)) { timeline in
             Image(systemName: systemName)
                 .font(.system(size: size, weight: weight))
                 .rotationEffect(.degrees(rotation(at: timeline.date)))
@@ -388,6 +413,105 @@ struct IndexingStatusProgressView: View {
         case .completed: return FileNestTheme.success
         case .paused, .stopped: return .secondary
         default: return FileNestTheme.accentBlue
+        }
+    }
+}
+
+/// Compact status for automatic watcher work. Manual reindexing retains its own controls above.
+struct AutomaticProcessingQueueView: View {
+    @ObservedObject var appState: AppState
+    var maximumItems = 3
+
+    private var items: [AutomaticFileProcessingItem] {
+        Array(appState.automaticFileProcessingItems.prefix(maximumItems))
+    }
+
+    var body: some View {
+        guard !items.isEmpty else { return AnyView(EmptyView()) }
+        return AnyView(
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 7) {
+                    Image(systemName: appState.hasActiveAutomaticFileProcessing ? "tray.full.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(appState.hasActiveAutomaticFileProcessing ? FileNestTheme.accentBlue : FileNestTheme.success)
+                    Text(verbatim: appState.settings.localized(
+                        appState.hasActiveAutomaticFileProcessing
+                            ? appState.automaticProcessingStatusTitle
+                            : "Recent file activity"
+                    ))
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer(minLength: 0)
+                    if appState.activeAutomaticFileProcessingItems.count > 1 {
+                        Text("\(appState.activeAutomaticFileProcessingItems.count)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                ForEach(items) { item in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            IndexingActivitySymbol(
+                                systemName: symbol(for: item.stage),
+                                isAnimating: item.isActive,
+                                size: 11,
+                                weight: .medium
+                            )
+                            .foregroundStyle(color(for: item.stage))
+                            Text(item.fileName)
+                                .font(.system(size: 10, weight: .medium))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 0)
+                        }
+                        Text(verbatim: localizedStatus(for: item))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        if let progress = item.progress, item.isActive {
+                            ProgressView(value: progress)
+                                .tint(color(for: item.stage))
+                                .controlSize(.small)
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    private func localizedStatus(for item: AutomaticFileProcessingItem) -> String {
+        switch item.stage {
+        case let .indexing(.embedding(completed, total)):
+            return appState.settings.localizedFormat(
+                "Generating vectors %d/%d",
+                completed,
+                total
+            )
+        case .indexing:
+            return appState.settings.localized(item.subtitle)
+        case let .failed(message):
+            return item.detail ?? appState.settings.localized(message)
+        case .queued, .waitingForOrganization, .organizing, .completed:
+            return appState.settings.localized(item.title)
+        }
+    }
+
+    private func symbol(for stage: AutomaticFileProcessingStage) -> String {
+        switch stage {
+        case .queued: return "clock"
+        case .indexing: return "doc.text.magnifyingglass"
+        case .waitingForOrganization: return "tray.and.arrow.down"
+        case .organizing: return "folder.badge.gearshape"
+        case .completed: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func color(for stage: AutomaticFileProcessingStage) -> Color {
+        switch stage {
+        case .completed: return FileNestTheme.success
+        case .failed: return FileNestTheme.warning
+        case .queued, .waitingForOrganization: return .secondary
+        case .indexing, .organizing: return FileNestTheme.accentBlue
         }
     }
 }

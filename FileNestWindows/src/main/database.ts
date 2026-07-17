@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import type { AppStatistics, ChatMessage, ChatSession, DocumentChunk, FileCategory, FileRecord, Rule, Settings } from '../shared/types'
+import { CANONICAL_TOKENIZER_PROFILE, CANONICAL_TOKENIZER_VERSION, estimateCanonicalTokens, GENERATION_FALLBACK_PROFILE } from './token-counter'
 import { CATEGORY_FOLDERS, createDefaultSettings } from './defaults'
 
 type SqlValue = string | number | Uint8Array | null
@@ -56,7 +57,10 @@ export class FileNestDatabase {
         id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
         chunk_index INTEGER NOT NULL, text TEXT NOT NULL, contextual_text TEXT NOT NULL,
         section_path TEXT NOT NULL DEFAULT '[]', page_start INTEGER, page_end INTEGER,
-        kind TEXT NOT NULL DEFAULT 'text', UNIQUE(file_id, chunk_index)
+        kind TEXT NOT NULL DEFAULT 'text', token_count INTEGER NOT NULL DEFAULT 0,
+        tokenizer_profile TEXT NOT NULL DEFAULT '${CANONICAL_TOKENIZER_PROFILE}',
+        tokenizer_version TEXT NOT NULL DEFAULT '${CANONICAL_TOKENIZER_VERSION}',
+        token_count_accuracy TEXT NOT NULL DEFAULT 'estimated', UNIQUE(file_id, chunk_index)
       );
       CREATE TABLE IF NOT EXISTS rules (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, pattern TEXT NOT NULL,
@@ -74,7 +78,9 @@ export class FileNestDatabase {
       );
       CREATE TABLE IF NOT EXISTS token_usage (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
-        input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, session_id INTEGER
+        input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, session_id INTEGER,
+        tokenizer_profile TEXT NOT NULL DEFAULT '${GENERATION_FALLBACK_PROFILE}',
+        token_count_accuracy TEXT NOT NULL DEFAULT 'estimated'
       );
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS watch_directory_baseline_entries (
@@ -88,6 +94,25 @@ export class FileNestDatabase {
     `)
     const embeddingColumns = this.rows('PRAGMA table_info(embeddings)').map((row) => String(row.name))
     if (!embeddingColumns.includes('vector_text')) this.db.run('ALTER TABLE embeddings ADD COLUMN vector_text TEXT')
+    const chunkColumns = this.rows('PRAGMA table_info(document_chunks)').map((row) => String(row.name))
+    if (!chunkColumns.includes('token_count')) this.db.run('ALTER TABLE document_chunks ADD COLUMN token_count INTEGER NOT NULL DEFAULT 0')
+    if (!chunkColumns.includes('tokenizer_profile')) this.db.run(`ALTER TABLE document_chunks ADD COLUMN tokenizer_profile TEXT NOT NULL DEFAULT '${CANONICAL_TOKENIZER_PROFILE}'`)
+    if (!chunkColumns.includes('tokenizer_version')) this.db.run(`ALTER TABLE document_chunks ADD COLUMN tokenizer_version TEXT NOT NULL DEFAULT '${CANONICAL_TOKENIZER_VERSION}'`)
+    if (!chunkColumns.includes('token_count_accuracy')) this.db.run("ALTER TABLE document_chunks ADD COLUMN token_count_accuracy TEXT NOT NULL DEFAULT 'estimated'")
+    const usageColumns = this.rows('PRAGMA table_info(token_usage)').map((row) => String(row.name))
+    if (!usageColumns.includes('tokenizer_profile')) this.db.run(`ALTER TABLE token_usage ADD COLUMN tokenizer_profile TEXT NOT NULL DEFAULT '${GENERATION_FALLBACK_PROFILE}'`)
+    if (!usageColumns.includes('token_count_accuracy')) this.db.run("ALTER TABLE token_usage ADD COLUMN token_count_accuracy TEXT NOT NULL DEFAULT 'estimated'")
+
+    for (const row of this.rows(
+      "SELECT id,contextual_text FROM document_chunks WHERE token_count=0 OR (token_count_accuracy='estimated' AND tokenizer_version!=?)",
+      [CANONICAL_TOKENIZER_VERSION]
+    )) {
+      const measurement = estimateCanonicalTokens(String(row.contextual_text ?? ''))
+      this.db.run(
+        'UPDATE document_chunks SET token_count=?,tokenizer_profile=?,tokenizer_version=?,token_count_accuracy=? WHERE id=?',
+        [measurement.count, measurement.tokenizerProfile, measurement.tokenizerVersion, measurement.accuracy, Number(row.id)]
+      )
+    }
     const messageColumns = this.rows('PRAGMA table_info(chat_messages)').map((row) => String(row.name))
     const messageMigrations: Array<[string, string]> = [
       ['input_tokens', 'INTEGER'], ['output_tokens', 'INTEGER'],
@@ -253,8 +278,12 @@ export class FileNestDatabase {
           [fileId, chunk.index, new Uint8Array([0]), encoded, vector.length, model, chunk.contextualText]
         )
         this.db.run(
-          'INSERT INTO document_chunks(file_id,chunk_index,text,contextual_text,section_path,page_start,page_end,kind) VALUES(?,?,?,?,?,?,?,?)',
-          [fileId, chunk.index, chunk.text, chunk.contextualText, JSON.stringify(chunk.sectionPath), chunk.pageStart, chunk.pageEnd, chunk.kind]
+          'INSERT INTO document_chunks(file_id,chunk_index,text,contextual_text,section_path,page_start,page_end,kind,token_count,tokenizer_profile,tokenizer_version,token_count_accuracy) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+          [fileId, chunk.index, chunk.text, chunk.contextualText, JSON.stringify(chunk.sectionPath), chunk.pageStart, chunk.pageEnd, chunk.kind,
+            chunk.tokenCount ?? estimateCanonicalTokens(chunk.contextualText).count,
+            chunk.tokenizerProfile ?? CANONICAL_TOKENIZER_PROFILE,
+            chunk.tokenizerVersion ?? CANONICAL_TOKENIZER_VERSION,
+            chunk.tokenCountAccuracy ?? 'estimated']
         )
       }
       this.db.run(
@@ -277,7 +306,11 @@ export class FileNestDatabase {
       sectionPath: JSON.parse(String(row.section_path || '[]')) as string[],
       pageStart: row.page_start == null ? null : Number(row.page_start),
       pageEnd: row.page_end == null ? null : Number(row.page_end),
-      kind: String(row.kind) as DocumentChunk['kind']
+      kind: String(row.kind) as DocumentChunk['kind'],
+      tokenCount: Number(row.token_count ?? 0),
+      tokenizerProfile: String(row.tokenizer_profile ?? CANONICAL_TOKENIZER_PROFILE),
+      tokenizerVersion: String(row.tokenizer_version ?? CANONICAL_TOKENIZER_VERSION),
+      tokenCountAccuracy: String(row.token_count_accuracy ?? 'estimated') as 'exact' | 'estimated'
     }))
   }
 

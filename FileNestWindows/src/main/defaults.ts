@@ -1,6 +1,5 @@
 import { app } from 'electron'
 import { join } from 'node:path'
-import { totalmem } from 'node:os'
 import type { FileCategory, Settings } from '../shared/types'
 
 export const DEFAULT_EXTENSIONS = [
@@ -33,9 +32,6 @@ export const CATEGORY_FOLDERS: Record<FileCategory, string> = {
 
 export function createDefaultSettings(): Settings {
   const documents = app.getPath('documents')
-  const memoryGb = Math.max(1, Math.round(totalmem() / 1024 ** 3))
-  const chatModel = memoryGb >= 24 ? 'qwen3.5:9b' : memoryGb >= 16 ? 'qwen3.5:4b' : 'qwen3.5:2b'
-  const embeddingModel = memoryGb >= 64 ? 'qwen3-embedding:8b' : memoryGb >= 32 ? 'qwen3-embedding:4b' : 'qwen3-embedding:0.6b'
   return {
     watchDirs: [...new Set([app.getPath('desktop'), app.getPath('downloads')])],
     organizedRoot: join(documents, 'FileNest Organized'),
@@ -44,9 +40,9 @@ export function createDefaultSettings(): Settings {
     classifyStrategy: 'hybrid',
     llmChoice: 'ollama',
     ollamaHost: 'http://127.0.0.1:11434',
-    ollamaModel: chatModel,
+    ollamaModel: 'qwen3.5:9b',
     ollamaFlashAttentionEnabled: true,
-    ollamaEmbeddingModel: embeddingModel,
+    ollamaEmbeddingModel: 'qwen3-embedding:0.6b',
     ollamaOcrModel: 'glm-ocr',
     cloudApiFormat: 'openai',
     cloudApiKey: '',
@@ -78,6 +74,7 @@ export function createDefaultSettings(): Settings {
     thinkingMode: false,
     appLanguage: 'system',
     appearance: 'system',
+    quickSearchShortcut: 'CommandOrControl+Alt+Space',
     onboardingCompleted: false,
     launchAtLogin: false,
     automaticUpdateChecks: true,

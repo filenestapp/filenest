@@ -26,6 +26,7 @@ enum AppLogCategory: String, CaseIterable, Sendable {
     case vectorLifecycle = "vector.lifecycle"
     case vectorWrite = "vector.write"
     case vectorSearch = "vector.search"
+    case chat = "chat"
 }
 
 /// FileNest local diagnostic logs, written serially by day and retained for a limited number of days.

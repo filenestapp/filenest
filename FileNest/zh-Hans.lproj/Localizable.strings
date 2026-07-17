@@ -2,6 +2,10 @@
 "FileNest Settings" = "FileNest 设置";
 "Library" = "文件库";
 "Find with Chat" = "聊天找文件";
+"Back" = "返回";
+"Back to previous view" = "返回上一视图";
+"Show file details" = "显示文件详情";
+"Last updated" = "最后更新";
 "Organization Rules" = "整理规则";
 "Settings" = "设置";
 "Settings…" = "设置…";
@@ -180,6 +184,8 @@
 "New Chat" = "新会话";
 "Create a new chat" = "新建会话";
 "Retry this question" = "重试此问题";
+"Edit and resend this question" = "编辑并重新发送此问题";
+"Editing your last question" = "正在编辑最后一个问题";
 "Enter to send, Shift+Enter for a new line" = "Enter 发送，Shift+Enter 换行";
 "Logs" = "日志";
 "Log Folder" = "日志目录";
@@ -371,6 +377,9 @@
 "Apply & Reindex" = "应用并重新索引";
 "Chunk size" = "每个切片";
 "Chunk overlap" = "切片重叠";
+"Parent chunk maximum" = "父块最大长度";
+"Retrieval chunk target" = "检索子块目标长度";
+"Maximum semantic overlap" = "最大语义重叠";
 "%d tokens" = "%d tokens";
 "Checking file" = "正在校验文件";
 "Recognizing image text" = "正在识别图片文字";
@@ -381,6 +390,7 @@
 "Generating vectors %d/%d" = "正在生成向量 %d/%d";
 "%d words" = "%d 词";
 "Long documents are split with overlapping sliding windows to reduce information loss from context limits. Images add dimensions, camera details, and non-location EXIF metadata to the index." = "长文档会按滑动窗口拆分，并保留重叠内容，降低上下文窗口限制导致的信息丢失。图片会将尺寸、相机和 EXIF 等非定位元信息加入索引。";
+"Paragraphs stay intact whenever possible. Oversized paragraphs split only between complete sentences, and overlap repeats complete semantic units without cutting words." = "尽量保持完整段落；超长段落只在完整句子之间切分，重叠部分也只复用完整语义单元，不会切断单词。";
 "Local Document Parsing" = "本地文档解析支持";
 "Full text: PDF, DOCX, XLSX, PPTX, EPUB, OpenDocument, RTF, and plain text" = "完整正文：PDF、DOCX、XLSX、PPTX、EPUB、OpenDocument、RTF 和纯文本";
 "Best-effort: legacy DOC/XLS/PPT and iWork (uses local macOS text metadata)" = "兼容提取：旧版 DOC/XLS/PPT 与 iWork（依赖 macOS 本地文本元数据）";
@@ -406,6 +416,8 @@
 "Index %d new files" = "索引 %d 个新文件";
 "Chunk tokens + overlap" = "Chunk tokens + overlap";
 "Chunk tokens or overlap changed" = "Chunk tokens 或 overlap 发生变化";
+"Semantic chunking" = "语义切片";
+"Parent, retrieval, or overlap settings changed" = "父块、检索子块或重叠设置发生变化";
 "OCR engine" = "OCR 引擎";
 "The OCR engine, source, format, or model changed" = "OCR 引擎、来源、格式或模型发生变化";
 "Turn off Thinking Mode" = "关闭 Thinking 模式";
@@ -883,6 +895,8 @@
 "About %d Tokens" = "约 %d tokens";
 "%d Characters" = "%d 个字符";
 "Embedding Context" = "向量化上下文";
+"Added Embedding Context" = "新增的向量化上下文";
+"Parent Context" = "父块上下文";
 "Title Chunk" = "标题切片";
 "Text Chunk" = "正文切片";
 "Table Chunk" = "表格切片";
@@ -890,3 +904,134 @@
 "Image Chunk" = "图片切片";
 "Note Chunk" = "备注切片";
 "Metadata Chunk" = "元信息切片";
+
+/* Quick search */
+"Open Quick Search" = "打开快捷搜索";
+"Quick Search" = "快捷搜索";
+"Quick Search Shortcut" = "快捷搜索键";
+"Press a shortcut…" = "请按下快捷键…";
+"Reset to Default" = "恢复默认";
+"Use this shortcut from any app to open a centered FileNest search box." = "在任何应用中按下此快捷键，即可在屏幕中央打开 FileNest 搜索框。";
+"The shortcut could not be registered. Choose a different combination." = "无法注册该快捷键，请选择其他组合。";
+"Search FileNest" = "搜索 FileNest";
+"Press Return to search · Esc to close" = "按 Return 搜索 · 按 Esc 关闭";
+
+/* AI model version checks */
+"Version Updates" = "版本更新";
+"Automatic Version Detection" = "自动版本检测";
+"Not checked yet" = "尚未检查";
+"Automatic checks run only when this page opens and are skipped for 24 hours after each check." = "仅在进入此页面时自动检查版本；每次检查后的 24 小时内将跳过检测。";
+
+/* Organization job */
+"Ready to Organize" = "可以开始整理";
+"Preparing Organization" = "正在准备整理";
+"Waiting for Files to Stabilize" = "正在等待文件稳定";
+"Building Local Index" = "正在建立本地索引";
+"Moving Files" = "正在移动文件";
+"Organizing" = "正在整理";
+"Organization Paused" = "整理已暂停";
+"Stopping Organization" = "正在停止整理";
+"Organization Stopped" = "整理已停止";
+"Organization Complete" = "整理完成";
+"Organization Finished with Errors" = "整理完成，但存在错误";
+"Only new eligible items in watched folders are processed." = "仅处理监听目录中符合条件的新项目。";
+"Processing %@" = "正在处理 %@";
+"%d moved · %d skipped · %d failed" = "已移动 %d · 已跳过 %d · 失败 %d";
+"Resume Organization" = "继续整理";
+"Stop Organization" = "停止整理";
+"Stop" = "停止";
+
+/* Library search history */
+"Search History" = "搜索历史";
+"Clear All" = "全部清除";
+"No Search History" = "暂无搜索历史";
+"Completed searches will appear here." = "完成的搜索会显示在这里。";
+"Standard Search" = "普通搜索";
+"results" = "个结果";
+"Refresh Required" = "需要刷新";
+"Delete Search History" = "删除搜索历史";
+"Cached" = "已缓存";
+
+/* RAG reranking */
+"Result reranker" = "结果重排模型";
+"Disabled" = "已禁用";
+"Local API" = "本地 API";
+"Local Model" = "本地模型";
+"Cloud API" = "云端 API";
+"Reuse chat API credentials" = "复用聊天 API 凭据";
+"Reranker Base URL" = "重排服务 Base URL";
+"Reranker API Key" = "重排服务 API Key";
+"Optional for local services" = "本地服务可不填写";
+"Reranker Model" = "重排模型";
+"Reranking improves the final order of fused search candidates. If the service is unavailable, FileNest automatically keeps the original retrieval order." = "重排会优化融合检索候选的最终顺序；服务不可用时，FileNest 会自动保留原始检索顺序。";
+"Evidence note: this answer did not include a verifiable source citation. Review the matched files before relying on specific details." = "证据提示：此回答未包含可验证的来源引用，请先核对匹配文件，再依赖其中的具体信息。";
+"Reranking the strongest matches" = "正在重排最相关的结果";
+"Verifying answer citations" = "正在验证回答引用";
+"Retrieval Reranker" = "检索重排模型";
+"Local Status" = "本地状态";
+"0.6B parameters · 32K context" = "0.6B 参数 · 32K 上下文";
+"Not downloaded" = "未下载";
+"Installed · service stopped" = "已安装 · 服务未启动";
+"Starting local service…" = "正在启动本地服务…";
+"Service unavailable" = "服务不可用";
+"About 1.25 GB download; stored only on this Mac." = "下载约 1.25 GB，仅存储在本机。";
+"Download Reranker" = "下载重排模型";
+"Start Service" = "启动服务";
+"Stop Service" = "停止服务";
+"Advanced Local Service" = "本地服务高级设置";
+"The managed service uses 127.0.0.1:11435. Change this only when connecting to another compatible local reranker." = "托管服务使用 127.0.0.1:11435；仅在连接其他兼容的本地重排服务时修改。";
+"Search candidates are sent to the configured reranking service." = "搜索候选内容会发送到已配置的重排服务。";
+"Reranking is disabled. FileNest keeps the fused keyword and vector retrieval order." = "重排已禁用，FileNest 将保留关键词与向量融合检索的顺序。";
+"Reranking refines the final candidate order after hybrid retrieval. If the service is unavailable, search continues with the original order." = "重排会在混合检索后优化最终候选顺序；服务不可用时仍按原顺序继续搜索。";
+"Delete Local Reranker?" = "删除本地重排模型？";
+"Delete Reranker Model" = "删除重排模型";
+"This removes Qwen3-Reranker-0.6B from this Mac. FileNest will keep your reranker settings and you can download the model again later." = "这会从本机删除 Qwen3-Reranker-0.6B。FileNest 会保留重排设置，之后可重新下载。";
+"Service Updates" = "服务更新";
+"Checks Ollama, PaddleOCR, and Docling when this page opens, and skips repeated checks for 24 hours." = "打开此页面时检查 Ollama、PaddleOCR 和 Docling，并在 24 小时内跳过重复检查。";
+
+/* RAG pipeline reset */
+"Reset RAG Pipeline Stages" = "重置 RAG 管线阶段";
+"Reset only the stages you need. Selecting an upstream stage automatically includes every persisted downstream stage." = "只重置需要的阶段；选择上游阶段会自动包含所有需要持久化的下游阶段。";
+"Reset the full RAG pipeline" = "重置完整 RAG 管线";
+"Reparse sources, rebuild chunks and vectors, recreate sqlite-vec, and restart the local reranker" = "重新解析源文件、重建切片与向量、重建 sqlite-vec，并重启本地重排服务。";
+"Document parsing & OCR" = "文档解析与 OCR";
+"Structured chunking" = "结构化切片";
+"Embedding vectors" = "Embedding 向量";
+"SQLite vector index" = "SQLite 向量索引";
+"Reranker runtime" = "重排模型运行服务";
+"Reread source files with Docling and the selected OCR engine" = "使用 Docling 和选定的 OCR 引擎重新读取源文件。";
+"Rebuild parent sections and retrieval chunks" = "重建父章节和用于检索的切片。";
+"Regenerate vectors from existing chunks when possible" = "尽可能复用现有切片重新生成向量。";
+"Recreate sqlite-vec from stored vectors without calling AI" = "从已存向量重建 sqlite-vec，不调用 AI。";
+"Restart the local query-time reranker; document data is unchanged" = "重启查询阶段的本地重排服务，不修改文档数据。";
+"Change detected" = "检测到变化";
+"Up to date" = "无需重置";
+"Unavailable" = "不可用";
+"Include new unindexed files" = "包含尚未索引的新文件";
+"No reset stage is selected and no new files require indexing." = "尚未选择重置阶段，也没有需要索引的新文件。";
+"Review the effective pipeline below. You can pause or stop document processing while it runs." = "请确认下面实际执行的管线；运行期间可以暂停或停止文档处理。";
+"The selected stages reread every managed source file. OCR and Docling may make this significantly slower." = "所选阶段会重新读取全部托管源文件；OCR 和 Docling 可能显著增加耗时。";
+
+/* Automatic file processing */
+"Processing queue idle" = "处理队列空闲";
+"No files are being processed" = "当前没有正在处理的文件";
+"Recent file activity" = "最近文件处理记录";
+"%d files in queue" = "队列中有 %d 个文件";
+"Queued for processing" = "等待处理";
+"Indexing file" = "正在索引文件";
+"Waiting to organize" = "等待整理";
+"Organizing file" = "正在整理文件";
+"Processing complete" = "处理完成";
+"Processing failed" = "处理失败";
+"File Processing Complete" = "文件处理完成";
+"File Processing Failed" = "文件处理失败";
+"%@ finished indexing and processing." = "%@ 已完成索引和处理。";
+"%d files finished indexing and processing." = "%d 个文件已完成索引和处理。";
+"FileNest could not process %@. Open FileNest for details." = "FileNest 无法处理 %@，请打开 FileNest 查看详情。";
+"Organization failed" = "整理失败";
+"Checking file" = "正在检查文件";
+"Recognizing image text" = "正在识别图片文字";
+"Parsing document" = "正在解析文档";
+"Extracting content" = "正在提取内容";
+"Splitting document" = "正在切分文档";
+"Generating vectors %d/%d" = "正在生成向量 %d/%d";

@@ -2,6 +2,10 @@
 "FileNest Settings" = "FileNest Settings";
 "Library" = "Library";
 "Find with Chat" = "Find with Chat";
+"Back" = "Back";
+"Back to previous view" = "Back to previous view";
+"Show file details" = "Show file details";
+"Last updated" = "Last updated";
 "Organization Rules" = "Organization Rules";
 "Settings" = "Settings";
 "Settings…" = "Settings…";
@@ -180,6 +184,8 @@
 "New Chat" = "New Chat";
 "Create a new chat" = "Create a new chat";
 "Retry this question" = "Retry this question";
+"Edit and resend this question" = "Edit and resend this question";
+"Editing your last question" = "Editing your last question";
 "Enter to send, Shift+Enter for a new line" = "Enter to send, Shift+Enter for a new line";
 "Logs" = "Logs";
 "Log Folder" = "Log Folder";
@@ -371,6 +377,9 @@
 "Apply & Reindex" = "Apply & Reindex";
 "Chunk size" = "Chunk size";
 "Chunk overlap" = "Chunk overlap";
+"Parent chunk maximum" = "Parent chunk maximum";
+"Retrieval chunk target" = "Retrieval chunk target";
+"Maximum semantic overlap" = "Maximum semantic overlap";
 "%d tokens" = "%d tokens";
 "Checking file" = "Checking file";
 "Recognizing image text" = "Recognizing image text";
@@ -381,6 +390,7 @@
 "Generating vectors %d/%d" = "Generating vectors %d/%d";
 "%d words" = "%d words";
 "Long documents are split with overlapping sliding windows to reduce information loss from context limits. Images add dimensions, camera details, and non-location EXIF metadata to the index." = "Long documents are split with overlapping sliding windows to reduce information loss from context limits. Images add dimensions, camera details, and non-location EXIF metadata to the index.";
+"Paragraphs stay intact whenever possible. Oversized paragraphs split only between complete sentences, and overlap repeats complete semantic units without cutting words." = "Paragraphs stay intact whenever possible. Oversized paragraphs split only between complete sentences, and overlap repeats complete semantic units without cutting words.";
 "Local Document Parsing" = "Local Document Parsing";
 "Full text: PDF, DOCX, XLSX, PPTX, EPUB, OpenDocument, RTF, and plain text" = "Full text: PDF, DOCX, XLSX, PPTX, EPUB, OpenDocument, RTF, and plain text";
 "Best-effort: legacy DOC/XLS/PPT and iWork (uses local macOS text metadata)" = "Best-effort: legacy DOC/XLS/PPT and iWork (uses local macOS text metadata)";
@@ -406,6 +416,8 @@
 "Index %d new files" = "Index %d new files";
 "Chunk tokens + overlap" = "Chunk tokens + overlap";
 "Chunk tokens or overlap changed" = "Chunk tokens or overlap changed";
+"Semantic chunking" = "Semantic chunking";
+"Parent, retrieval, or overlap settings changed" = "Parent, retrieval, or overlap settings changed";
 "OCR engine" = "OCR engine";
 "The OCR engine, source, format, or model changed" = "The OCR engine, source, format, or model changed";
 "Turn off Thinking Mode" = "Turn off Thinking Mode";
@@ -883,6 +895,8 @@
 "About %d Tokens" = "About %d Tokens";
 "%d Characters" = "%d Characters";
 "Embedding Context" = "Embedding Context";
+"Added Embedding Context" = "Added Embedding Context";
+"Parent Context" = "Parent Context";
 "Title Chunk" = "Title Chunk";
 "Text Chunk" = "Text Chunk";
 "Table Chunk" = "Table Chunk";
@@ -890,3 +904,134 @@
 "Image Chunk" = "Image Chunk";
 "Note Chunk" = "Note Chunk";
 "Metadata Chunk" = "Metadata Chunk";
+
+/* Quick search */
+"Open Quick Search" = "Open Quick Search";
+"Quick Search" = "Quick Search";
+"Quick Search Shortcut" = "Quick Search Shortcut";
+"Press a shortcut…" = "Press a shortcut…";
+"Reset to Default" = "Reset to Default";
+"Use this shortcut from any app to open a centered FileNest search box." = "Use this shortcut from any app to open a centered FileNest search box.";
+"The shortcut could not be registered. Choose a different combination." = "The shortcut could not be registered. Choose a different combination.";
+"Search FileNest" = "Search FileNest";
+"Press Return to search · Esc to close" = "Press Return to search · Esc to close";
+
+/* AI model version checks */
+"Version Updates" = "Version Updates";
+"Automatic Version Detection" = "Automatic Version Detection";
+"Not checked yet" = "Not checked yet";
+"Automatic checks run only when this page opens and are skipped for 24 hours after each check." = "Automatic checks run only when this page opens and are skipped for 24 hours after each check.";
+
+/* Organization job */
+"Ready to Organize" = "Ready to Organize";
+"Preparing Organization" = "Preparing Organization";
+"Waiting for Files to Stabilize" = "Waiting for Files to Stabilize";
+"Building Local Index" = "Building Local Index";
+"Moving Files" = "Moving Files";
+"Organizing" = "Organizing";
+"Organization Paused" = "Organization Paused";
+"Stopping Organization" = "Stopping Organization";
+"Organization Stopped" = "Organization Stopped";
+"Organization Complete" = "Organization Complete";
+"Organization Finished with Errors" = "Organization Finished with Errors";
+"Only new eligible items in watched folders are processed." = "Only new eligible items in watched folders are processed.";
+"Processing %@" = "Processing %@";
+"%d moved · %d skipped · %d failed" = "%d moved · %d skipped · %d failed";
+"Resume Organization" = "Resume Organization";
+"Stop Organization" = "Stop Organization";
+"Stop" = "Stop";
+
+/* Library search history */
+"Search History" = "Search History";
+"Clear All" = "Clear All";
+"No Search History" = "No Search History";
+"Completed searches will appear here." = "Completed searches will appear here.";
+"Standard Search" = "Standard Search";
+"results" = "results";
+"Refresh Required" = "Refresh Required";
+"Delete Search History" = "Delete Search History";
+"Cached" = "Cached";
+
+/* RAG reranking */
+"Result reranker" = "Result reranker";
+"Disabled" = "Disabled";
+"Local API" = "Local API";
+"Local Model" = "Local Model";
+"Cloud API" = "Cloud API";
+"Reuse chat API credentials" = "Reuse chat API credentials";
+"Reranker Base URL" = "Reranker Base URL";
+"Reranker API Key" = "Reranker API Key";
+"Optional for local services" = "Optional for local services";
+"Reranker Model" = "Reranker Model";
+"Reranking improves the final order of fused search candidates. If the service is unavailable, FileNest automatically keeps the original retrieval order." = "Reranking improves the final order of fused search candidates. If the service is unavailable, FileNest automatically keeps the original retrieval order.";
+"Evidence note: this answer did not include a verifiable source citation. Review the matched files before relying on specific details." = "Evidence note: this answer did not include a verifiable source citation. Review the matched files before relying on specific details.";
+"Reranking the strongest matches" = "Reranking the strongest matches";
+"Verifying answer citations" = "Verifying answer citations";
+"Retrieval Reranker" = "Retrieval Reranker";
+"Local Status" = "Local Status";
+"0.6B parameters · 32K context" = "0.6B parameters · 32K context";
+"Not downloaded" = "Not downloaded";
+"Installed · service stopped" = "Installed · service stopped";
+"Starting local service…" = "Starting local service…";
+"Service unavailable" = "Service unavailable";
+"About 1.25 GB download; stored only on this Mac." = "About 1.25 GB download; stored only on this Mac.";
+"Download Reranker" = "Download Reranker";
+"Start Service" = "Start Service";
+"Stop Service" = "Stop Service";
+"Advanced Local Service" = "Advanced Local Service";
+"The managed service uses 127.0.0.1:11435. Change this only when connecting to another compatible local reranker." = "The managed service uses 127.0.0.1:11435. Change this only when connecting to another compatible local reranker.";
+"Search candidates are sent to the configured reranking service." = "Search candidates are sent to the configured reranking service.";
+"Reranking is disabled. FileNest keeps the fused keyword and vector retrieval order." = "Reranking is disabled. FileNest keeps the fused keyword and vector retrieval order.";
+"Reranking refines the final candidate order after hybrid retrieval. If the service is unavailable, search continues with the original order." = "Reranking refines the final candidate order after hybrid retrieval. If the service is unavailable, search continues with the original order.";
+"Delete Local Reranker?" = "Delete Local Reranker?";
+"Delete Reranker Model" = "Delete Reranker Model";
+"This removes Qwen3-Reranker-0.6B from this Mac. FileNest will keep your reranker settings and you can download the model again later." = "This removes Qwen3-Reranker-0.6B from this Mac. FileNest will keep your reranker settings and you can download the model again later.";
+"Service Updates" = "Service Updates";
+"Checks Ollama, PaddleOCR, and Docling when this page opens, and skips repeated checks for 24 hours." = "Checks Ollama, PaddleOCR, and Docling when this page opens, and skips repeated checks for 24 hours.";
+
+/* RAG pipeline reset */
+"Reset RAG Pipeline Stages" = "Reset RAG Pipeline Stages";
+"Reset only the stages you need. Selecting an upstream stage automatically includes every persisted downstream stage." = "Reset only the stages you need. Selecting an upstream stage automatically includes every persisted downstream stage.";
+"Reset the full RAG pipeline" = "Reset the full RAG pipeline";
+"Reparse sources, rebuild chunks and vectors, recreate sqlite-vec, and restart the local reranker" = "Reparse sources, rebuild chunks and vectors, recreate sqlite-vec, and restart the local reranker";
+"Document parsing & OCR" = "Document parsing & OCR";
+"Structured chunking" = "Structured chunking";
+"Embedding vectors" = "Embedding vectors";
+"SQLite vector index" = "SQLite vector index";
+"Reranker runtime" = "Reranker runtime";
+"Reread source files with Docling and the selected OCR engine" = "Reread source files with Docling and the selected OCR engine";
+"Rebuild parent sections and retrieval chunks" = "Rebuild parent sections and retrieval chunks";
+"Regenerate vectors from existing chunks when possible" = "Regenerate vectors from existing chunks when possible";
+"Recreate sqlite-vec from stored vectors without calling AI" = "Recreate sqlite-vec from stored vectors without calling AI";
+"Restart the local query-time reranker; document data is unchanged" = "Restart the local query-time reranker; document data is unchanged";
+"Change detected" = "Change detected";
+"Up to date" = "Up to date";
+"Unavailable" = "Unavailable";
+"Include new unindexed files" = "Include new unindexed files";
+"No reset stage is selected and no new files require indexing." = "No reset stage is selected and no new files require indexing.";
+"Review the effective pipeline below. You can pause or stop document processing while it runs." = "Review the effective pipeline below. You can pause or stop document processing while it runs.";
+"The selected stages reread every managed source file. OCR and Docling may make this significantly slower." = "The selected stages reread every managed source file. OCR and Docling may make this significantly slower.";
+
+/* Automatic file processing */
+"Processing queue idle" = "Processing queue idle";
+"No files are being processed" = "No files are being processed";
+"Recent file activity" = "Recent file activity";
+"%d files in queue" = "%d files in queue";
+"Queued for processing" = "Queued for processing";
+"Indexing file" = "Indexing file";
+"Waiting to organize" = "Waiting to organize";
+"Organizing file" = "Organizing file";
+"Processing complete" = "Processing complete";
+"Processing failed" = "Processing failed";
+"File Processing Complete" = "File Processing Complete";
+"File Processing Failed" = "File Processing Failed";
+"%@ finished indexing and processing." = "%@ finished indexing and processing.";
+"%d files finished indexing and processing." = "%d files finished indexing and processing.";
+"FileNest could not process %@. Open FileNest for details." = "FileNest could not process %@. Open FileNest for details.";
+"Organization failed" = "Organization failed";
+"Checking file" = "Checking file";
+"Recognizing image text" = "Recognizing image text";
+"Parsing document" = "Parsing document";
+"Extracting content" = "Extracting content";
+"Splitting document" = "Splitting document";
+"Generating vectors %d/%d" = "Generating vectors %d/%d";

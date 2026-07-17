@@ -12,14 +12,8 @@ final class AIRuleGenerator {
         let description = request.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !description.isEmpty else { throw AIRuleGeneratorError.emptyRequest }
 
-        let instructions = """
-        You are a macOS file-organization rule generator. Convert the user's description into one deterministic rule. Return JSON only, without explanation or Markdown.
-        JSON format: {"name":"Rule name","extensions":["pdf","docx"],"targetFolder":"single folder name","priority":80}
-        extensions may contain only file extensions without a leading dot; targetFolder must not contain path separators; priority must be from 0 through 100.
-        If the user does not specify extensions, choose common extensions for the file type. Do not invent conditions based on file content or names that the rule engine cannot execute.
-        """
         let response = try await provider.chat([
-            ChatTurn(role: .system, content: instructions),
+            ChatTurn(role: .system, content: PromptCatalog.Organization.ruleSystem),
             ChatTurn(role: .user, content: description),
         ], context: nil)
         return try parse(response: response)

@@ -100,6 +100,24 @@ final class OrganizerServiceTests: XCTestCase {
         XCTAssertEqual(try store.file(id: fileId)?.path, source.path)
     }
 
+    func testOrganizationCheckpointPreventsMove() async throws {
+        let source = try createFile(named: "paused.txt")
+        let fileId = try insertFile(at: source)
+        let organizer = OrganizerService(
+            store: store,
+            settings: AppSettings(store: store),
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid,
+            subfolderResolver: { _ in "Manual" }
+        )
+
+        try await organizer.organizeUsingAI(fileId: fileId, checkpoint: { false })
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(try store.file(id: fileId)?.path, source.path)
+        XCTAssertNil(try store.file(id: fileId)?.organizedAt)
+    }
+
     func testDatabaseUpdateFailureRollsBackPhysicalMove() throws {
         let source = try createFile(named: "rollback.txt")
         let fileId = try insertFile(at: source)

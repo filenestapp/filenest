@@ -3,7 +3,7 @@ import GRDB
 import SQLiteVec
 
 /// SQLite storage for metadata in files, rules, and chat plus vectors in embeddings.
-final class SQLiteStore {
+final class SQLiteStore: @unchecked Sendable {
     static let shared = SQLiteStore()
     private static let resolvedDefaultDatabaseURL = prepareDefaultDatabaseURL()
 
@@ -193,6 +193,104 @@ final class SQLiteStore {
             try db.create(index: "idx_files_discovered", on: "files", columns: ["discovered_at"], ifNotExists: true)
             try db.create(index: "idx_files_organized", on: "files", columns: ["organized_at"], ifNotExists: true)
 
+            try db.create(table: "library_revision", ifNotExists: true) { t in
+                t.primaryKey("id", .integer)
+                t.column("revision", .integer).notNull().defaults(to: 0)
+            }
+            try db.execute(sql: "INSERT OR IGNORE INTO library_revision(id, revision) VALUES(1, 0)")
+            try db.execute(sql: """
+                CREATE TRIGGER IF NOT EXISTS library_revision_insert AFTER INSERT ON files BEGIN
+                    UPDATE library_revision SET revision = revision + 1 WHERE id = 1;
+                END
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER IF NOT EXISTS library_revision_update AFTER UPDATE ON files BEGIN
+                    UPDATE library_revision SET revision = revision + 1 WHERE id = 1;
+                END
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER IF NOT EXISTS library_revision_delete AFTER DELETE ON files BEGIN
+                    UPDATE library_revision SET revision = revision + 1 WHERE id = 1;
+                END
+                """)
+
+            try db.create(table: "library_search_history", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("query", .text).notNull()
+                t.column("normalized_query", .text).notNull()
+                t.column("search_mode", .text).notNull()
+                t.column("created_at", .datetime).notNull()
+                t.column("updated_at", .datetime).notNull()
+                t.column("result_count", .integer).notNull()
+                t.column("library_revision", .integer).notNull()
+                t.column("payload", .blob).notNull()
+                t.column("is_history", .boolean).notNull().defaults(to: true)
+                t.uniqueKey(["normalized_query", "search_mode"])
+            }
+            let searchHistoryColumns = try db.columns(in: "library_search_history").map(\.name)
+            if !searchHistoryColumns.contains("is_history") {
+                try db.execute(sql: "ALTER TABLE library_search_history ADD COLUMN is_history BOOLEAN NOT NULL DEFAULT 1")
+            }
+            try db.create(
+                index: "idx_library_search_history_updated",
+                on: "library_search_history",
+                columns: ["updated_at"],
+                ifNotExists: true
+            )
+
+            try db.create(table: "rag_search_traces", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("created_at", .datetime).notNull()
+                t.column("query", .text).notNull()
+                t.column("semantic_query", .text).notNull()
+                t.column("lexical_candidates", .integer).notNull()
+                t.column("semantic_candidates", .integer).notNull()
+                t.column("entity_candidates", .integer).notNull()
+                t.column("fused_candidates", .integer).notNull()
+                t.column("returned_results", .integer).notNull()
+                t.column("semantic_threshold", .double)
+                t.column("reranker", .text)
+                t.column("duration_ms", .double).notNull()
+            }
+            try db.create(index: "idx_rag_traces_created", on: "rag_search_traces", columns: ["created_at"], ifNotExists: true)
+
+            let shouldBuildSearchIndex = try !db.tableExists("files_fts")
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+                    name,
+                    title,
+                    content_text,
+                    note,
+                    path,
+                    content='files',
+                    content_rowid='id',
+                    tokenize='trigram'
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER IF NOT EXISTS files_fts_insert AFTER INSERT ON files BEGIN
+                    INSERT INTO files_fts(rowid, name, title, content_text, note, path)
+                    VALUES (new.id, new.name, new.title, new.content_text, new.note, new.path);
+                END
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER IF NOT EXISTS files_fts_delete AFTER DELETE ON files BEGIN
+                    INSERT INTO files_fts(files_fts, rowid, name, title, content_text, note, path)
+                    VALUES ('delete', old.id, old.name, old.title, old.content_text, old.note, old.path);
+                END
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER IF NOT EXISTS files_fts_update AFTER UPDATE ON files BEGIN
+                    INSERT INTO files_fts(files_fts, rowid, name, title, content_text, note, path)
+                    VALUES ('delete', old.id, old.name, old.title, old.content_text, old.note, old.path);
+                    INSERT INTO files_fts(rowid, name, title, content_text, note, path)
+                    VALUES (new.id, new.name, new.title, new.content_text, new.note, new.path);
+                END
+                """)
+            if shouldBuildSearchIndex {
+                try db.execute(sql: "INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+            }
+
             try db.create(table: "embeddings", ifNotExists: true) { t in
                 t.autoIncrementedPrimaryKey("id")
                 t.column("file_id", .integer).notNull().references("files", onDelete: .cascade)
@@ -214,9 +312,35 @@ final class SQLiteStore {
                 t.column("page_start", .integer)
                 t.column("page_end", .integer)
                 t.column("kind", .text).notNull().defaults(to: DocumentChunkKind.text.rawValue)
+                t.column("parent_idx", .integer)
+                t.column("token_count", .integer).notNull().defaults(to: 0)
+                t.column("tokenizer_profile", .text).notNull().defaults(to: TokenCounter.canonicalProfile)
+                t.column("tokenizer_version", .text).notNull().defaults(to: TokenCounter.canonicalVersion)
+                t.column("token_count_accuracy", .text).notNull().defaults(to: TokenCountAccuracy.estimated.rawValue)
+                t.column("entity_terms", .text).notNull().defaults(to: "[]")
                 t.uniqueKey(["file_id", "chunk_idx"])
             }
+            let chunkColumns = try db.columns(in: "document_chunks").map(\.name)
+            if !chunkColumns.contains("parent_idx") {
+                try db.execute(sql: "ALTER TABLE document_chunks ADD COLUMN parent_idx INTEGER")
+            }
+            if !chunkColumns.contains("token_count") {
+                try db.execute(sql: "ALTER TABLE document_chunks ADD COLUMN token_count INTEGER NOT NULL DEFAULT 0")
+            }
+            if !chunkColumns.contains("tokenizer_profile") {
+                try db.execute(sql: "ALTER TABLE document_chunks ADD COLUMN tokenizer_profile TEXT NOT NULL DEFAULT '\(TokenCounter.canonicalProfile)'")
+            }
+            if !chunkColumns.contains("tokenizer_version") {
+                try db.execute(sql: "ALTER TABLE document_chunks ADD COLUMN tokenizer_version TEXT NOT NULL DEFAULT '\(TokenCounter.canonicalVersion)'")
+            }
+            if !chunkColumns.contains("token_count_accuracy") {
+                try db.execute(sql: "ALTER TABLE document_chunks ADD COLUMN token_count_accuracy TEXT NOT NULL DEFAULT 'estimated'")
+            }
+            if !chunkColumns.contains("entity_terms") {
+                try db.execute(sql: "ALTER TABLE document_chunks ADD COLUMN entity_terms TEXT NOT NULL DEFAULT '[]'")
+            }
             try db.create(index: "idx_chunks_file", on: "document_chunks", columns: ["file_id", "chunk_idx"], ifNotExists: true)
+            try db.create(index: "idx_chunks_parent", on: "document_chunks", columns: ["file_id", "parent_idx"], ifNotExists: true)
             try db.execute(sql: """
                 INSERT OR IGNORE INTO document_chunks(
                     file_id, chunk_idx, text, contextual_text, section_path, kind
@@ -224,6 +348,56 @@ final class SQLiteStore {
                 SELECT file_id, chunk_idx, COALESCE(chunk_text, ''), COALESCE(chunk_text, ''), '[]', 'text'
                 FROM embeddings
                 WHERE chunk_text IS NOT NULL
+                """)
+            try db.execute(sql: "UPDATE document_chunks SET parent_idx = chunk_idx WHERE parent_idx IS NULL")
+
+            let hadDocumentParents = try db.tableExists("document_parents")
+            try db.create(table: "document_parents", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("file_id", .integer).notNull().references("files", onDelete: .cascade)
+                t.column("parent_idx", .integer).notNull()
+                t.column("text", .text).notNull()
+                t.column("contextual_text", .text).notNull()
+                t.column("section_path", .text).notNull().defaults(to: "[]")
+                t.column("page_start", .integer)
+                t.column("page_end", .integer)
+                t.column("kind", .text).notNull().defaults(to: DocumentChunkKind.text.rawValue)
+                t.column("token_count", .integer).notNull().defaults(to: 0)
+                t.column("tokenizer_profile", .text).notNull().defaults(to: TokenCounter.canonicalProfile)
+                t.column("tokenizer_version", .text).notNull().defaults(to: TokenCounter.canonicalVersion)
+                t.column("token_count_accuracy", .text).notNull().defaults(to: TokenCountAccuracy.estimated.rawValue)
+                t.uniqueKey(["file_id", "parent_idx"])
+            }
+            let parentColumns = try db.columns(in: "document_parents").map(\.name)
+            if !parentColumns.contains("tokenizer_profile") {
+                try db.execute(sql: "ALTER TABLE document_parents ADD COLUMN tokenizer_profile TEXT NOT NULL DEFAULT '\(TokenCounter.canonicalProfile)'")
+            }
+            if !parentColumns.contains("tokenizer_version") {
+                try db.execute(sql: "ALTER TABLE document_parents ADD COLUMN tokenizer_version TEXT NOT NULL DEFAULT '\(TokenCounter.canonicalVersion)'")
+            }
+            if !parentColumns.contains("token_count_accuracy") {
+                try db.execute(sql: "ALTER TABLE document_parents ADD COLUMN token_count_accuracy TEXT NOT NULL DEFAULT 'estimated'")
+            }
+            try db.create(index: "idx_parents_file", on: "document_parents", columns: ["file_id", "parent_idx"], ifNotExists: true)
+            if !hadDocumentParents {
+                try db.execute(sql: """
+                    INSERT OR IGNORE INTO document_parents(
+                        file_id, parent_idx, text, contextual_text, section_path,
+                        page_start, page_end, kind, token_count
+                    )
+                    SELECT file_id, chunk_idx, text, contextual_text, section_path,
+                           page_start, page_end, kind, token_count
+                    FROM document_chunks
+                    """)
+            }
+            try db.execute(sql: """
+                DELETE FROM document_parents
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM document_chunks
+                    WHERE document_chunks.file_id = document_parents.file_id
+                      AND document_chunks.parent_idx = document_parents.parent_idx
+                )
                 """)
 
             try db.create(table: "rules", ifNotExists: true) { t in
@@ -319,8 +493,46 @@ final class SQLiteStore {
                 t.column("input_tokens", .integer).notNull()
                 t.column("output_tokens", .integer).notNull()
                 t.column("session_id", .integer)
+                t.column("tokenizer_profile", .text).notNull().defaults(to: TokenCounter.generationFallbackProfile)
+                t.column("token_count_accuracy", .text).notNull().defaults(to: TokenCountAccuracy.estimated.rawValue)
+            }
+            let tokenUsageColumns = try db.columns(in: "token_usage").map(\.name)
+            if !tokenUsageColumns.contains("tokenizer_profile") {
+                try db.execute(sql: "ALTER TABLE token_usage ADD COLUMN tokenizer_profile TEXT NOT NULL DEFAULT '\(TokenCounter.generationFallbackProfile)'")
+            }
+            if !tokenUsageColumns.contains("token_count_accuracy") {
+                try db.execute(sql: "ALTER TABLE token_usage ADD COLUMN token_count_accuracy TEXT NOT NULL DEFAULT 'estimated'")
             }
             try db.create(index: "idx_token_usage_ts", on: "token_usage", columns: ["ts"], ifNotExists: true)
+
+            // Existing rows used a different CJK/character heuristic. Recalculate once with
+            // the shared canonical estimator without changing chunk boundaries or vectors.
+            let legacyChunks = try Row.fetchAll(
+                db,
+                sql: "SELECT id, contextual_text FROM document_chunks WHERE token_count = 0 OR (token_count_accuracy = 'estimated' AND tokenizer_version != ?)",
+                arguments: [TokenCounter.canonicalVersion]
+            )
+            for row in legacyChunks {
+                let measurement = TokenCounter.estimate((row["contextual_text"] as String?) ?? "")
+                try db.execute(
+                    sql: "UPDATE document_chunks SET token_count = ?, tokenizer_profile = ?, tokenizer_version = ?, token_count_accuracy = ? WHERE id = ?",
+                    arguments: [measurement.count, measurement.tokenizerProfile, measurement.tokenizerVersion,
+                                measurement.accuracy.rawValue, row["id"] as Int64]
+                )
+            }
+            let legacyParents = try Row.fetchAll(
+                db,
+                sql: "SELECT id, contextual_text FROM document_parents WHERE token_count = 0 OR (token_count_accuracy = 'estimated' AND tokenizer_version != ?)",
+                arguments: [TokenCounter.canonicalVersion]
+            )
+            for row in legacyParents {
+                let measurement = TokenCounter.estimate((row["contextual_text"] as String?) ?? "")
+                try db.execute(
+                    sql: "UPDATE document_parents SET token_count = ?, tokenizer_profile = ?, tokenizer_version = ?, token_count_accuracy = ? WHERE id = ?",
+                    arguments: [measurement.count, measurement.tokenizerProfile, measurement.tokenizerVersion,
+                                measurement.accuracy.rawValue, row["id"] as Int64]
+                )
+            }
         }
     }
 
@@ -398,6 +610,26 @@ final class SQLiteStore {
         }
     }
 
+    /// Returns reindex planning counts without materializing every file record on the UI thread.
+    func fileIndexCounts() throws -> (total: Int, indexed: Int, unindexed: Int) {
+        try dbPool.read { db in
+            let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*) AS total,
+                           SUM(CASE WHEN indexed_at IS NOT NULL THEN 1 ELSE 0 END) AS indexed,
+                           SUM(CASE WHEN indexed_at IS NULL THEN 1 ELSE 0 END) AS unindexed
+                    FROM files
+                    """
+            )
+            return (
+                total: row?["total"] ?? 0,
+                indexed: row?["indexed"] ?? 0,
+                unindexed: row?["unindexed"] ?? 0
+            )
+        }
+    }
+
     func file(id: Int64) throws -> FileRecord? {
         try dbPool.read { db in
             try FileRecord.fetchOne(
@@ -430,8 +662,64 @@ final class SQLiteStore {
         }
     }
 
+    /// Loads watched entries in batches so a directory scan does not issue one query per item.
+    /// The returned dictionary is keyed by the caller's original path representation.
+    func files(atPaths paths: Set<String>) throws -> [String: FileRecord] {
+        guard !paths.isEmpty else { return [:] }
+        return try dbPool.read { db in
+            let requestedPaths = Array(paths)
+            let lookupPaths = Set(requestedPaths.flatMap { path in
+                [path, Self.alternateMacOSPathRepresentation(path)].compactMap { $0 }
+            })
+            let lookupPathList = Array(lookupPaths)
+            var recordsByStoredPath = [String: FileRecord]()
+            for chunkStart in stride(from: 0, to: lookupPathList.count, by: 400) {
+                let chunk = Array(lookupPathList[chunkStart..<min(chunkStart + 400, lookupPathList.count)])
+                let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                let records = try FileRecord.fetchAll(
+                    db,
+                    sql: "SELECT * FROM files WHERE path IN (\(placeholders))",
+                    arguments: StatementArguments(chunk)
+                )
+                for record in records { recordsByStoredPath[record.path] = record }
+            }
+
+            var recordsByRequestedPath = [String: FileRecord]()
+            for path in requestedPaths {
+                if let record = recordsByStoredPath[path] {
+                    recordsByRequestedPath[path] = record
+                } else if let alternatePath = Self.alternateMacOSPathRepresentation(path),
+                          let record = recordsByStoredPath[alternatePath] {
+                    recordsByRequestedPath[path] = record
+                }
+            }
+            return recordsByRequestedPath
+        }
+    }
+
     func files(matching keyword: String) throws -> [FileRecord] {
         try dbPool.read { db in
+            if keyword.unicodeScalars.count >= 3 {
+                let quotedKeyword = "\"\(keyword.replacingOccurrences(of: "\"", with: "\"\""))\""
+                if let records = try? FileRecord.fetchAll(
+                    db,
+                    sql: """
+                        SELECT files.*
+                        FROM files_fts
+                        JOIN files ON files.id = files_fts.rowid
+                        WHERE files_fts MATCH ?
+                        ORDER BY COALESCE(files.discovered_at, files.organized_at, files.indexed_at, files.mtime) DESC,
+                                 files.name COLLATE NOCASE ASC
+                        LIMIT 200
+                        """,
+                    arguments: [quotedKeyword]
+                ), !records.isEmpty {
+                    return records
+                }
+            }
+
+            // Short tokens and punctuation are not indexed by the trigram tokenizer.
+            // Preserve literal substring behavior as a bounded fallback for those queries and FTS misses.
             let escapedKeyword = keyword
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "%", with: "\\%")
@@ -450,11 +738,15 @@ final class SQLiteStore {
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT chunk_idx, text, contextual_text, section_path,
-                           page_start, page_end, kind
-                    FROM document_chunks
-                    WHERE file_id = ?
-                    ORDER BY chunk_idx
+                    SELECT c.chunk_idx, c.text, c.contextual_text, c.section_path,
+                           c.page_start, c.page_end, c.kind, c.parent_idx,
+                           p.text AS parent_text, c.token_count,
+                           c.tokenizer_profile, c.tokenizer_version, c.token_count_accuracy
+                    FROM document_chunks c
+                    LEFT JOIN document_parents p
+                      ON p.file_id = c.file_id AND p.parent_idx = c.parent_idx
+                    WHERE c.file_id = ?
+                    ORDER BY c.chunk_idx
                     """,
                 arguments: [fileID]
             )
@@ -472,7 +764,76 @@ final class SQLiteStore {
                     sectionPath: sectionPath,
                     pageStart: row["page_start"],
                     pageEnd: row["page_end"],
-                    kind: DocumentChunkKind(rawValue: (row["kind"] as String?) ?? "") ?? .text
+                    kind: DocumentChunkKind(rawValue: (row["kind"] as String?) ?? "") ?? .text,
+                    parentIndex: row["parent_idx"],
+                    parentText: row["parent_text"],
+                    tokenCount: row["token_count"],
+                    tokenizerProfile: (row["tokenizer_profile"] as String?) ?? TokenCounter.canonicalProfile,
+                    tokenizerVersion: (row["tokenizer_version"] as String?) ?? TokenCounter.canonicalVersion,
+                    tokenCountAccuracy: TokenCountAccuracy(
+                        rawValue: (row["token_count_accuracy"] as String?) ?? ""
+                    ) ?? .estimated
+                )
+            }
+        }
+    }
+
+    /// Returns high-precision chunk matches for identifiers extracted during indexing.
+    /// This lane complements semantic similarity for invoice numbers, emails, dates, and IDs.
+    func entityChunkMatches(terms: [String], limit: Int) throws -> [VectorSearchHit] {
+        let normalizedTerms = Array(Set(terms.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }.filter { $0.count >= 3 })).sorted().prefix(12)
+        guard !normalizedTerms.isEmpty, limit > 0 else { return [] }
+        let scoreExpression = normalizedTerms.map { _ in
+            "CASE WHEN instr(lower(c.entity_terms), ?) > 0 THEN 1 ELSE 0 END"
+        }.joined(separator: " + ")
+        var arguments = StatementArguments(normalizedTerms)
+        arguments += [limit]
+        return try dbPool.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    WITH ranked AS (
+                        SELECT c.file_id, c.chunk_idx, c.contextual_text AS chunk_text,
+                               c.section_path, c.page_start, c.page_end, c.kind,
+                               c.parent_idx, p.text AS parent_text, c.entity_terms,
+                               (\(scoreExpression)) AS entity_score
+                        FROM document_chunks c
+                        LEFT JOIN document_parents p
+                          ON p.file_id = c.file_id AND p.parent_idx = c.parent_idx
+                    )
+                    SELECT * FROM ranked
+                    WHERE entity_score > 0
+                    ORDER BY entity_score DESC, file_id, chunk_idx
+                    LIMIT ?
+                    """,
+                arguments: arguments
+            )
+            return rows.map { row in
+                let sectionJSON = (row["section_path"] as String?) ?? "[]"
+                let sectionPath = (try? JSONDecoder().decode(
+                    [String].self,
+                    from: Data(sectionJSON.utf8)
+                )) ?? []
+                let entityJSON = (row["entity_terms"] as String?) ?? "[]"
+                let entityTerms = (try? JSONDecoder().decode(
+                    [String].self,
+                    from: Data(entityJSON.utf8)
+                )) ?? []
+                let matchCount = (row["entity_score"] as Int?) ?? 1
+                return VectorSearchHit(
+                    fileId: row["file_id"],
+                    score: min(1, 0.92 + Float(matchCount - 1) * 0.02),
+                    chunkText: row["chunk_text"],
+                    chunkIndex: row["chunk_idx"],
+                    sectionPath: sectionPath,
+                    pageStart: row["page_start"],
+                    pageEnd: row["page_end"],
+                    kind: DocumentChunkKind(rawValue: (row["kind"] as String?) ?? "") ?? .text,
+                    parentIndex: row["parent_idx"],
+                    parentText: row["parent_text"],
+                    entityTerms: entityTerms
                 )
             }
         }
@@ -542,6 +903,171 @@ final class SQLiteStore {
         }
     }
 
+    // MARK: - library search history and cache
+
+    func libraryRevision() throws -> Int64 {
+        try dbPool.read { db in
+            try Int64.fetchOne(
+                db,
+                sql: "SELECT revision FROM library_revision WHERE id = 1"
+            ) ?? 0
+        }
+    }
+
+    func librarySearchHistory(limit: Int = 20) throws -> [LibrarySearchHistoryEntry] {
+        let safeLimit = max(1, min(limit, 100))
+        return try dbPool.read { db in
+            let revision = try Int64.fetchOne(
+                db,
+                sql: "SELECT revision FROM library_revision WHERE id = 1"
+            ) ?? 0
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, query, search_mode, updated_at, result_count, library_revision
+                    FROM library_search_history
+                    WHERE is_history = 1
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                arguments: [safeLimit]
+            )
+            return rows.map { row in
+                LibrarySearchHistoryEntry(
+                    id: row["id"],
+                    query: row["query"],
+                    isSmartSearch: (row["search_mode"] as String) == "smart",
+                    updatedAt: row["updated_at"],
+                    resultCount: row["result_count"],
+                    hasValidCache: (row["library_revision"] as Int64) == revision
+                )
+            }
+        }
+    }
+
+    func cachedLibrarySearch(query: String, isSmartSearch: Bool) throws -> LibrarySearchCacheRecord? {
+        let normalizedQuery = Self.normalizedSearchQuery(query)
+        guard !normalizedQuery.isEmpty else { return nil }
+        return try dbPool.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT library_revision, payload
+                    FROM library_search_history
+                    WHERE normalized_query = ? AND search_mode = ?
+                    """,
+                arguments: [normalizedQuery, isSmartSearch ? "smart" : "standard"]
+            ) else { return nil }
+            return LibrarySearchCacheRecord(
+                revision: row["library_revision"],
+                payload: row["payload"]
+            )
+        }
+    }
+
+    func saveLibrarySearch(
+        query: String,
+        isSmartSearch: Bool,
+        resultCount: Int,
+        revision: Int64,
+        payload: Data,
+        recordHistory: Bool
+    ) throws {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedQuery = Self.normalizedSearchQuery(trimmedQuery)
+        guard !normalizedQuery.isEmpty else { return }
+        let now = Date()
+        try dbPool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO library_search_history(
+                        query, normalized_query, search_mode, created_at, updated_at,
+                        result_count, library_revision, payload, is_history
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(normalized_query, search_mode) DO UPDATE SET
+                        query = excluded.query,
+                        updated_at = excluded.updated_at,
+                        result_count = excluded.result_count,
+                        library_revision = excluded.library_revision,
+                        payload = excluded.payload,
+                        is_history = CASE
+                            WHEN excluded.is_history = 1 THEN 1
+                            ELSE library_search_history.is_history
+                        END
+                    """,
+                arguments: [
+                    trimmedQuery,
+                    normalizedQuery,
+                    isSmartSearch ? "smart" : "standard",
+                    now,
+                    now,
+                    resultCount,
+                    revision,
+                    payload,
+                    recordHistory,
+                ]
+            )
+            try db.execute(sql: """
+                DELETE FROM library_search_history
+                WHERE id NOT IN (
+                    SELECT id FROM library_search_history ORDER BY updated_at DESC LIMIT 50
+                )
+                """)
+        }
+    }
+
+    func deleteLibrarySearchHistory(id: Int64) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM library_search_history WHERE id = ?", arguments: [id])
+        }
+    }
+
+    func clearLibrarySearchHistory() throws {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM library_search_history")
+        }
+    }
+
+    func recordRAGSearchTrace(query: String,
+                              semanticQuery: String,
+                              lexicalCandidates: Int,
+                              semanticCandidates: Int,
+                              entityCandidates: Int,
+                              fusedCandidates: Int,
+                              returnedResults: Int,
+                              semanticThreshold: Float?,
+                              reranker: String?,
+                              duration: TimeInterval) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO rag_search_traces(
+                        created_at, query, semantic_query, lexical_candidates,
+                        semantic_candidates, entity_candidates, fused_candidates,
+                        returned_results, semantic_threshold, reranker, duration_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                arguments: [Date(), query, semanticQuery, lexicalCandidates,
+                            semanticCandidates, entityCandidates, fusedCandidates,
+                            returnedResults, semanticThreshold, reranker,
+                            duration * 1_000]
+            )
+            try db.execute(sql: """
+                DELETE FROM rag_search_traces
+                WHERE id NOT IN (
+                    SELECT id FROM rag_search_traces ORDER BY created_at DESC LIMIT 1000
+                )
+                """)
+        }
+    }
+
+    private static func normalizedSearchQuery(_ query: String) -> String {
+        query
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+    }
+
     // MARK: - statistics
 
     func recordTokenUsage(_ usage: TokenUsageRecord) throws {
@@ -554,68 +1080,129 @@ final class SQLiteStore {
 
     func statistics(days: Int = 14) throws -> AppStatistics {
         let safeDays = max(1, days)
-        let files = try allFiles()
-        let usages = try dbPool.read { db in
-            try TokenUsageRecord.order(Column("ts")).fetchAll(db)
-        }
-        let vectorBytes = try dbPool.read { db in
-            try Int64.fetchOne(db, sql: "SELECT COALESCE(SUM(length(vector)), 0) FROM embeddings") ?? 0
-        }
-
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
         let daysList = (0..<safeDays).reversed().compactMap {
             calendar.date(byAdding: .day, value: -$0, to: today)
         }
-        var addedByDay: [Date: Int] = [:]
-        var indexedByDay: [Date: Int] = [:]
-        var tokensByDay: [Date: Int] = [:]
+        let dayFormatter = DateFormatter()
+        dayFormatter.calendar = calendar
+        dayFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dayFormatter.timeZone = calendar.timeZone
+        dayFormatter.dateFormat = "yyyy-MM-dd"
 
-        for file in files {
-            let discovered = calendar.startOfDay(for: file.discoveredAt ?? file.indexedAt ?? file.mtime)
-            addedByDay[discovered, default: 0] += 1
-            if let indexedAt = file.indexedAt {
-                indexedByDay[calendar.startOfDay(for: indexedAt), default: 0] += 1
+        let aggregate = try dbPool.read { db -> (
+            totalFiles: Int,
+            indexedFiles: Int,
+            managedFileBytes: Int64,
+            extractedTextBytes: Int64,
+            totalTokens: Int,
+            vectorBytes: Int64,
+            addedByDay: [String: Int],
+            indexedByDay: [String: Int],
+            tokensByDay: [String: Int],
+            categories: [CategoryStorageStat]
+        ) in
+            let fileSummary = try Row.fetchOne(db, sql: """
+                SELECT COUNT(*) AS total_files,
+                       COALESCE(SUM(CASE WHEN indexed_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS indexed_files,
+                       COALESCE(SUM(MAX(size, 0)), 0) AS managed_bytes,
+                       COALESCE(SUM(LENGTH(COALESCE(content_text, ''))), 0) AS extracted_text_bytes
+                FROM files
+                """)
+            let totalFiles = (fileSummary?["total_files"] as Int?) ?? 0
+            let indexedFiles = (fileSummary?["indexed_files"] as Int?) ?? 0
+            let managedFileBytes = (fileSummary?["managed_bytes"] as Int64?) ?? 0
+            let extractedTextBytes = (fileSummary?["extracted_text_bytes"] as Int64?) ?? 0
+
+            let totalTokens = try Int.fetchOne(
+                db,
+                sql: "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM token_usage"
+            ) ?? 0
+            let vectorBytes = try Int64.fetchOne(
+                db,
+                sql: "SELECT COALESCE(SUM(LENGTH(vector)), 0) FROM embeddings"
+            ) ?? 0
+
+            let addedRows = try Row.fetchAll(db, sql: """
+                SELECT DATE(COALESCE(discovered_at, indexed_at, mtime), 'localtime') AS day,
+                       COUNT(*) AS value
+                FROM files
+                GROUP BY day
+                """)
+            let indexedRows = try Row.fetchAll(db, sql: """
+                SELECT DATE(indexed_at, 'localtime') AS day, COUNT(*) AS value
+                FROM files
+                WHERE indexed_at IS NOT NULL
+                GROUP BY day
+                """)
+            let tokenRows = try Row.fetchAll(db, sql: """
+                SELECT DATE(ts, 'localtime') AS day, SUM(input_tokens + output_tokens) AS value
+                FROM token_usage
+                GROUP BY day
+                """)
+            func valuesByDay(_ rows: [Row]) -> [String: Int] {
+                Dictionary(uniqueKeysWithValues: rows.compactMap { row in
+                    guard let day = row["day"] as String? else { return nil }
+                    return (day, (row["value"] as Int?) ?? 0)
+                })
             }
-        }
-        for usage in usages {
-            let day = calendar.startOfDay(for: usage.ts)
-            tokensByDay[day, default: 0] += usage.inputTokens + usage.outputTokens
+
+            let categoryRows = try Row.fetchAll(db, sql: """
+                SELECT category, COALESCE(SUM(MAX(size, 0)), 0) AS bytes, COUNT(*) AS file_count
+                FROM files
+                GROUP BY category
+                ORDER BY bytes DESC
+                """)
+            let categories = categoryRows.compactMap { row -> CategoryStorageStat? in
+                guard let rawCategory = row["category"] as String?,
+                      let category = FileCategory(rawValue: rawCategory) else { return nil }
+                return CategoryStorageStat(
+                    category: category,
+                    bytes: (row["bytes"] as Int64?) ?? 0,
+                    fileCount: (row["file_count"] as Int?) ?? 0
+                )
+            }
+            return (
+                totalFiles,
+                indexedFiles,
+                managedFileBytes,
+                extractedTextBytes,
+                totalTokens,
+                vectorBytes,
+                valuesByDay(addedRows),
+                valuesByDay(indexedRows),
+                valuesByDay(tokenRows),
+                categories
+            )
         }
 
         let daily = daysList.map { day in
-            DailyActivityStat(
+            let key = dayFormatter.string(from: day)
+            return DailyActivityStat(
                 day: day,
-                addedFiles: addedByDay[day, default: 0],
-                indexedFiles: indexedByDay[day, default: 0],
-                tokens: tokensByDay[day, default: 0]
+                addedFiles: aggregate.addedByDay[key, default: 0],
+                indexedFiles: aggregate.indexedByDay[key, default: 0],
+                tokens: aggregate.tokensByDay[key, default: 0]
             )
         }
-        let categories = Dictionary(grouping: files, by: \.categoryEnum)
-            .map { category, values in
-                CategoryStorageStat(
-                    category: category,
-                    bytes: values.reduce(0) { $0 + max(0, $1.size) },
-                    fileCount: values.count
-                )
-            }
-            .sorted { $0.bytes > $1.bytes }
+        let todayKey = dayFormatter.string(from: today)
 
         return AppStatistics(
-            totalFiles: files.count,
-            indexedFiles: files.filter { $0.indexedAt != nil }.count,
-            todayAddedFiles: addedByDay[today, default: 0],
-            totalTokens: usages.reduce(0) { $0 + $1.inputTokens + $1.outputTokens },
-            todayTokens: tokensByDay[today, default: 0],
-            managedFileBytes: files.reduce(0) { $0 + max(0, $1.size) },
+            totalFiles: aggregate.totalFiles,
+            indexedFiles: aggregate.indexedFiles,
+            todayAddedFiles: aggregate.addedByDay[todayKey, default: 0],
+            totalTokens: aggregate.totalTokens,
+            todayTokens: aggregate.tokensByDay[todayKey, default: 0],
+            managedFileBytes: aggregate.managedFileBytes,
             databaseBytes: databaseStorageBytes(),
-            vectorBytes: vectorBytes,
-            extractedTextBytes: files.reduce(0) { $0 + Int64($1.contentText?.utf8.count ?? 0) },
+            vectorBytes: aggregate.vectorBytes,
+            extractedTextBytes: aggregate.extractedTextBytes,
             localModelBytes: directorySize(
                 FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ollama/models")
             ),
             dailyActivity: daily,
-            categoryStorage: categories
+            categoryStorage: aggregate.categories
         )
     }
 
@@ -927,6 +1514,27 @@ final class SQLiteStore {
         }) ?? false
     }
 
+    func watchDirectoryBaselineEntries(directoryPath: String) throws -> Set<String> {
+        try dbPool.read { db in
+            Set(try String.fetchAll(
+                db,
+                sql: "SELECT entry_path FROM watch_directory_baseline_entries WHERE directory_path = ?",
+                arguments: [directoryPath]
+            ))
+        }
+    }
+
+    private static func alternateMacOSPathRepresentation(_ path: String) -> String? {
+        if path == "/var" || path.hasPrefix("/var/") || path == "/tmp" || path.hasPrefix("/tmp/") {
+            return "/private\(path)"
+        }
+        if path == "/private/var" || path.hasPrefix("/private/var/")
+            || path == "/private/tmp" || path.hasPrefix("/private/tmp/") {
+            return String(path.dropFirst("/private".count))
+        }
+        return nil
+    }
+
     func retainWatchDirectoryBaselineEntries(
         directoryPath: String,
         existingEntryPaths: Set<String>
@@ -970,7 +1578,8 @@ final class SQLiteStore {
                 db,
                 sql: """
                     SELECT file_id, text, contextual_text, section_path,
-                           page_start, page_end, kind
+                           page_start, page_end, kind, token_count,
+                           tokenizer_profile, tokenizer_version, token_count_accuracy
                     FROM document_chunks
                     ORDER BY file_id, chunk_idx
                     """
@@ -988,7 +1597,13 @@ final class SQLiteStore {
                     sectionPath: sectionPath,
                     pageStart: row["page_start"],
                     pageEnd: row["page_end"],
-                    kind: DocumentChunkKind(rawValue: (row["kind"] as String?) ?? "") ?? .text
+                    kind: DocumentChunkKind(rawValue: (row["kind"] as String?) ?? "") ?? .text,
+                    tokenCount: row["token_count"],
+                    tokenizerProfile: row["tokenizer_profile"],
+                    tokenizerVersion: row["tokenizer_version"],
+                    tokenCountAccuracy: TokenCountAccuracy(
+                        rawValue: (row["token_count_accuracy"] as String?) ?? ""
+                    ) ?? .estimated
                 )
                 result[row["file_id"], default: []].append(chunk)
             }

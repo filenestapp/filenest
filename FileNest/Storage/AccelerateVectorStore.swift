@@ -6,6 +6,10 @@ import GRDB
 final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
     private static let vectorTable = "vec_embeddings"
     private static let dimensionSetting = "sqlite_vec_dimension"
+    private static let shadowEmbeddingsTable = "rebuild_embeddings"
+    private static let shadowChunksTable = "rebuild_document_chunks"
+    private static let shadowParentsTable = "rebuild_document_parents"
+    private static let shadowMetadataTable = "rebuild_file_metadata"
     private let store: SQLiteStore
     private let queue = DispatchQueue(label: "filenest.vectorstore")
     private var storedCount = 0
@@ -21,6 +25,9 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                 do {
                     try self.store.dbPool.write { db in
                         _ = try String.fetchOne(db, sql: "SELECT vec_version()")
+                        // A shadow generation is never resumable across app launches. If the app
+                        // exited during a rebuild, keep the active index and remove the orphaned stage.
+                        try self.dropShadowTables(db)
                         guard let dimension = try Int.fetchOne(
                             db,
                             sql: "SELECT MIN(dim) FROM embeddings HAVING COUNT(DISTINCT dim) = 1"
@@ -61,6 +68,433 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
         }
     }
 
+    /// Recreates only the sqlite-vec virtual table from persisted embedding rows.
+    /// Document parsing, chunks, and embedding provider calls are intentionally skipped.
+    @discardableResult
+    func rebuildRetrievalIndex() async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                do {
+                    try self.store.dbPool.write { db in
+                        guard let dimension = try Int.fetchOne(
+                            db,
+                            sql: "SELECT MIN(dim) FROM embeddings HAVING COUNT(DISTINCT dim) = 1"
+                        ) else {
+                            try self.dropVectorTable(db)
+                            return
+                        }
+                        try self.dropVectorTable(db)
+                        try self.ensureVectorTable(db, dimension: dimension, allowRecreate: true)
+                        let rows = try Row.fetchAll(db, sql: "SELECT id, vector FROM embeddings ORDER BY id")
+                        for row in rows {
+                            try db.execute(
+                                sql: "INSERT INTO \(Self.vectorTable)(rowid, embedding) VALUES (?, vec_f32(?))",
+                                arguments: [row["id"] as Int64, row["vector"] as Data]
+                            )
+                        }
+                    }
+                    self.refreshCount()
+                    AppLogService.shared.write(
+                        "sqlite-vec retrieval index rebuilt from stored embeddings",
+                        category: .vectorLifecycle,
+                        level: .notice,
+                        metadata: ["vectors": "\(self.storedCount)"]
+                    )
+                    continuation.resume(returning: true)
+                } catch {
+                    AppLogService.shared.write(
+                        "sqlite-vec retrieval index rebuild failed: \(error)",
+                        category: .vectorLifecycle,
+                        level: .error
+                    )
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    /// Creates an isolated on-disk generation for a full RAG rebuild.
+    /// Production chunks, vectors, and file metadata remain readable until commit.
+    @discardableResult
+    func beginShadowRebuild() async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                do {
+                    try self.store.dbPool.write { db in
+                        try self.dropShadowTables(db)
+                        try db.execute(sql: """
+                            CREATE TABLE \(Self.shadowEmbeddingsTable)(
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                file_id INTEGER NOT NULL,
+                                vector BLOB NOT NULL,
+                                dim INTEGER NOT NULL,
+                                model TEXT NOT NULL,
+                                chunk_idx INTEGER NOT NULL,
+                                chunk_text TEXT
+                            )
+                            """)
+                        try db.execute(sql: """
+                            CREATE TABLE \(Self.shadowChunksTable)(
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                file_id INTEGER NOT NULL,
+                                chunk_idx INTEGER NOT NULL,
+                                text TEXT NOT NULL,
+                                contextual_text TEXT NOT NULL,
+                                section_path TEXT NOT NULL DEFAULT '[]',
+                                page_start INTEGER,
+                                page_end INTEGER,
+                                kind TEXT NOT NULL,
+                                parent_idx INTEGER,
+                                token_count INTEGER NOT NULL DEFAULT 0,
+                                tokenizer_profile TEXT NOT NULL,
+                                tokenizer_version TEXT NOT NULL,
+                                token_count_accuracy TEXT NOT NULL,
+                                entity_terms TEXT NOT NULL DEFAULT '[]',
+                                UNIQUE(file_id, chunk_idx)
+                            )
+                            """)
+                        try db.execute(sql: """
+                            CREATE TABLE \(Self.shadowParentsTable)(
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                file_id INTEGER NOT NULL,
+                                parent_idx INTEGER NOT NULL,
+                                text TEXT NOT NULL,
+                                contextual_text TEXT NOT NULL,
+                                section_path TEXT NOT NULL DEFAULT '[]',
+                                page_start INTEGER,
+                                page_end INTEGER,
+                                kind TEXT NOT NULL,
+                                token_count INTEGER NOT NULL DEFAULT 0,
+                                tokenizer_profile TEXT NOT NULL,
+                                tokenizer_version TEXT NOT NULL,
+                                token_count_accuracy TEXT NOT NULL,
+                                UNIQUE(file_id, parent_idx)
+                            )
+                            """)
+                        try db.execute(sql: """
+                            CREATE TABLE \(Self.shadowMetadataTable)(
+                                file_id INTEGER PRIMARY KEY,
+                                title TEXT,
+                                content_text TEXT,
+                                content_hash TEXT,
+                                indexed_at DATETIME,
+                                index_signature TEXT
+                            )
+                            """)
+                    }
+                    AppLogService.shared.write(
+                        "shadow vector generation created",
+                        category: .vectorLifecycle,
+                        level: .notice
+                    )
+                    continuation.resume(returning: true)
+                } catch {
+                    AppLogService.shared.write(
+                        "shadow vector generation creation failed: \(error)",
+                        category: .vectorLifecycle,
+                        level: .error
+                    )
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    /// Writes one file into the isolated generation without touching the active index.
+    @discardableResult
+    func replaceShadow(fileId: Int64, chunks: [EmbeddingChunk], model: String) async -> Bool {
+        guard !chunks.isEmpty,
+              chunks.allSatisfy({ Self.isValidVector($0.vector) }),
+              Set(chunks.map { $0.vector.count }).count == 1,
+              let dimension = chunks.first?.vector.count else { return false }
+        let normalized = chunks.map { chunk in
+            EmbeddingChunk(
+                vector: Self.normalize(chunk.vector),
+                text: chunk.text,
+                contextualText: chunk.contextualText,
+                sectionPath: chunk.sectionPath,
+                pageStart: chunk.pageStart,
+                pageEnd: chunk.pageEnd,
+                kind: chunk.kind,
+                parentIndex: chunk.parentIndex,
+                parentText: chunk.parentText,
+                entityTerms: chunk.entityTerms,
+                tokenCount: chunk.tokenCount,
+                tokenizerProfile: chunk.tokenizerProfile,
+                tokenizerVersion: chunk.tokenizerVersion,
+                tokenCountAccuracy: chunk.tokenCountAccuracy
+            )
+        }
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                do {
+                    try self.store.dbPool.write { db in
+                        guard try self.shadowTablesExist(db) else {
+                            throw VectorStoreError.shadowGenerationUnavailable
+                        }
+                        let incompatible = try Bool.fetchOne(
+                            db,
+                            sql: """
+                                SELECT EXISTS(
+                                    SELECT 1 FROM \(Self.shadowEmbeddingsTable)
+                                    WHERE file_id != ? AND (model != ? OR dim != ?)
+                                )
+                                """,
+                            arguments: [fileId, model, dimension]
+                        ) ?? false
+                        guard !incompatible else { throw VectorStoreError.incompatibleVectorSpace }
+                        try self.deleteShadowFileRows(db, fileId: fileId)
+                        for (index, chunk) in normalized.enumerated() {
+                            let text = chunk.text ?? ""
+                            let contextualText = chunk.contextualText ?? text
+                            let parentIndex = chunk.parentIndex ?? index
+                            let parentText = chunk.parentText ?? text
+                            let parentTokens = TokenCounter.estimate(parentText)
+                            let sectionData = try JSONEncoder().encode(chunk.sectionPath)
+                            let sectionJSON = String(data: sectionData, encoding: .utf8) ?? "[]"
+                            let entityData = try JSONEncoder().encode(chunk.entityTerms)
+                            let entityJSON = String(data: entityData, encoding: .utf8) ?? "[]"
+                            try db.execute(
+                                sql: """
+                                    INSERT OR IGNORE INTO \(Self.shadowParentsTable)(
+                                        file_id, parent_idx, text, contextual_text, section_path,
+                                        page_start, page_end, kind, token_count, tokenizer_profile,
+                                        tokenizer_version, token_count_accuracy
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                arguments: [fileId, parentIndex, parentText, parentText, sectionJSON,
+                                            chunk.pageStart, chunk.pageEnd, chunk.kind.rawValue,
+                                            parentTokens.count, parentTokens.tokenizerProfile,
+                                            parentTokens.tokenizerVersion, parentTokens.accuracy.rawValue]
+                            )
+                            try db.execute(
+                                sql: """
+                                    INSERT INTO \(Self.shadowChunksTable)(
+                                        file_id, chunk_idx, text, contextual_text, section_path,
+                                        page_start, page_end, kind, parent_idx, token_count,
+                                        tokenizer_profile, tokenizer_version, token_count_accuracy, entity_terms
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                arguments: [fileId, index, text, contextualText, sectionJSON,
+                                            chunk.pageStart, chunk.pageEnd, chunk.kind.rawValue,
+                                            parentIndex, chunk.tokenCount, chunk.tokenizerProfile,
+                                            chunk.tokenizerVersion, chunk.tokenCountAccuracy.rawValue, entityJSON]
+                            )
+                            try db.execute(
+                                sql: """
+                                    INSERT INTO \(Self.shadowEmbeddingsTable)(
+                                        file_id, vector, dim, model, chunk_idx, chunk_text
+                                    ) VALUES (?, ?, ?, ?, ?, ?)
+                                    """,
+                                arguments: [fileId, Self.encode(chunk.vector), dimension,
+                                            model, index, contextualText]
+                            )
+                        }
+                    }
+                    continuation.resume(returning: true)
+                } catch {
+                    AppLogService.shared.write(
+                        "shadow file write failed: \(error)",
+                        category: .vectorWrite,
+                        level: .error,
+                        metadata: ["fileID": "\(fileId)"]
+                    )
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    /// Stages the file metadata that belongs to the shadow generation.
+    @discardableResult
+    func stageShadowMetadata(_ file: FileRecord) async -> Bool {
+        guard let fileID = file.id else { return false }
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                do {
+                    try self.store.dbPool.write { db in
+                        guard try self.shadowTablesExist(db) else {
+                            throw VectorStoreError.shadowGenerationUnavailable
+                        }
+                        try db.execute(
+                            sql: """
+                                INSERT INTO \(Self.shadowMetadataTable)(
+                                    file_id, title, content_text, content_hash, indexed_at, index_signature
+                                ) VALUES (?, ?, ?, ?, ?, ?)
+                                ON CONFLICT(file_id) DO UPDATE SET
+                                    title = excluded.title,
+                                    content_text = excluded.content_text,
+                                    content_hash = excluded.content_hash,
+                                    indexed_at = excluded.indexed_at,
+                                    index_signature = excluded.index_signature
+                                """,
+                            arguments: [fileID, file.title, file.contentText, file.contentHash,
+                                        file.indexedAt, file.indexSignature]
+                        )
+                    }
+                    continuation.resume(returning: true)
+                } catch {
+                    AppLogService.shared.write(
+                        "shadow file metadata write failed: \(error)",
+                        category: .vectorWrite,
+                        level: .error,
+                        metadata: ["fileID": "\(fileID)"]
+                    )
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    /// Atomically replaces the active generation after every source file succeeded.
+    @discardableResult
+    func commitShadowRebuild(expectedFileCount: Int) async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                do {
+                    try self.store.dbPool.write { db in
+                        guard try self.shadowTablesExist(db) else {
+                            throw VectorStoreError.shadowGenerationUnavailable
+                        }
+                        let stagedFileCount = try Int.fetchOne(
+                            db,
+                            sql: "SELECT COUNT(*) FROM \(Self.shadowMetadataTable)"
+                        ) ?? 0
+                        guard stagedFileCount == expectedFileCount else {
+                            throw VectorStoreError.incompleteShadowGeneration(
+                                expected: expectedFileCount,
+                                actual: stagedFileCount
+                            )
+                        }
+                        let vectorSpaces = try Row.fetchAll(
+                            db,
+                            sql: """
+                                SELECT model, dim
+                                FROM embeddings
+                                WHERE file_id NOT IN (SELECT file_id FROM \(Self.shadowMetadataTable))
+                                GROUP BY model, dim
+                                UNION
+                                SELECT model, dim
+                                FROM \(Self.shadowEmbeddingsTable)
+                                GROUP BY model, dim
+                                """
+                        )
+                        guard vectorSpaces.count <= 1 else {
+                            throw VectorStoreError.incompatibleVectorSpace
+                        }
+                        let dimension = vectorSpaces.first?["dim"] as Int?
+
+                        try self.dropVectorTable(db)
+                        // Replace only files captured by this rebuild. A watcher may have indexed a
+                        // newly arrived file while the shadow generation was being prepared.
+                        try db.execute(sql: """
+                            DELETE FROM embeddings
+                            WHERE file_id IN (SELECT file_id FROM \(Self.shadowMetadataTable))
+                            """)
+                        try db.execute(sql: """
+                            DELETE FROM document_chunks
+                            WHERE file_id IN (SELECT file_id FROM \(Self.shadowMetadataTable))
+                            """)
+                        try db.execute(sql: """
+                            DELETE FROM document_parents
+                            WHERE file_id IN (SELECT file_id FROM \(Self.shadowMetadataTable))
+                            """)
+                        try db.execute(sql: """
+                            INSERT INTO document_parents(
+                                file_id, parent_idx, text, contextual_text, section_path,
+                                page_start, page_end, kind, token_count, tokenizer_profile,
+                                tokenizer_version, token_count_accuracy
+                            )
+                            SELECT file_id, parent_idx, text, contextual_text, section_path,
+                                   page_start, page_end, kind, token_count, tokenizer_profile,
+                                   tokenizer_version, token_count_accuracy
+                            FROM \(Self.shadowParentsTable)
+                            ORDER BY file_id, parent_idx
+                            """)
+                        try db.execute(sql: """
+                            INSERT INTO document_chunks(
+                                file_id, chunk_idx, text, contextual_text, section_path,
+                                page_start, page_end, kind, parent_idx, token_count,
+                                tokenizer_profile, tokenizer_version, token_count_accuracy, entity_terms
+                            )
+                            SELECT file_id, chunk_idx, text, contextual_text, section_path,
+                                   page_start, page_end, kind, parent_idx, token_count,
+                                   tokenizer_profile, tokenizer_version, token_count_accuracy, entity_terms
+                            FROM \(Self.shadowChunksTable)
+                            ORDER BY file_id, chunk_idx
+                            """)
+                        try db.execute(sql: """
+                            INSERT INTO embeddings(file_id, vector, dim, model, chunk_idx, chunk_text)
+                            SELECT file_id, vector, dim, model, chunk_idx, chunk_text
+                            FROM \(Self.shadowEmbeddingsTable)
+                            ORDER BY file_id, chunk_idx
+                            """)
+                        try db.execute(sql: """
+                            UPDATE files
+                            SET title = (SELECT title FROM \(Self.shadowMetadataTable) s WHERE s.file_id = files.id),
+                                content_text = (SELECT content_text FROM \(Self.shadowMetadataTable) s WHERE s.file_id = files.id),
+                                content_hash = (SELECT content_hash FROM \(Self.shadowMetadataTable) s WHERE s.file_id = files.id),
+                                indexed_at = (SELECT indexed_at FROM \(Self.shadowMetadataTable) s WHERE s.file_id = files.id),
+                                index_signature = (SELECT index_signature FROM \(Self.shadowMetadataTable) s WHERE s.file_id = files.id)
+                            WHERE id IN (SELECT file_id FROM \(Self.shadowMetadataTable))
+                            """)
+                        if let dimension {
+                            try self.ensureVectorTable(db, dimension: dimension, allowRecreate: true)
+                            let rows = try Row.fetchAll(db, sql: "SELECT id, vector FROM embeddings ORDER BY id")
+                            for row in rows {
+                                try db.execute(
+                                    sql: "INSERT INTO \(Self.vectorTable)(rowid, embedding) VALUES (?, vec_f32(?))",
+                                    arguments: [row["id"] as Int64, row["vector"] as Data]
+                                )
+                            }
+                        }
+                        try self.dropShadowTables(db)
+                    }
+                    self.latestRevisionByFile.removeAll()
+                    self.refreshCount()
+                    AppLogService.shared.write(
+                        "shadow vector generation activated",
+                        category: .vectorLifecycle,
+                        level: .notice,
+                        metadata: ["files": "\(expectedFileCount)", "vectors": "\(self.storedCount)"]
+                    )
+                    continuation.resume(returning: true)
+                } catch {
+                    AppLogService.shared.write(
+                        "shadow vector generation activation failed: \(error)",
+                        category: .vectorLifecycle,
+                        level: .error
+                    )
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    func discardShadowRebuild() async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                do {
+                    try self.store.dbPool.write { db in
+                        try self.dropShadowTables(db)
+                    }
+                    AppLogService.shared.write(
+                        "shadow vector generation discarded",
+                        category: .vectorLifecycle,
+                        level: .notice
+                    )
+                } catch {
+                    AppLogService.shared.write(
+                        "shadow vector generation cleanup failed: \(error)",
+                        category: .vectorLifecycle,
+                        level: .error
+                    )
+                }
+                continuation.resume()
+            }
+        }
+    }
+
     @discardableResult
     func replace(fileId: Int64, chunks: [EmbeddingChunk], model: String) async -> Bool {
         await replace(fileId: fileId, chunks: chunks, model: model, revision: nil)
@@ -83,7 +517,14 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                 sectionPath: chunk.sectionPath,
                 pageStart: chunk.pageStart,
                 pageEnd: chunk.pageEnd,
-                kind: chunk.kind
+                kind: chunk.kind,
+                parentIndex: chunk.parentIndex,
+                parentText: chunk.parentText,
+                entityTerms: chunk.entityTerms,
+                tokenCount: chunk.tokenCount,
+                tokenizerProfile: chunk.tokenizerProfile,
+                tokenizerVersion: chunk.tokenizerVersion,
+                tokenCountAccuracy: chunk.tokenCountAccuracy
             )
         }
 
@@ -114,17 +555,38 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                         for (index, chunk) in normalized.enumerated() {
                             let text = chunk.text ?? ""
                             let contextualText = chunk.contextualText ?? text
+                            let parentIndex = chunk.parentIndex ?? index
+                            let parentText = chunk.parentText ?? text
+                            let parentTokens = TokenCounter.estimate(parentText)
                             let sectionData = try JSONEncoder().encode(chunk.sectionPath)
                             let sectionJSON = String(data: sectionData, encoding: .utf8) ?? "[]"
+                            let entityData = try JSONEncoder().encode(chunk.entityTerms)
+                            let entityJSON = String(data: entityData, encoding: .utf8) ?? "[]"
+                            try db.execute(
+                                sql: """
+                                INSERT OR IGNORE INTO document_parents(
+                                    file_id, parent_idx, text, contextual_text, section_path,
+                                    page_start, page_end, kind, token_count, tokenizer_profile,
+                                    tokenizer_version, token_count_accuracy
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                arguments: [fileId, parentIndex, parentText, parentText, sectionJSON,
+                                            chunk.pageStart, chunk.pageEnd, chunk.kind.rawValue,
+                                            parentTokens.count, parentTokens.tokenizerProfile,
+                                            parentTokens.tokenizerVersion, parentTokens.accuracy.rawValue]
+                            )
                             try db.execute(
                                 sql: """
                                 INSERT INTO document_chunks(
                                     file_id, chunk_idx, text, contextual_text, section_path,
-                                    page_start, page_end, kind
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                    page_start, page_end, kind, parent_idx, token_count,
+                                    tokenizer_profile, tokenizer_version, token_count_accuracy, entity_terms
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
                                 arguments: [fileId, index, text, contextualText, sectionJSON,
-                                            chunk.pageStart, chunk.pageEnd, chunk.kind.rawValue]
+                                            chunk.pageStart, chunk.pageEnd, chunk.kind.rawValue,
+                                            parentIndex, chunk.tokenCount, chunk.tokenizerProfile,
+                                            chunk.tokenizerVersion, chunk.tokenCountAccuracy.rawValue, entityJSON]
                             )
                             try db.execute(
                                 sql: """
@@ -233,6 +695,12 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                                 sql: "DELETE FROM document_chunks WHERE file_id = ? AND kind = ?",
                                 arguments: [fileId, DocumentChunkKind.note.rawValue]
                             )
+                            for noteIndex in noteIndexes {
+                                try db.execute(
+                                    sql: "DELETE FROM document_parents WHERE file_id = ? AND parent_idx = ?",
+                                    arguments: [fileId, noteIndex]
+                                )
+                            }
                         }
 
                         guard let chunk else { return }
@@ -248,17 +716,38 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                         let normalized = Self.normalize(chunk.vector)
                         let text = chunk.text ?? ""
                         let contextualText = chunk.contextualText ?? text
+                        let parentText = chunk.parentText ?? text
+                        let parentTokens = TokenCounter.estimate(parentText)
                         let sectionData = try JSONEncoder().encode(chunk.sectionPath)
                         let sectionJSON = String(data: sectionData, encoding: .utf8) ?? "[]"
+                        let entityData = try JSONEncoder().encode(chunk.entityTerms)
+                        let entityJSON = String(data: entityData, encoding: .utf8) ?? "[]"
+                        try db.execute(
+                            sql: """
+                            INSERT INTO document_parents(
+                                file_id, parent_idx, text, contextual_text, section_path,
+                                page_start, page_end, kind, token_count, tokenizer_profile,
+                                tokenizer_version, token_count_accuracy
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            arguments: [fileId, targetIndex, parentText,
+                                        chunk.parentText ?? contextualText, sectionJSON,
+                                        chunk.pageStart, chunk.pageEnd, DocumentChunkKind.note.rawValue,
+                                        parentTokens.count, parentTokens.tokenizerProfile,
+                                        parentTokens.tokenizerVersion, parentTokens.accuracy.rawValue]
+                        )
                         try db.execute(
                             sql: """
                             INSERT INTO document_chunks(
                                 file_id, chunk_idx, text, contextual_text, section_path,
-                                page_start, page_end, kind
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                page_start, page_end, kind, parent_idx, token_count,
+                                tokenizer_profile, tokenizer_version, token_count_accuracy, entity_terms
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             arguments: [fileId, targetIndex, text, contextualText, sectionJSON,
-                                        chunk.pageStart, chunk.pageEnd, DocumentChunkKind.note.rawValue]
+                                        chunk.pageStart, chunk.pageEnd, DocumentChunkKind.note.rawValue,
+                                        targetIndex, chunk.tokenCount, chunk.tokenizerProfile,
+                                        chunk.tokenizerVersion, chunk.tokenCountAccuracy.rawValue, entityJSON]
                         )
                         let vectorData = Self.encode(normalized)
                         try db.execute(
@@ -343,7 +832,14 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                     sectionPath: chunk.sectionPath,
                     pageStart: chunk.pageStart,
                     pageEnd: chunk.pageEnd,
-                    kind: chunk.kind
+                    kind: chunk.kind,
+                    parentIndex: chunk.parentIndex,
+                    parentText: chunk.parentText,
+                    entityTerms: chunk.entityTerms,
+                    tokenCount: chunk.tokenCount,
+                    tokenizerProfile: chunk.tokenizerProfile,
+                    tokenizerVersion: chunk.tokenizerVersion,
+                    tokenCountAccuracy: chunk.tokenCountAccuracy
                 )
             }
         }
@@ -456,11 +952,14 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                             SELECT e.file_id, e.chunk_idx,
                                    COALESCE(c.contextual_text, e.chunk_text) AS chunk_text,
                                    c.section_path, c.page_start, c.page_end, c.kind,
+                                   c.parent_idx, p.text AS parent_text, c.entity_terms,
                                    matches.distance
                             FROM matches
                             JOIN embeddings e ON e.id = matches.rowid
                             LEFT JOIN document_chunks c
                               ON c.file_id = e.file_id AND c.chunk_idx = e.chunk_idx
+                            LEFT JOIN document_parents p
+                              ON p.file_id = c.file_id AND p.parent_idx = c.parent_idx
                             ORDER BY matches.distance, e.id
                             """,
                             arguments: [Self.encode(normalized), k]
@@ -491,10 +990,13 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                             SELECT e.file_id, e.chunk_idx,
                                    COALESCE(c.contextual_text, e.chunk_text) AS chunk_text,
                                    c.section_path, c.page_start, c.page_end, c.kind,
+                                   c.parent_idx, p.text AS parent_text, c.entity_terms,
                                    vec_distance_cosine(e.vector, ?) AS distance
                             FROM embeddings e
                             LEFT JOIN document_chunks c
                               ON c.file_id = e.file_id AND c.chunk_idx = e.chunk_idx
+                            LEFT JOIN document_parents p
+                              ON p.file_id = c.file_id AND p.parent_idx = c.parent_idx
                             WHERE e.file_id = ? AND e.dim = ?
                             ORDER BY distance, e.id
                             LIMIT ?
@@ -527,11 +1029,14 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                     let rows = try Row.fetchAll(
                         db,
                         sql: """
-                        SELECT file_id, chunk_idx, contextual_text AS chunk_text,
-                               section_path, page_start, page_end, kind
-                        FROM document_chunks
-                        WHERE file_id = ? AND chunk_idx BETWEEN ? AND ?
-                        ORDER BY chunk_idx
+                        SELECT c.file_id, c.chunk_idx, c.contextual_text AS chunk_text,
+                               c.section_path, c.page_start, c.page_end, c.kind,
+                               c.parent_idx, p.text AS parent_text, c.entity_terms
+                        FROM document_chunks c
+                        LEFT JOIN document_parents p
+                          ON p.file_id = c.file_id AND p.parent_idx = c.parent_idx
+                        WHERE c.file_id = ? AND c.chunk_idx BETWEEN ? AND ?
+                        ORDER BY c.chunk_idx
                         """,
                         arguments: [fileId, chunkIndex - safeRadius, chunkIndex + safeRadius]
                     )
@@ -595,6 +1100,44 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
         }
         try db.execute(sql: "DELETE FROM embeddings WHERE file_id = ?", arguments: [fileId])
         try db.execute(sql: "DELETE FROM document_chunks WHERE file_id = ?", arguments: [fileId])
+        try db.execute(sql: "DELETE FROM document_parents WHERE file_id = ?", arguments: [fileId])
+    }
+
+    private func shadowTablesExist(_ db: Database) throws -> Bool {
+        let required = [
+            Self.shadowEmbeddingsTable,
+            Self.shadowChunksTable,
+            Self.shadowParentsTable,
+            Self.shadowMetadataTable,
+        ]
+        let count = try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (?, ?, ?, ?)",
+            arguments: StatementArguments(required)
+        ) ?? 0
+        return count == required.count
+    }
+
+    private func deleteShadowFileRows(_ db: Database, fileId: Int64) throws {
+        try db.execute(
+            sql: "DELETE FROM \(Self.shadowEmbeddingsTable) WHERE file_id = ?",
+            arguments: [fileId]
+        )
+        try db.execute(
+            sql: "DELETE FROM \(Self.shadowChunksTable) WHERE file_id = ?",
+            arguments: [fileId]
+        )
+        try db.execute(
+            sql: "DELETE FROM \(Self.shadowParentsTable) WHERE file_id = ?",
+            arguments: [fileId]
+        )
+    }
+
+    private func dropShadowTables(_ db: Database) throws {
+        try db.execute(sql: "DROP TABLE IF EXISTS \(Self.shadowEmbeddingsTable)")
+        try db.execute(sql: "DROP TABLE IF EXISTS \(Self.shadowChunksTable)")
+        try db.execute(sql: "DROP TABLE IF EXISTS \(Self.shadowParentsTable)")
+        try db.execute(sql: "DROP TABLE IF EXISTS \(Self.shadowMetadataTable)")
     }
 
     private func refreshCount() {
@@ -608,6 +1151,8 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
         let similarity = score ?? Float(max(-1, min(1, 1 - (distance * distance / 2))))
         let sectionJSON = (row["section_path"] as String?) ?? "[]"
         let sectionPath = (try? JSONDecoder().decode([String].self, from: Data(sectionJSON.utf8))) ?? []
+        let entityJSON = (row["entity_terms"] as String?) ?? "[]"
+        let entityTerms = (try? JSONDecoder().decode([String].self, from: Data(entityJSON.utf8))) ?? []
         return VectorSearchHit(
             fileId: row["file_id"],
             score: similarity,
@@ -616,7 +1161,10 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
             sectionPath: sectionPath,
             pageStart: row["page_start"],
             pageEnd: row["page_end"],
-            kind: DocumentChunkKind(rawValue: (row["kind"] as String?) ?? "") ?? .text
+            kind: DocumentChunkKind(rawValue: (row["kind"] as String?) ?? "") ?? .text,
+            parentIndex: row["parent_idx"],
+            parentText: row["parent_text"],
+            entityTerms: entityTerms
         )
     }
 
@@ -657,4 +1205,6 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
 private enum VectorStoreError: Error {
     case invalidDimension
     case incompatibleVectorSpace
+    case shadowGenerationUnavailable
+    case incompleteShadowGeneration(expected: Int, actual: Int)
 }

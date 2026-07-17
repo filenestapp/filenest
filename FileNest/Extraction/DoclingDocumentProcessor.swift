@@ -150,13 +150,22 @@ final class DoclingDocumentProcessor: @unchecked Sendable {
         let pageStart = object["page_start"] as? Int
         let pageEnd = object["page_end"] as? Int
         let kind = DocumentChunkKind(rawValue: object["kind"] as? String ?? "") ?? .text
+        let tokenCount = object["token_count"] as? Int
+        let tokenizerProfile = object["tokenizer_profile"] as? String
+        let tokenizerVersion = object["tokenizer_version"] as? String
+        let tokenCountAccuracy = (object["token_count_accuracy"] as? String)
+            .flatMap(TokenCountAccuracy.init(rawValue:))
         return StructuredDocumentChunk(
             text: text,
             contextualText: contextual.isEmpty ? text : contextual,
             sectionPath: sectionPath,
             pageStart: pageStart,
             pageEnd: pageEnd,
-            kind: kind
+            kind: kind,
+            tokenCount: tokenCount,
+            tokenizerProfile: tokenizerProfile,
+            tokenizerVersion: tokenizerVersion,
+            tokenCountAccuracy: tokenCountAccuracy
         )
     }
 
@@ -283,6 +292,8 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 
 converters = {}
 chunkers = {}
+tokenizers = {}
+tokenizer_profiles = {}
 TOKENIZER_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 def converter(do_ocr):
@@ -299,20 +310,41 @@ def converter(do_ocr):
 def chunker(max_tokens):
     if max_tokens not in chunkers:
         try:
+            model_name = TOKENIZER_MODEL
+            tokenizer_profile = "qwen3-embedding:0.6b"
             tokenizer = HuggingFaceTokenizer.from_pretrained(
-                model_name=TOKENIZER_MODEL,
+                model_name=model_name,
                 max_tokens=max_tokens,
                 local_files_only=True,
             )
         except Exception:
             # Support users with a legacy FileNest Docling environment; new installations prefetch the Qwen tokenizer.
+            model_name = "sentence-transformers/all-MiniLM-L6-v2"
+            tokenizer_profile = model_name
             tokenizer = HuggingFaceTokenizer.from_pretrained(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_name=model_name,
                 max_tokens=max_tokens,
                 local_files_only=True,
             )
+        tokenizers[max_tokens] = tokenizer
+        tokenizer_profiles[max_tokens] = tokenizer_profile
         chunkers[max_tokens] = HybridChunker(tokenizer=tokenizer)
     return chunkers[max_tokens]
+
+def exact_token_count(max_tokens, text):
+    tokenizer = tokenizers.get(max_tokens)
+    if tokenizer is None:
+        return None
+    try:
+        if hasattr(tokenizer, "count_tokens"):
+            return int(tokenizer.count_tokens(text))
+        inner = getattr(tokenizer, "tokenizer", None) or getattr(tokenizer, "_tokenizer", None)
+        if inner is not None:
+            encoded = inner.encode(text, add_special_tokens=False)
+            return len(getattr(encoded, "ids", encoded))
+    except Exception:
+        return None
+    return None
 
 def chunk_kind(items):
     labels = {str(getattr(item, "label", "")).split(".")[-1].lower() for item in items}
@@ -326,7 +358,7 @@ def chunk_kind(items):
         return "picture"
     return "text"
 
-def serialize_chunks(document, active_chunker, forced_page=None):
+def serialize_chunks(document, active_chunker, max_tokens, forced_page=None):
     serialized = []
     for part in active_chunker.chunk(dl_doc=document):
         text = (part.text or "").strip()
@@ -342,14 +374,24 @@ def serialize_chunks(document, active_chunker, forced_page=None):
         })
         if not pages and forced_page is not None:
             pages = [forced_page]
-        serialized.append({
+        embedded_text = contextual or text
+        token_count = exact_token_count(max_tokens, embedded_text)
+        serialized_chunk = {
             "text": text or contextual,
-            "contextual_text": contextual or text,
+            "contextual_text": embedded_text,
             "headings": list(getattr(part.meta, "headings", None) or []),
             "page_start": min(pages) if pages else None,
             "page_end": max(pages) if pages else None,
             "kind": chunk_kind(items),
-        })
+        }
+        if token_count is not None:
+            serialized_chunk.update({
+                "token_count": token_count,
+                "tokenizer_profile": tokenizer_profiles.get(max_tokens, TOKENIZER_MODEL),
+                "tokenizer_version": "huggingface-tokenizer-v1",
+                "token_count_accuracy": "exact",
+            })
+        serialized.append(serialized_chunk)
     return serialized
 
 for line in sys.stdin:
@@ -357,7 +399,8 @@ for line in sys.stdin:
     try:
         request = json.loads(line)
         result = None
-        active_chunker = chunker(int(request.get("max_tokens", 600)))
+        max_tokens = int(request.get("max_tokens", 600))
+        active_chunker = chunker(max_tokens)
         mode = request.get("pdf_mode", "automatic")
         suffix = Path(request["path"]).suffix.lower()
         chunks = []
@@ -373,7 +416,7 @@ for line in sys.stdin:
                 result = converter(page in scanned and not bool(request.get("disable_ocr", False))).convert(
                     request["path"], page_range=(page, page), raises_on_error=True
                 )
-                chunks.extend(serialize_chunks(result.document, active_chunker, forced_page=page))
+                chunks.extend(serialize_chunks(result.document, active_chunker, max_tokens, forced_page=page))
         else:
             do_ocr = not bool(request.get("disable_ocr", False)) and (
                 mode in ("scanned", "automatic") or suffix in {
@@ -381,7 +424,7 @@ for line in sys.stdin:
                 }
             )
             result = converter(do_ocr).convert(request["path"], raises_on_error=True)
-            chunks = serialize_chunks(result.document, active_chunker)
+            chunks = serialize_chunks(result.document, active_chunker, max_tokens)
         if not chunks and result is not None:
             text = result.document.export_to_text().strip()
             if text:

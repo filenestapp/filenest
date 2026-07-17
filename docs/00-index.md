@@ -18,8 +18,9 @@
 7. [Onboarding guide](07-onboarding-guide.md)
 8. [macOS to Windows parity](08-windows-parity.md)
 9. [Verification strategy](09-verification.md)
-10. [Source map](source-map.md)
-11. [2026-07-17 change analysis](changes/0cda7bf-to-2026-07-17.md)
+10. [RAG evaluation](10-rag-evaluation.md)
+11. [Source map](source-map.md)
+12. [2026-07-17 change analysis](changes/0cda7bf-to-2026-07-17.md)
 
 The deterministic inventory used as a starting point is retained under `_inventory/`. It includes build products and dependencies, so it is not used as primary product evidence.
 

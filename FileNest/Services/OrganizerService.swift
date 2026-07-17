@@ -61,7 +61,7 @@ enum OrganizerError: LocalizedError {
 }
 
 /// Organization service that moves files to the destination root and category subfolder, handling conflicts and undo records.
-final class OrganizerService {
+final class OrganizerService: @unchecked Sendable {
     typealias MoveItem = (URL, URL) throws -> Void
     typealias SubfolderResolver = (FileRecord) async -> String?
 
@@ -72,9 +72,14 @@ final class OrganizerService {
     private let moveItem: MoveItem
     private let subfolderResolver: SubfolderResolver?
     private let scheduleQueue = DispatchQueue(label: "filenest.organizer.schedule")
+    private let reconciliationQueue = DispatchQueue(
+        label: "filenest.organizer.reconciliation",
+        qos: .utility
+    )
     private var pendingFileIDs = Set<Int64>()
     private var scheduledWorkItem: DispatchWorkItem?
     var onLibraryChange: (() -> Void)?
+    var onAutomaticOrganizationUpdate: (@Sendable (Int64, AutomaticFileProcessingStage, String?) -> Void)?
 
     init(store: SQLiteStore,
          settings: AppSettings,
@@ -112,7 +117,11 @@ final class OrganizerService {
     }
 
     /// Production organization entry point: the extension determines the primary folder, while rules or AI derive the secondary folder from the title, note, and body.
-    func organizeUsingAI(fileId: Int64) async throws {
+    func organizeUsingAI(
+        fileId: Int64,
+        checkpoint: (@Sendable () async -> Bool)? = nil
+    ) async throws {
+        guard await canContinue(checkpoint) else { return }
         guard let file = try store.file(id: fileId),
               let decision = classificationDecision(for: file) else { return }
         guard decision.action == .organize else {
@@ -131,7 +140,13 @@ final class OrganizerService {
         } else {
             subfolder = "Uncategorized"
         }
+        guard await canContinue(checkpoint) else { return }
         try move(fileId: fileId, decision: decision, subfolder: subfolder)
+    }
+
+    private func canContinue(_ checkpoint: (@Sendable () async -> Bool)?) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        return await checkpoint?() ?? true
     }
 
     private func classificationDecision(for file: FileRecord) -> ClassificationDecision? {
@@ -253,8 +268,8 @@ final class OrganizerService {
     }
 
     /// Called after the watcher finishes indexing. Batched mode runs when either the item threshold or maximum wait is reached.
-    func enqueue(fileId: Int64) {
-        guard settings.autoOrganize else { return }
+    func enqueue(fileId: Int64, force: Bool = false) {
+        guard settings.autoOrganize || force else { return }
         if AppSettings.AutoOrganizeMode(rawValue: settings.autoOrganizeMode) == .immediate {
             AppLogService.shared.write("immediate organization queued", category: .organizeQueue,
                                        level: .debug, metadata: ["fileID": "\(fileId)"])
@@ -313,8 +328,11 @@ final class OrganizerService {
             guard let self else { return }
             for id in ids {
                 do {
+                    self.onAutomaticOrganizationUpdate?(id, .organizing, nil)
                     try await self.organizeUsingAI(fileId: id)
+                    self.onAutomaticOrganizationUpdate?(id, .completed, nil)
                 } catch {
+                    self.onAutomaticOrganizationUpdate?(id, .failed("Organization failed"), String(describing: error))
                     AppLogService.shared.write("scheduled organization failed: \(error)",
                                                category: .organizeQueue, level: .error,
                                                metadata: ["fileID": "\(id)"])
@@ -323,70 +341,11 @@ final class OrganizerService {
         }
     }
 
-    /// Manual trigger: scans files from every watched folder into the database and classifies them once.
-    func runOnce() {
-        AppLogService.shared.write("manual organization scan started", category: .organizeQueue,
-                                   level: .notice,
-                                   metadata: ["directories": "\(settings.watchDirs.count)"])
-        let managedFiles = reconcileManagedFiles()
-        Task { [weak self] in
-            guard let self else { return }
-            for file in managedFiles {
-                guard let id = file.id else { continue }
-                do {
-                    try await self.organizeUsingAI(fileId: id)
-                } catch {
-                    AppLogService.shared.write("managed entry reclassification failed: \(error)",
-                                               category: .organizeQueue, level: .error,
-                                               metadata: ["entry": file.name])
-                }
-            }
-        }
-        for dir in settings.watchDirs {
-            let url = URL(fileURLWithPath: dir)
-            guard let entries = try? FileManager.default.contentsOfDirectory(
-                at: url,
-                includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey],
-                options: [.skipsSubdirectoryDescendants]
-            ) else { continue }
-            let enabledExts = Set(settings.enabledExtensions.map { $0.lowercased() })
-            let now = Date()
-            for entry in entries {
-                let name = entry.lastPathComponent
-                if settings.excludeHidden && name.hasPrefix(".") { continue }
-                if name == ".DS_Store" { continue }
-                var isDir: ObjCBool = false
-                FileManager.default.fileExists(atPath: entry.path, isDirectory: &isDir)
-                if isDir.boolValue { continue }
-                let ext = entry.pathExtension.lowercased()
-                if enabledExts.isNotEmpty && !enabledExts.contains(ext) { continue }
-                let attrs = try? FileManager.default.attributesOfItem(atPath: entry.path)
-                let mtime = (attrs?[.modificationDate] as? Date) ?? now
-                let size = Int64((attrs?[.size] as? NSNumber)?.intValue ?? 0)
-                let category = FileCategory.from(extension: ext)
-                let existing = try? store.file(path: entry.path)
-                let record = FileRecord(
-                    id: existing?.id, path: entry.path, name: name, ext: ext,
-                    size: size, mtime: mtime, category: category.rawValue,
-                    sourceDir: entry.deletingLastPathComponent().path,
-                    indexedAt: existing?.indexedAt, contentHash: existing?.contentHash,
-                    title: existing?.title, contentText: existing?.contentText
-                )
-                if let id = try? store.upsertFile(record) {
-                    // Index the file in place before organizing and moving it.
-                    Task {
-                        guard await AppStateIndexerProxy.shared.indexer?.indexFile(id: id, overridePath: entry) == true else {
-                            return
-                        }
-                        do {
-                            try await self.organizeUsingAI(fileId: id)
-                        } catch {
-                            AppLogService.shared.write("background organization failed: \(error)",
-                                                       category: .organizeQueue, level: .error,
-                                                       metadata: ["entry": entry.lastPathComponent])
-                        }
-                    }
-                }
+    /// Treats FileNestOrganized as the library source of truth: recursively imports new files and removes stale records.
+    func reconcileManagedFilesAsync() async -> [FileRecord] {
+        await withCheckedContinuation { continuation in
+            reconciliationQueue.async {
+                continuation.resume(returning: self.reconcileManagedFiles())
             }
         }
     }

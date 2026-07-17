@@ -11,6 +11,7 @@ The macOS implementation is the normative baseline. “Platform equivalent” me
 | Single main window | Predictable desktop navigation | app/window activation | app entry point | none | High |
 | Language and appearance | English/Chinese and system/light/dark UI | General settings | settings + localization | settings | High |
 | Login startup | Start background companion with the OS | General settings | Windows login item / macOS launch behavior | settings | Platform-specific |
+| Global Quick Search | Open a centered search box from any app and route the submitted query into Library | configurable global shortcut / tray command | global shortcut service + quick-search window | settings + transient request | Platform-specific |
 
 ## Watched folders and eligibility
 
@@ -34,6 +35,8 @@ The macOS implementation is the normative baseline. “Platform equivalent” me
 | Configurable index scope | Limit indexed extensions | Index settings | indexer/settings | settings | High |
 | Configurable chunks | Control chunk size and overlap | Index settings | indexer | settings, chunks | High |
 | Structured chunks | Preserve title/text/table/list/picture/note metadata, section and page range | inspector and retrieval | vector store | document chunks | High |
+| Parent–Child retrieval | Retrieve compact children and return complete source sections to the answer model | indexing/chat | indexer/vector store | document parents, chunks, embeddings | High on macOS |
+| Exact entity lane | Recover identifiers, emails, dates, and amounts that semantic similarity can miss | search/chat | indexer/ChatService | chunk entity terms | High on macOS |
 | Atomic replacement | Keep old vectors if a rebuild fails | indexer | vector store | embeddings, chunks | High |
 | Content mutation guard | Reject stale results if source changes during indexing | indexer | hash/snapshot | files | High |
 | Per-file concurrency control | Prevent older work from overwriting newer work | indexer | task coordinator/revisions | runtime + vectors | High |
@@ -88,6 +91,8 @@ The macOS implementation is the normative baseline. “Platform equivalent” me
 | Retrieval-only fallback | Keep file finding useful without a model | composer/fallback dialog | ChatService | messages | High |
 | Cloud failure fallback | Offer local results after configured cloud failure | composer alert | ChatService | messages | High |
 | Configurable result count | Tune RAG breadth from 1 to 30 files | AI settings | ChatService | settings | High |
+| Fused retrieval and reranking | Combine lexical, entity, and semantic ranks with RRF; optionally rerank through a compatible local/cloud API | AI settings/search/chat | ChatService/reranker provider | settings, search traces | High on macOS |
+| Stable citations | Bind answer claims to selected file/parent evidence and validate citation IDs | Find with Chat | prompt/context/verifier | runtime context | High on macOS |
 | Bounded model context | Respect known/overridden context windows | AI settings | context planner | settings | High |
 | Retry/regenerate | Replace the answer for the same question | message actions | ChatService | messages | High |
 | Cancel generation | Stop active streaming | composer | provider task | runtime state | High |

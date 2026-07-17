@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import ImageIO
 @testable import FileNest
 
 final class IndexerServiceTests: XCTestCase {
@@ -142,6 +143,43 @@ final class IndexerServiceTests: XCTestCase {
         let result: String
         init(result: String) { self.result = result }
         func recognize(imageData: Data, mimeType: String) async throws -> String { result }
+    }
+
+    private final class RecordingOCRProvider: OCRProvider, @unchecked Sendable {
+        let name = "recording-ocr"
+        private let lock = NSLock()
+        private var calls = [(mimeType: String, width: Int, height: Int)]()
+
+        var recordedCalls: [(mimeType: String, width: Int, height: Int)] {
+            lock.withLock { calls }
+        }
+
+        func recognize(imageData: Data, mimeType: String) async throws -> String {
+            try await recognizeResult(imageData: imageData, mimeType: mimeType).text
+        }
+
+        func recognizeResult(imageData: Data,
+                             mimeType: String) async throws -> OCRRecognitionResult {
+            guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                    as? [CFString: Any],
+                  let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+                  let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+                throw URLError(.cannotDecodeContentData)
+            }
+            let callIndex = lock.withLock { () -> Int in
+                calls.append((mimeType, width.intValue, height.intValue))
+                return calls.count
+            }
+            return OCRRecognitionResult(
+                text: "Region \(callIndex)",
+                observations: [OCRTextObservation(
+                    text: "Region \(callIndex)",
+                    confidence: 0.95,
+                    bounds: OCRBoundingBox(x: 20, y: 20, width: 100, height: 30)
+                )]
+            )
+        }
     }
 
     private final class FailingOCRProvider: OCRProvider, @unchecked Sendable {
@@ -403,8 +441,7 @@ final class IndexerServiceTests: XCTestCase {
         let didIndex = await indexer.indexFile(id: fileId, overridePath: fileURL)
 
         XCTAssertTrue(didIndex)
-        XCTAssertEqual(embedder.failedInputs.count, 1)
-        XCTAssertGreaterThan(embedder.failedInputs[0].count, 500)
+        XCTAssertTrue(embedder.failedInputs.isEmpty)
         XCTAssertTrue(embedder.successfulInputs.allSatisfy { $0.count <= 500 })
         XCTAssertEqual(indexer.vectorStore.count, embedder.successfulInputs.count)
         XCTAssertGreaterThanOrEqual(embedder.successfulInputs.count, 3)
@@ -629,6 +666,96 @@ final class IndexerServiceTests: XCTestCase {
         XCTAssertEqual(text, "BRITECH CLOUD UEN 202344212C")
     }
 
+    func testPanoramicOCRPlanUsesOverlappingSourceResolutionTiles() {
+        let plan = OCRDocumentProcessor.imagePlan(width: 14_568, height: 2_723)
+
+        XCTAssertTrue(plan.usesTiling)
+        XCTAssertEqual(plan.processingScale, 1, accuracy: 0.001)
+        XCTAssertEqual(plan.tileRects.count, 18)
+        XCTAssertLessThanOrEqual(plan.tileRects.count, 32)
+        XCTAssertEqual(plan.tileRects[0].width, 2_048)
+        XCTAssertEqual(plan.tileRects[1].minX, 1_760)
+        XCTAssertEqual(plan.tileRects[0].maxX - plan.tileRects[1].minX, 288)
+        XCTAssertEqual(plan.tileRects.last?.maxX, 14_568)
+        XCTAssertEqual(plan.tileRects.last?.maxY, 2_723)
+    }
+
+    func testOrdinaryOCRPlanKeepsSingleImageProcessing() {
+        let plan = OCRDocumentProcessor.imagePlan(width: 1_600, height: 1_200)
+
+        XCTAssertFalse(plan.usesTiling)
+        XCTAssertTrue(plan.tileRects.isEmpty)
+    }
+
+    func testOCRMergePrefersHigherConfidenceTileTextAndPreservesReadingOrder() {
+        let observations = [
+            OCRDocumentProcessor.PositionedObservation(
+                text: "Groue CTO",
+                confidence: 0.62,
+                bounds: OCRBoundingBox(x: 100, y: 20, width: 180, height: 50),
+                source: .overview
+            ),
+            OCRDocumentProcessor.PositionedObservation(
+                text: "Head of Engineering",
+                confidence: 0.91,
+                bounds: OCRBoundingBox(x: 80, y: 180, width: 260, height: 60),
+                source: .tile
+            ),
+            OCRDocumentProcessor.PositionedObservation(
+                text: "Group CTO",
+                confidence: 0.98,
+                bounds: OCRBoundingBox(x: 102, y: 22, width: 176, height: 48),
+                source: .tile
+            ),
+        ]
+
+        XCTAssertEqual(
+            OCRDocumentProcessor.mergedText(from: observations),
+            "Group CTO\nHead of Engineering"
+        )
+    }
+
+    func testPanoramicImageOCRUsesLosslessOverviewAndTiles() async throws {
+        let fileURL = temporaryDirectory.appendingPathComponent("panorama.png")
+        let width = 5_000
+        let height = 800
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.setFillColor(NSColor.systemBlue.cgColor)
+        for x in stride(from: 100, to: width, by: 400) {
+            context.fill(CGRect(x: x, y: 200, width: 180, height: 80))
+        }
+        let image = try XCTUnwrap(context.makeImage())
+        try XCTUnwrap(NSBitmapImageRep(cgImage: image).representation(
+            using: .png,
+            properties: [:]
+        )).write(to: fileURL)
+        let provider = RecordingOCRProvider()
+
+        let text = await OCRDocumentProcessor.recognizeIfNeeded(
+            url: fileURL,
+            ext: "png",
+            provider: provider
+        )
+
+        XCTAssertNotNil(text)
+        XCTAssertEqual(provider.recordedCalls.count, 4)
+        XCTAssertTrue(provider.recordedCalls.allSatisfy { $0.mimeType == "image/png" })
+        XCTAssertTrue(provider.recordedCalls.allSatisfy {
+            max($0.width, $0.height) <= 2_048
+        })
+    }
+
     func testUpdatingNoteIndexPreservesExistingDocumentChunks() async throws {
         let fileURL = temporaryDirectory.appendingPathComponent("contract.txt")
         try Data("body content remains indexed".utf8).write(to: fileURL)
@@ -716,8 +843,7 @@ final class IndexerServiceTests: XCTestCase {
             doclingChunks: nil,
             extractedText: extracted,
             appendedOCRText: ocr,
-            maxTokens: 600,
-            overlap: 80
+            maxTokens: 600
         )
 
         XCTAssertEqual(chunks.count, 1)
@@ -736,13 +862,129 @@ final class IndexerServiceTests: XCTestCase {
             doclingChunks: docling,
             extractedText: "Embedded PDF text\nOCR scanned page",
             appendedOCRText: "OCR scanned page",
-            maxTokens: 600,
-            overlap: 80
+            maxTokens: 600
         )
 
         XCTAssertEqual(chunks.count, 2)
         XCTAssertEqual(chunks[0], docling[0])
         XCTAssertEqual(chunks[1].text, "OCR scanned page")
+    }
+
+    func testDoclingPostProcessingRepairsSentenceSplitAcrossChunks() {
+        let source = [
+            StructuredDocumentChunk(
+                text: "If the regulator reaches that conclusion, we would",
+                contextualText: "Risk Factors\nIf the regulator reaches that conclusion, we would",
+                sectionPath: ["Risk Factors"],
+                pageStart: 10,
+                pageEnd: 10
+            ),
+            StructuredDocumentChunk(
+                text: "be identified as a covered issuer. The decision could affect our operations.",
+                contextualText: "Risk Factors\nbe identified as a covered issuer. The decision could affect our operations.",
+                sectionPath: ["Risk Factors"],
+                pageStart: 10,
+                pageEnd: 10
+            ),
+        ]
+
+        let result = IndexerService.postProcessDoclingChunks(source, maxTokens: 600)
+
+        XCTAssertEqual(result.count, 1)
+        XCTAssertTrue(result[0].text.contains("we would be identified"))
+        XCTAssertTrue(result[0].contextualText.hasPrefix("Risk Factors\n"))
+        XCTAssertTrue(result[0].contextualText.hasSuffix(result[0].text))
+    }
+
+    func testDoclingPostProcessingMergesShortPeersWithinSameSection() {
+        let chunks = [
+            StructuredDocumentChunk(
+                text: "Payment status",
+                contextualText: "Invoice > Payment\nPayment status",
+                sectionPath: ["Invoice", "Payment"],
+                pageStart: 1,
+                pageEnd: 1
+            ),
+            StructuredDocumentChunk(
+                text: "Paid",
+                contextualText: "Invoice > Payment\nPaid",
+                sectionPath: ["Invoice", "Payment"],
+                pageStart: 1,
+                pageEnd: 1
+            )
+        ]
+
+        let result = IndexerService.postProcessDoclingChunks(
+            chunks,
+            maxTokens: 600,
+            minimumTokens: 80
+        )
+
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].text, "Payment status\n\nPaid")
+        XCTAssertEqual(result[0].sectionPath, ["Invoice", "Payment"])
+        XCTAssertTrue(result[0].contextualText.contains("Invoice > Payment"))
+    }
+
+    func testDoclingPostProcessingDoesNotMergeAcrossSectionsOrTables() {
+        let chunks = [
+            StructuredDocumentChunk(text: "Yes", sectionPath: ["Eligibility"], pageStart: 1, kind: .text),
+            StructuredDocumentChunk(text: "No", sectionPath: ["Refund"], pageStart: 1, kind: .text),
+            StructuredDocumentChunk(text: "1", sectionPath: ["Refund"], pageStart: 1, kind: .table)
+        ]
+
+        let result = IndexerService.postProcessDoclingChunks(
+            chunks,
+            maxTokens: 600,
+            minimumTokens: 80
+        )
+
+        XCTAssertEqual(result.map(\.text), ["Yes", "No", "1"])
+    }
+
+    func testDoclingPostProcessingAttachesShortTitleToFollowingContent() {
+        let chunks = [
+            StructuredDocumentChunk(
+                text: "Payment Terms",
+                sectionPath: ["Agreement"],
+                pageStart: 2,
+                kind: .title
+            ),
+            StructuredDocumentChunk(
+                text: "The customer shall pay within thirty days.",
+                sectionPath: ["Agreement", "Payment Terms"],
+                pageStart: 2,
+                kind: .text
+            )
+        ]
+
+        let result = IndexerService.postProcessDoclingChunks(
+            chunks,
+            maxTokens: 600,
+            minimumTokens: 80
+        )
+
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].kind, .text)
+        XCTAssertEqual(result[0].text, "Payment Terms\n\nThe customer shall pay within thirty days.")
+        XCTAssertEqual(result[0].sectionPath, ["Agreement", "Payment Terms"])
+    }
+
+    func testDoclingPostProcessingDropsOnlyUnambiguousNoise() {
+        let chunks = [
+            StructuredDocumentChunk(text: "---", pageStart: 1),
+            StructuredDocumentChunk(text: "Page 12", pageStart: 12),
+            StructuredDocumentChunk(text: "SGD 500", sectionPath: ["Amount"], pageStart: 12),
+            StructuredDocumentChunk(text: "A", sectionPath: ["Status"], pageStart: 12)
+        ]
+
+        let result = IndexerService.postProcessDoclingChunks(
+            chunks,
+            maxTokens: 600,
+            minimumTokens: 80
+        )
+
+        XCTAssertEqual(result.map(\.text), ["SGD 500", "A"])
     }
 
     @MainActor
@@ -887,6 +1129,41 @@ final class IndexerServiceTests: XCTestCase {
         XCTAssertEqual(try store.allStoredDocumentChunks()[fileID], originalChunks)
     }
 
+    func testFailedFullRebuildKeepsPreviousChunksVectorsAndMetadata() async throws {
+        let fileURL = temporaryDirectory.appendingPathComponent("atomic-full-rebuild.txt")
+        try Data("content from the active generation".utf8).write(to: fileURL)
+        let fileID = try insertFile(at: fileURL)
+        let settings = AppSettings(store: store)
+        let originalIndexer = IndexerService(
+            store: store,
+            settings: settings,
+            embedder: StubEmbedder(result: [1, 0], name: "old-model")
+        )
+        let initialIndexSucceeded = await originalIndexer.indexFile(id: fileID)
+        XCTAssertTrue(initialIndexSucceeded)
+        let originalFile = try XCTUnwrap(store.file(id: fileID))
+        let originalChunks = try XCTUnwrap(store.allStoredDocumentChunks()[fileID])
+
+        try Data("changed content that must not leak from a failed rebuild".utf8).write(to: fileURL)
+        let failingIndexer = IndexerService(
+            store: store,
+            settings: settings,
+            embedder: StubEmbedder(result: [], name: "new-model")
+        )
+        let succeeded = await failingIndexer.rebuildAll(
+            rebuildVectorSpace: true,
+            forceReprocessing: true
+        )
+
+        XCTAssertFalse(succeeded)
+        XCTAssertEqual(try store.distinctEmbeddingModels(), Set(["old-model"]))
+        XCTAssertEqual(try store.allStoredDocumentChunks()[fileID], originalChunks)
+        let preservedFile = try XCTUnwrap(store.file(id: fileID))
+        XCTAssertEqual(preservedFile.contentHash, originalFile.contentHash)
+        XCTAssertEqual(preservedFile.indexSignature, originalFile.indexSignature)
+        XCTAssertEqual(preservedFile.indexedAt, originalFile.indexedAt)
+    }
+
     func testIndexingExecutionGatePausesResumesAndStops() async throws {
         let gate = IndexingExecutionGate()
         await gate.pause()
@@ -930,27 +1207,110 @@ final class IndexerServiceTests: XCTestCase {
         XCTAssertEqual(indexer.vectorStore.count, 0)
     }
 
-    func testChunkUsesOverlappingApproximateTokenWindows() {
+    func testChunkUsesWholeSentenceOverlap() {
         let chunks = IndexerService.chunk(
-            text: "one two three four five six seven",
+            text: "Alpha beta. Gamma delta. Epsilon zeta. Eta theta.",
             maxWords: 8,
-            overlap: 2
+            overlap: 4
         )
 
-        XCTAssertEqual(chunks.count, 2)
-        XCTAssertTrue(chunks[0].contains("six"))
-        XCTAssertTrue(chunks[1].contains("six"))
+        XCTAssertGreaterThan(chunks.count, 1)
+        XCTAssertTrue(chunks[0].hasSuffix("Gamma delta."))
+        XCTAssertTrue(chunks[1].hasPrefix("Gamma delta."))
     }
 
-    func testChunkSplitsLongTextWithoutWhitespaceByCharacters() {
-        let text = String(repeating: "\u{6587}", count: 1_000)
+    func testChunkKeepsCompleteParagraphsWheneverTheyFit() {
+        let first = "The first paragraph contains complete business context."
+        let second = "The second paragraph must remain an indivisible semantic unit."
+        let third = "The third paragraph closes the example."
+        let text = [first, second, third].joined(separator: "\n\n")
 
-        let chunks = IndexerService.chunk(text: text, maxWords: 200, overlap: 30)
+        let chunks = IndexerService.chunk(text: text, maxWords: 12, overlap: 0)
 
-        XCTAssertEqual(chunks.count, 4)
-        XCTAssertEqual(chunks[0].count, 300)
-        XCTAssertEqual(String(chunks[0].suffix(45)), String(chunks[1].prefix(45)))
-        XCTAssertEqual(chunks[3].count, 235)
+        XCTAssertEqual(chunks, [first, second, third])
+    }
+
+    func testChunkSplitsOversizedParagraphOnlyBetweenCompleteSentences() {
+        let sentences = [
+            "Revenue increased during the reporting period.",
+            "Operating expenses remained carefully controlled.",
+            "Management expects the trend to continue.",
+        ]
+        let chunks = IndexerService.chunk(
+            text: sentences.joined(separator: " "),
+            maxWords: 12,
+            overlap: 0
+        )
+
+        XCTAssertGreaterThan(chunks.count, 1)
+        XCTAssertEqual(chunks.joined(separator: " "), sentences.joined(separator: " "))
+        XCTAssertTrue(chunks.allSatisfy { chunk in
+            sentences.contains(chunk) || sentences.contains { chunk.contains($0) }
+        })
+    }
+
+    func testChunkNeverSplitsAWordOrAnOversizedSingleSentence() {
+        let sentence = "Supercalifragilisticexpialidocious remains one complete lexical unit."
+
+        let chunks = IndexerService.chunk(text: sentence, maxWords: 2, overlap: 1)
+
+        XCTAssertEqual(chunks, [sentence])
+    }
+
+    func testEmergencyOversizedSentenceFallbackKeepsEveryWordWhole() {
+        let words = (0..<120).map { "accountingTerm\($0)" }
+        let chunks = IndexerService.chunk(
+            text: words.joined(separator: " "),
+            maxWords: 64,
+            overlap: 10
+        )
+        let validWords = Set(words)
+
+        XCTAssertGreaterThan(chunks.count, 1)
+        XCTAssertTrue(chunks.allSatisfy { chunk in
+            chunk.split(separator: " ").allSatisfy { validWords.contains(String($0)) }
+        })
+    }
+
+    func testRetrievalChildrenKeepTheCompleteParentSection() {
+        let parentText = (0..<400).map { "term\($0)" }.joined(separator: " ")
+        let children = IndexerService.retrievalChildren(
+            from: [StructuredDocumentChunk(
+                text: parentText,
+                contextualText: "Invoices\n" + parentText,
+                sectionPath: ["Invoices"]
+            )],
+            targetTokens: 80,
+            overlapTokens: 12
+        )
+
+        XCTAssertGreaterThan(children.count, 1)
+        XCTAssertTrue(children.allSatisfy { $0.parentIndex == 0 })
+        XCTAssertTrue(children.allSatisfy { $0.parentText == parentText })
+        XCTAssertTrue(children.allSatisfy { $0.contextualText.hasPrefix("Invoices\n") })
+    }
+
+    func testTableRetrievalChildrenRepeatHeaderRows() {
+        let rows = ["Invoice | Amount"] + (0..<80).map { "INV-2026-\($0) | SGD \($0).00" }
+        let children = IndexerService.retrievalChildren(
+            from: [StructuredDocumentChunk(text: rows.joined(separator: "\n"), kind: .table)],
+            targetTokens: 80,
+            overlapTokens: 0
+        )
+
+        XCTAssertGreaterThan(children.count, 1)
+        XCTAssertTrue(children.allSatisfy { $0.text.hasPrefix("Invoice | Amount\n") })
+    }
+
+    func testEntityExtractionFindsBusinessIdentifiers() {
+        let terms = IndexerService.extractedEntityTerms(
+            from: "Invoice INV-20250377 was issued on 2026-07-17 for SGD 1,240.50 to finance@example.com."
+        )
+
+        XCTAssertTrue(terms.contains("inv-20250377"))
+        XCTAssertTrue(terms.contains("2026-07-17"))
+        XCTAssertTrue(terms.contains("sgd 1,240.50"))
+        XCTAssertTrue(terms.contains("finance@example.com"))
     }
 
     private func insertFile(at url: URL) throws -> Int64 {

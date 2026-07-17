@@ -53,9 +53,10 @@ The final report must separate `Passed locally`, `Passed on Windows`, and `Requi
 
 | Gate | Result |
 | --- | --- |
-| macOS baseline XCTest | 263 tests passed, 0 failed |
+| macOS baseline XCTest | 314 tests passed, 0 failed |
 | Windows TypeScript type check | passed |
-| Windows Vitest | 16 tests passed, 0 failed |
+| Windows Vitest | 22 tests passed, 0 failed |
+| Signed macOS Release build and launch verification | passed; installed app satisfies its designated requirement |
 | Windows Electron production build | passed for main, preload, and renderer bundles |
 | Windows Electron runtime UI smoke on the development host | passed; chat, composer, and right inspector rendered with valid bounds and no renderer error |
 | Windows source language scan outside localization resources | passed |

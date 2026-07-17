@@ -28,7 +28,10 @@ import { AppLogger } from '../src/main/logger'
 import { ContentExtractor } from '../src/main/content-extractor'
 import { OrganizerService, OrganizationError } from '../src/main/organizer'
 import { LlmService } from '../src/main/llm'
+import { estimateCanonicalTokens } from '../src/main/token-counter'
 import { FileWatcherService } from '../src/main/watcher'
+import { createDefaultSettings } from '../src/main/defaults'
+import { streamedSearchIntent } from '../src/main/smart-search-plan'
 
 beforeAll(async () => {
   await mkdir(join(testRoot, 'Downloads'), { recursive: true })
@@ -38,6 +41,24 @@ beforeAll(async () => {
 afterAll(async () => rm(testRoot, { recursive: true, force: true }))
 
 describe('settings and bounded chat context', () => {
+  it('uses the shared multilingual token accounting profile', () => {
+    expect(estimateCanonicalTokens('hello world').count).toBe(3)
+    expect(estimateCanonicalTokens('中文测试').count).toBe(3)
+    expect(estimateCanonicalTokens('one two three').count).toBe(4)
+    expect(estimateCanonicalTokens('').count).toBe(0)
+  })
+
+  it('uses the same fixed Ollama defaults and model families as macOS', () => {
+    const settings = createDefaultSettings()
+    expect(settings.ollamaModel).toBe('qwen3.5:9b')
+    expect(settings.ollamaEmbeddingModel).toBe('qwen3-embedding:0.6b')
+    expect(settings.quickSearchShortcut).toBe('CommandOrControl+Alt+Space')
+  })
+
+  it('extracts a complete intent from a streamed smart-search plan', () => {
+    expect(streamedSearchIntent('{"intent":"Find recent invoices","semantic_query":"invoice')).toBe('Find recent invoices')
+    expect(streamedSearchIntent('{"intent":"incomplete')).toBeNull()
+  })
   it('normalizes the same user-controlled limits as macOS', async () => {
     const database = new FileNestDatabase()
     await database.initialize()
@@ -127,6 +148,21 @@ describe('library query behavior', () => {
     expect(response.results).toHaveLength(1)
     expect(response.results[0].file.id).toBe(record.id)
     expect(['content', 'semantic']).toContain(response.results[0].matchKind)
+    expect(response.results[0].confidence).toBeGreaterThanOrEqual(0)
+    expect(response.results[0].confidence).toBeLessThanOrEqual(1)
+  })
+
+  it('runs explicit Smart Search with a deterministic fallback when generation is disabled', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const source = join(testRoot, 'Downloads', 'smart-search-invoice.txt')
+    await writeFile(source, 'Invoice INV-2026-77 for the July service period.', 'utf8')
+    await addFile(database, source)
+    const service = new LibrarySearchService(database, new EmbeddingService(database), new AppLogger())
+    const response = await service.search({ query: 'recent invoice INV-2026-77', smart: true }, { ...database.getSettings(), llmChoice: 'none' })
+    expect(response.usedAi).toBe(false)
+    expect(response.intent).toContain('INV-2026-77')
+    expect(response.results[0].confidence).toBeGreaterThan(0)
   })
 })
 
@@ -167,6 +203,24 @@ describe('safe organization and chat persistence', () => {
     expect((await database.statistics()).totalTokens).toBeGreaterThan(0)
   })
 
+  it('publishes planning intent before chat retrieval', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const source = join(testRoot, 'Downloads', 'planning-source.txt')
+    await writeFile(source, 'Quarterly planning notes for the product launch.', 'utf8')
+    await addFile(database, source)
+    const service = new ChatService(database, new EmbeddingService(database), new LlmService(), new AppLogger())
+    const events: ChatStreamEvent[] = []
+    await new Promise<void>((resolve) => {
+      service.send({ sessionId: null, content: 'find quarterly planning notes' }, { ...database.getSettings(), llmChoice: 'none' }, (event) => {
+        events.push(event)
+        if (event.type === 'done' || event.type === 'error') resolve()
+      })
+    })
+    expect(events.some((event) => event.stage === 'planning')).toBe(true)
+    expect(events.find((event) => event.stage === 'searching')?.searchIntent).toContain('quarterly planning notes')
+  })
+
   it('persists watched-directory baselines across database reloads', async () => {
     const database = new FileNestDatabase()
     await database.initialize()
@@ -202,6 +256,31 @@ describe('safe organization and chat persistence', () => {
     await watcher.start(settings)
     expect(database.getFileByPath(path)?.indexedAt).not.toBeNull()
     await watcher.stop()
+  })
+
+  it('reconciles the organized library without rewriting stable rows', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const root = join(testRoot, 'ManagedLibrary')
+    await mkdir(join(root, 'Documents', 'Stable'), { recursive: true })
+    const path = join(root, 'Documents', 'Stable', 'unchanged.txt')
+    await writeFile(path, 'stable managed content', 'utf8')
+    const record = await addFile(database, path)
+    await database.updateFile(record.id, { organizedAt: new Date().toISOString(), organizationSubfolder: 'Documents/Stable' })
+    const settings = { ...database.getSettings(), organizedRoot: root, embeddingSource: 'local' as const, doclingEnabled: false, ocrSource: 'disabled' as const }
+    const logger = new AppLogger()
+    const indexer = new IndexerService(database, new ContentExtractor(), new EmbeddingService(database), logger)
+    await indexer.indexFile(database.getFile(record.id)!, settings)
+    const watcher = new FileWatcherService(database, indexer, new OrganizerService(database, logger), logger)
+    const update = vi.spyOn(database, 'updateFile')
+
+    await watcher.reconcileOrganizedLibrary(settings)
+
+    expect(update).not.toHaveBeenCalled()
+    await writeFile(path, 'changed managed content with a different size', 'utf8')
+    await watcher.reconcileOrganizedLibrary(settings)
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(database.getFile(record.id)?.contentText).toContain('changed managed content')
   })
 })
 

@@ -1,6 +1,32 @@
 import AppKit
 import SwiftUI
 
+private struct LibraryCreationDateCandidate: Sendable {
+    let path: String
+    let fallback: Date
+}
+
+private actor LibraryCreationDateCache {
+    static let shared = LibraryCreationDateCache()
+    private var datesByPath = [String: Date]()
+
+    func dates(for candidates: [LibraryCreationDateCandidate]) -> [String: Date] {
+        var resolved = [String: Date]()
+        for candidate in candidates {
+            if let cached = datesByPath[candidate.path] {
+                resolved[candidate.path] = cached
+                continue
+            }
+            let url = URL(fileURLWithPath: candidate.path)
+            let created = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate)
+                ?? candidate.fallback
+            datesByPath[candidate.path] = created
+            resolved[candidate.path] = created
+        }
+        return resolved
+    }
+}
+
 enum LibrarySortField: Equatable {
     case relevance
     case modified
@@ -109,7 +135,6 @@ struct LibraryView: View {
     @State private var smartSearchPlan: SmartLibrarySearchPlan?
     @State private var smartSearchUsedAI = false
     @State private var smartSearchIntent = ""
-    @State private var isOrganizing = false
     @State private var sortField: LibrarySortField = .modified
     @State private var sortDirection: LibrarySortDirection = .descending
     @State private var dateField: LibraryDateField = .modified
@@ -118,6 +143,8 @@ struct LibraryView: View {
     @State private var isCalendarPresented = false
     @State private var creationDates: [String: Date] = [:]
     @State private var visibleLimit = 20
+    @State private var isApplyingExternalSearch = false
+    @State private var isSearchHistoryPresented = false
 
     private var sourceFiles: [FileRecord] {
         searchResults?.map(\.file) ?? appState.files
@@ -155,25 +182,45 @@ struct LibraryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PageHeader(title: isOrganizing ? "Organizing New Files" : "Library",
-                       subtitle: isOrganizing
-                       ? "FileNest is building the local index; files will not move until indexing completes."
+            PageHeader(title: appState.organizationState.isActive ? appState.organizationStatusTitle : "Library",
+                       subtitle: appState.organizationState.isActive
+                       ? appState.organizationStatusSubtitle
                        : "Search and manage organized files; all indexes stay on this Mac.") {
                 HStack(spacing: 10) {
-                    if isOrganizing {
+                    if appState.organizationState == .running {
                         Button {
-                            isOrganizing = false
+                            appState.pauseOrganization()
                         } label: {
                             Label("Pause Organization", systemImage: "pause.circle")
                         }
                         .buttonStyle(QuietButtonStyle())
+                        Button(role: .destructive) {
+                            appState.stopOrganization()
+                        } label: {
+                            Label("Stop Organization", systemImage: "stop.circle")
+                        }
+                        .buttonStyle(QuietButtonStyle())
+                    } else if appState.organizationState == .paused {
+                        Button {
+                            appState.resumeOrganization()
+                        } label: {
+                            Label("Resume Organization", systemImage: "play.circle")
+                        }
+                        .buttonStyle(GradientButtonStyle())
+                        Button(role: .destructive) {
+                            appState.stopOrganization()
+                        } label: {
+                            Label("Stop Organization", systemImage: "stop.circle")
+                        }
+                        .buttonStyle(QuietButtonStyle())
                     } else {
                         Button {
-                            runOrganize()
+                            appState.organizeNow()
                         } label: {
                             Label("Organize Now", systemImage: "tray.and.arrow.down")
                         }
                         .buttonStyle(GradientButtonStyle())
+                        .disabled(appState.indexingState.isActive)
 
                         Button {
                             appState.reindexAll()
@@ -186,27 +233,37 @@ struct LibraryView: View {
                 }
             }
 
-            if isOrganizing {
-                OrganizationProgressView(files: progressFiles)
+            if appState.organizationState.isActive {
+                OrganizationProgressView(
+                    progress: appState.organizationProgress,
+                    title: appState.organizationStatusTitle,
+                    subtitle: appState.organizationStatusSubtitle
+                )
             } else {
                 libraryContent
             }
         }
         .background(FileNestTheme.surface)
-        .onAppear { refreshCreationDates() }
+        .onAppear {
+            refreshCreationDates()
+            applyPendingLibrarySearch()
+        }
         .onChange(of: appState.files) { _ in
             resetPagination()
             refreshCreationDates()
         }
         .onChange(of: searchText) { value in
             resetPagination()
-            scheduleSearch(value)
+            if !isApplyingExternalSearch { scheduleSearch(value) }
         }
         .onChange(of: category) { _ in resetPagination() }
         .onChange(of: selectedDateRange) { _ in resetPagination() }
         .onChange(of: dateField) { _ in resetPagination() }
         .onChange(of: sortField) { _ in resetPagination() }
         .onChange(of: sortDirection) { _ in resetPagination() }
+        .onChange(of: appState.librarySearchRequest?.id) { _ in
+            applyPendingLibrarySearch()
+        }
         .onDisappear { searchTask?.cancel() }
     }
 
@@ -256,6 +313,24 @@ struct LibraryView: View {
                     }
                     .buttonStyle(QuietButtonStyle())
                     .disabled(isSearching || searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    Button {
+                        appState.refreshLibrarySearchHistory()
+                        isSearchHistoryPresented.toggle()
+                    } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(QuietButtonStyle())
+                    .help("Search History")
+                    .popover(isPresented: $isSearchHistoryPresented, arrowEdge: .bottom) {
+                        LibrarySearchHistoryPopover(
+                            entries: appState.librarySearchHistory,
+                            restore: restoreSearchHistory,
+                            delete: appState.deleteLibrarySearchHistory,
+                            clear: appState.clearLibrarySearchHistory
+                        )
+                    }
                 }
 
                 HStack(spacing: 10) {
@@ -350,7 +425,7 @@ struct LibraryView: View {
                                 searchMatch: searchMatchesByPath[file.path],
                                 startDocumentChat: startDocumentChat
                             )
-                            Divider().padding(.leading, 78)
+                            Divider().padding(.leading, LibraryTableLayout.nameColumnLeading)
                         }
 
                         if visibleFiles.count < filteredFiles.count {
@@ -496,23 +571,28 @@ struct LibraryView: View {
         return parts.joined(separator: " · ")
     }
 
-    private var progressFiles: [FileRecord] {
-        Array(appState.files.prefix(4))
-    }
-
     private func runSearch() {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             clearSearch()
             return
         }
-        startSearch(query: query, debounceNanoseconds: 0)
+        startSearch(query: query, debounceNanoseconds: 0, recordHistory: true)
+    }
+
+    private func applyPendingLibrarySearch() {
+        guard let request = appState.librarySearchRequest else { return }
+        isApplyingExternalSearch = true
+        searchText = request.query
+        startSearch(query: request.query, debounceNanoseconds: 0, recordHistory: true)
+        appState.consumeLibrarySearchRequest(request.id)
+        DispatchQueue.main.async { isApplyingExternalSearch = false }
     }
 
     private func runSmartSearch() {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
-        startSmartSearch(query: query)
+        startSmartSearch(query: query, recordHistory: true)
     }
 
     private func scheduleSearch(_ rawQuery: String) {
@@ -521,10 +601,14 @@ struct LibraryView: View {
             clearSearch()
             return
         }
-        startSearch(query: query, debounceNanoseconds: 300_000_000)
+        startSearch(query: query, debounceNanoseconds: 300_000_000, recordHistory: false)
     }
 
-    private func startSearch(query: String, debounceNanoseconds: UInt64) {
+    private func startSearch(
+        query: String,
+        debounceNanoseconds: UInt64,
+        recordHistory: Bool
+    ) {
         searchTask?.cancel()
         smartSearchEnabled = false
         smartSearchPlan = nil
@@ -544,18 +628,39 @@ struct LibraryView: View {
                 }
             }
             guard !Task.isCancelled else { return }
+            if let cached = appState.cachedLibrarySearch(
+                matching: query,
+                isSmartSearch: false
+            ) {
+                guard activeSearchQuery == query,
+                      searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+                applyCachedSearch(cached, isSmartSearch: false)
+                if recordHistory {
+                    appState.saveLibrarySearch(
+                        query: query,
+                        results: cached.results,
+                        recordHistory: true
+                    )
+                }
+                return
+            }
             let results = await appState.managedSearchResults(matching: query)
             guard !Task.isCancelled,
                   activeSearchQuery == query,
                   searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
             searchResults = results
+            appState.saveLibrarySearch(
+                query: query,
+                results: results,
+                recordHistory: recordHistory
+            )
             isSearching = false
             searchTask = nil
             resetPagination()
         }
     }
 
-    private func startSmartSearch(query: String) {
+    private func startSmartSearch(query: String, recordHistory: Bool) {
         searchTask?.cancel()
         smartSearchEnabled = true
         activeSearchQuery = query
@@ -566,6 +671,24 @@ struct LibraryView: View {
         sortField = .relevance
         sortDirection = .descending
         searchTask = Task { @MainActor in
+            if let cached = appState.cachedLibrarySearch(
+                matching: query,
+                isSmartSearch: true
+            ) {
+                guard activeSearchQuery == query,
+                      searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+                applyCachedSearch(cached, isSmartSearch: true)
+                if recordHistory {
+                    appState.saveLibrarySearch(
+                        query: query,
+                        results: cached.results,
+                        smartPlan: cached.smartPlan,
+                        usedAI: cached.usedAI,
+                        recordHistory: true
+                    )
+                }
+                return
+            }
             let response = await appState.managedSmartSearchResults(
                 matching: query,
                 onIntentUpdate: { intent in
@@ -580,10 +703,40 @@ struct LibraryView: View {
             searchResults = response.results
             smartSearchPlan = response.plan
             smartSearchUsedAI = response.usedAI
+            appState.saveLibrarySearch(
+                query: query,
+                results: response.results,
+                smartPlan: response.plan,
+                usedAI: response.usedAI,
+                recordHistory: recordHistory
+            )
             isSearching = false
             searchTask = nil
             resetPagination()
         }
+    }
+
+    private func applyCachedSearch(_ cached: CachedLibrarySearch, isSmartSearch: Bool) {
+        searchResults = cached.results
+        smartSearchEnabled = isSmartSearch
+        smartSearchPlan = cached.smartPlan
+        smartSearchUsedAI = cached.usedAI
+        smartSearchIntent = ""
+        isSearching = false
+        searchTask = nil
+        resetPagination()
+    }
+
+    private func restoreSearchHistory(_ entry: LibrarySearchHistoryEntry) {
+        isSearchHistoryPresented = false
+        isApplyingExternalSearch = true
+        searchText = entry.query
+        if entry.isSmartSearch {
+            startSmartSearch(query: entry.query, recordHistory: true)
+        } else {
+            startSearch(query: entry.query, debounceNanoseconds: 0, recordHistory: true)
+        }
+        DispatchQueue.main.async { isApplyingExternalSearch = false }
     }
 
     private func clearSearch() {
@@ -620,31 +773,112 @@ struct LibraryView: View {
     }
 
     private func refreshCreationDates() {
-        let candidates = sourceFiles.map { ($0.path, $0.discoveredAt ?? $0.addedAt) }
+        let candidates = sourceFiles.compactMap { file -> LibraryCreationDateCandidate? in
+            guard creationDates[file.path] == nil else { return nil }
+            return LibraryCreationDateCandidate(
+                path: file.path,
+                fallback: file.discoveredAt ?? file.addedAt
+            )
+        }
+        guard !candidates.isEmpty else { return }
         Task {
-            let values = await Task.detached(priority: .utility) {
-                Dictionary(uniqueKeysWithValues: candidates.map { path, fallback in
-                    let url = URL(fileURLWithPath: path)
-                    let created = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? fallback
-                    return (path, created)
-                })
-            }.value
+            let values = await LibraryCreationDateCache.shared.dates(for: candidates)
             creationDates.merge(values) { _, new in new }
         }
     }
 
-    private func runOrganize() {
-        guard !isOrganizing else { return }
-        withAnimation(.easeOut(duration: 0.18)) { isOrganizing = true }
-        appState.organizeNow()
+}
 
-        Task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            await MainActor.run {
-                appState.refresh()
-                withAnimation(.easeOut(duration: 0.18)) { isOrganizing = false }
+private struct LibrarySearchHistoryPopover: View {
+    let entries: [LibrarySearchHistoryEntry]
+    let restore: (LibrarySearchHistoryEntry) -> Void
+    let delete: (Int64) -> Void
+    let clear: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Search History")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                if !entries.isEmpty {
+                    Button("Clear All", role: .destructive, action: clear)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11))
+                }
+            }
+            .padding(14)
+
+            Divider()
+
+            if entries.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 24, weight: .light))
+                        .foregroundStyle(.secondary)
+                    Text("No Search History")
+                        .font(.system(size: 12, weight: .medium))
+                    Text("Completed searches will appear here.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 150)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(entries) { entry in
+                            HStack(spacing: 8) {
+                                Button { restore(entry) } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: entry.isSmartSearch ? "sparkles" : "magnifyingglass")
+                                            .foregroundStyle(FileNestTheme.accent)
+                                            .frame(width: 18)
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(entry.query)
+                                                .font(.system(size: 12, weight: .medium))
+                                                .lineLimit(1)
+                                            HStack(spacing: 5) {
+                                                Text(LocalizedStringKey(entry.isSmartSearch ? "Smart Search" : "Standard Search"))
+                                                Text("·")
+                                                Text("\(entry.resultCount)")
+                                                Text(LocalizedStringKey("results"))
+                                                Text("·")
+                                                Text(entry.updatedAt, style: .relative)
+                                                Text("·")
+                                                if entry.hasValidCache {
+                                                    Text("Cached")
+                                                        .foregroundStyle(FileNestTheme.success)
+                                                } else {
+                                                    Text("Refresh Required")
+                                                        .foregroundStyle(FileNestTheme.warning)
+                                                }
+                                            }
+                                            .font(.system(size: 9))
+                                            .foregroundStyle(.secondary)
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                Button(role: .destructive) { delete(entry.id) } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 11))
+                                }
+                                .buttonStyle(.plain)
+                                .help("Delete Search History")
+                            }
+                            .padding(.horizontal, 14)
+                            .frame(height: 54)
+                            if entry.id != entries.last?.id { Divider().padding(.leading, 42) }
+                        }
+                    }
+                }
+                .frame(maxHeight: 360)
             }
         }
+        .frame(width: 380)
     }
 }
 
@@ -677,6 +911,7 @@ private struct FilterChip: View {
 private enum LibraryTableLayout {
     static let spacing: CGFloat = 14
     static let iconWidth: CGFloat = 38
+    static let nameColumnLeading = iconWidth + spacing
     static let categoryWidth: CGFloat = 90
     static let sizeWidth: CGFloat = 82
     static let modifiedWidth: CGFloat = 150
@@ -805,17 +1040,7 @@ private struct LibraryFileRow: View {
                         .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
                     if let searchMatch {
-                        Text(appState.settings.localizedFormat(
-                            "Confidence %d%%",
-                            searchMatch.confidencePercent
-                        ))
-                            .font(.system(size: 9, weight: .medium, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .frame(height: 18)
-                            .background(FileNestTheme.elevatedSurface, in: Capsule())
-                            .fixedSize()
+                        ConfidenceBadge(confidence: searchMatch.confidence)
                     }
                 }
                 Text(secondaryText)
@@ -856,6 +1081,12 @@ private struct LibraryFileRow: View {
                 ) {
                     startDocumentChat(file)
                 }
+            } else {
+                // Preserve the document-chat slot so Finder and Trash stay aligned
+                // across rows for every file type.
+                Color.clear
+                    .frame(width: 36, height: 30)
+                    .accessibilityHidden(true)
             }
 
             LibraryActionButton(
@@ -913,6 +1144,56 @@ private struct LibraryFileRow: View {
                 isDeleting = false
                 activeAlert = .deleteFailed(message)
             }
+        }
+    }
+}
+
+private struct ConfidenceBadge: View {
+    @EnvironmentObject private var appState: AppState
+    let confidence: Double
+
+    private var style: ConfidenceBadgeStyle {
+        ConfidenceBadgeStyle(confidence: confidence)
+    }
+
+    var body: some View {
+        Text(appState.settings.localizedFormat("Confidence %d%%", confidencePercent))
+            .font(.system(size: 9, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(style.foreground)
+            .padding(.horizontal, 7)
+            .frame(height: 18)
+            .background(style.background, in: Capsule())
+            .overlay {
+                Capsule().stroke(style.foreground.opacity(0.16), lineWidth: 0.5)
+            }
+            .fixedSize()
+            .accessibilityLabel(appState.settings.localizedFormat("Confidence %d%%", confidencePercent))
+    }
+
+    private var confidencePercent: Int {
+        Int((min(max(confidence, 0), 1) * 100).rounded())
+    }
+}
+
+private struct ConfidenceBadgeStyle {
+    let foreground: Color
+    let background: Color
+
+    init(confidence: Double) {
+        switch confidence {
+        case 0.85...:
+            foreground = FileNestTheme.success
+            background = FileNestTheme.success.opacity(0.12)
+        case 0.65..<0.85:
+            foreground = FileNestTheme.accentBlue
+            background = FileNestTheme.accentBlue.opacity(0.12)
+        case 0.40..<0.65:
+            foreground = FileNestTheme.warning
+            background = FileNestTheme.warning.opacity(0.13)
+        default:
+            foreground = Color.red.opacity(0.88)
+            background = Color.red.opacity(0.10)
         }
     }
 }
@@ -1154,34 +1435,49 @@ private struct EmptyLibraryView: View {
 }
 
 private struct OrganizationProgressView: View {
-    let files: [FileRecord]
+    let progress: OrganizationJobProgress?
+    let title: String
+    let subtitle: String
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                ProgressSteps()
-
-                VStack(alignment: .leading, spacing: 12) {
-                    (Text("Files Being Processed") + Text(" (\(files.count))"))
-                        .font(.system(size: 13, weight: .medium))
-
-                    VStack(spacing: 0) {
-                        ForEach(Array(files.enumerated()), id: \.element) { index, file in
-                            ProgressFileRow(file: file, index: index)
-                            if index < files.count - 1 { Divider().padding(.leading, 62) }
-                        }
-                    }
-                    .background(FileNestTheme.elevatedSurface.opacity(0.64))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(FileNestTheme.border, lineWidth: 1)
-                    }
+        VStack(spacing: 18) {
+            Image(systemName: phaseIcon)
+                .font(.system(size: 34, weight: .light))
+                .foregroundStyle(FileNestTheme.accent)
+            Text(LocalizedStringKey(title))
+                .font(.system(size: 18, weight: .semibold))
+            Text(LocalizedStringKey(subtitle))
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+            ProgressView(value: progress?.fractionCompleted ?? 0)
+                .frame(maxWidth: 420)
+            if let progress {
+                Text("\(progress.completed) / \(progress.total)")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 16) {
+                    Label("\(progress.moved)", systemImage: "folder.badge.plus")
+                    Label("\(progress.skipped)", systemImage: "forward.end")
+                    Label("\(progress.failed)", systemImage: "exclamationmark.triangle")
                 }
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
             }
-            .padding(36)
-            .frame(maxWidth: 1000)
-            .frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(36)
+    }
+
+    private var phaseIcon: String {
+        switch progress?.phase {
+        case .waitingForStability: return "clock.arrow.circlepath"
+        case .indexing: return "doc.text.magnifyingglass"
+        case .organizing: return "tray.and.arrow.down"
+        case .paused: return "pause.circle"
+        case .stopping, .stopped: return "stop.circle"
+        case .failed: return "exclamationmark.triangle"
+        case .completed: return "checkmark.circle"
+        default: return "sparkles"
         }
     }
 }

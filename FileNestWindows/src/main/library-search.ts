@@ -2,6 +2,8 @@ import type { FileRecord, LibrarySearchRequest, LibrarySearchResponse, LibrarySe
 import { FileNestDatabase } from './database'
 import { EmbeddingService } from './embedding'
 import { AppLogger } from './logger'
+import { LlmService } from './llm'
+import { resolveSmartSearchPlan, type SmartSearchPlan } from './smart-search-plan'
 
 interface DateIntent {
   from: Date
@@ -13,23 +15,29 @@ export class LibrarySearchService {
   constructor(
     private readonly database: FileNestDatabase,
     private readonly embeddings: EmbeddingService,
-    private readonly logger: AppLogger
+    private readonly logger: AppLogger,
+    private readonly llm = new LlmService()
   ) {}
 
-  async search(request: LibrarySearchRequest, settings: Settings): Promise<LibrarySearchResponse> {
+  async search(request: LibrarySearchRequest, settings: Settings, onIntent?: (intent: string) => void): Promise<LibrarySearchResponse> {
     const query = request.query.trim()
-    const dateIntent = explicitDateIntent(request) ?? parseDateIntent(query)
+    const plan = request.smart && query
+      ? await resolveSmartSearchPlan(query, settings, this.llm, AbortSignal.timeout(30_000), onIntent)
+      : null
+    const dateIntent = dateIntentForPlan(plan) ?? explicitDateIntent(request) ?? parseDateIntent(query)
     const candidates = this.database.listFiles().filter((file) => {
       if (request.category && file.category !== request.category) return false
+      if (plan?.categories.length && !plan.categories.includes(file.category)) return false
       if (!dateIntent) return true
       const value = new Date(request.dateField === 'created' ? file.discoveredAt : file.mtime)
       return value >= dateIntent.from && value <= dateIntent.to
     })
 
     const semantic = new Map<number, { score: number; snippet: string; chunkIndex: number }>()
-    if (query && !isDateOnlyQuery(query)) {
+    const semanticQuery = plan?.semanticQuery.trim() || query
+    if (semanticQuery && !isDateOnlyQuery(query)) {
       try {
-        for (const hit of await this.embeddings.search(query, settings, Math.min(300, Math.max(40, candidates.length * 3)))) {
+        for (const hit of await this.embeddings.search(semanticQuery, settings, Math.min(300, Math.max(40, candidates.length * 3)))) {
           const previous = semantic.get(hit.fileId)
           if (!previous || hit.score > previous.score) semantic.set(hit.fileId, { score: hit.score, snippet: hit.chunkText, chunkIndex: hit.chunkIndex })
         }
@@ -38,36 +46,45 @@ export class LibrarySearchService {
       }
     }
 
-    const terms = searchTerms(query)
+    const terms = [...new Set([...searchTerms(query), ...(plan?.keywords ?? []).flatMap(searchTerms)])]
     const results: LibrarySearchResult[] = []
     for (const file of candidates) {
       const lexical = rankLexical(file, terms)
       const vector = semantic.get(file.id)
       if (query && !dateIntent && !lexical && !vector) continue
       if (query && dateIntent && !isDateOnlyQuery(query) && !lexical && !vector) continue
-      const match = lexical ?? (vector ? { score: vector.score * 55, kind: 'semantic' as const, snippet: vector.snippet } : { score: 1, kind: 'date' as const, snippet: null })
+      const match = lexical ?? (vector ? { score: vector.score * 55, confidence: semanticConfidence(vector.score), kind: 'semantic' as const, snippet: vector.snippet } : { score: 1, confidence: 0.3, kind: 'date' as const, snippet: null })
       results.push({
         file,
         score: match.score + (vector?.score ?? 0) * 15,
+        confidence: Math.max(match.confidence, vector ? semanticConfidence(vector.score) : 0),
         matchKind: match.kind,
         snippet: match.snippet,
         chunkIndex: vector?.chunkIndex ?? null
       })
     }
 
-    sortResults(results, request.sortField ?? (query ? 'relevance' : 'created'), request.sortDirection ?? 'descending')
+    const sortField = request.sortField ?? (query ? 'relevance' : 'created')
+    const sortDirection = plan?.sortNewestFirst && sortField === 'relevance' ? 'descending' : (request.sortDirection ?? 'descending')
+    if (plan?.sortNewestFirst && sortField === 'relevance') {
+      results.sort((left, right) => right.confidence - left.confidence || new Date(right.file.mtime).getTime() - new Date(left.file.mtime).getTime() || right.score - left.score || left.file.name.localeCompare(right.file.name, undefined, { numeric: true }))
+    } else {
+      sortResults(results, sortField, sortDirection)
+    }
     const total = results.length
     const offset = Math.max(0, Math.floor(request.offset ?? 0))
     const limit = Math.min(200, Math.max(1, Math.floor(request.limit ?? 20)))
     return {
       results: results.slice(offset, offset + limit),
       total,
-      interpretedQuery: [query || 'All files', dateIntent?.label].filter(Boolean).join(' · ')
+      interpretedQuery: [query || 'All files', dateIntent?.label].filter(Boolean).join(' · '),
+      intent: plan?.intent ?? null,
+      usedAi: plan?.usedAi ?? false
     }
   }
 }
 
-function rankLexical(file: FileRecord, terms: string[]): { score: number; kind: LibrarySearchResult['matchKind']; snippet: string | null } | null {
+function rankLexical(file: FileRecord, terms: string[]): { score: number; confidence: number; kind: LibrarySearchResult['matchKind']; snippet: string | null } | null {
   if (!terms.length) return null
   const fields: Array<{ kind: LibrarySearchResult['matchKind']; value: string; weight: number }> = [
     { kind: 'filename', value: file.name, weight: 110 },
@@ -76,7 +93,7 @@ function rankLexical(file: FileRecord, terms: string[]): { score: number; kind: 
     { kind: 'path', value: file.path, weight: 60 },
     { kind: 'content', value: file.contentText ?? '', weight: 40 }
   ]
-  let best: { score: number; kind: LibrarySearchResult['matchKind']; snippet: string | null } | null = null
+  let best: { score: number; confidence: number; kind: LibrarySearchResult['matchKind']; snippet: string | null } | null = null
   for (const field of fields) {
     const normalized = field.value.normalize('NFKC').toLocaleLowerCase()
     const matched = terms.filter((term) => normalized.includes(term))
@@ -84,7 +101,8 @@ function rankLexical(file: FileRecord, terms: string[]): { score: number; kind: 
     const coverage = matched.length / terms.length
     const exactBonus = normalized === terms.join(' ') ? 35 : 0
     const score = field.weight * coverage + exactBonus
-    if (!best || score > best.score) best = { score, kind: field.kind, snippet: makeSnippet(field.value, matched[0]) }
+    const confidence = Math.min(1, 0.35 + coverage * 0.45 + Math.min(0.2, field.weight / 550))
+    if (!best || score > best.score) best = { score, confidence, kind: field.kind, snippet: makeSnippet(field.value, matched[0]) }
   }
   return best
 }
@@ -108,11 +126,22 @@ function sortResults(results: LibrarySearchResult[], field: NonNullable<LibraryS
       case 'size': comparison = left.file.size - right.file.size; break
       case 'modified': comparison = new Date(left.file.mtime).getTime() - new Date(right.file.mtime).getTime(); break
       case 'created': comparison = new Date(left.file.discoveredAt).getTime() - new Date(right.file.discoveredAt).getTime(); break
-      case 'relevance': comparison = left.score - right.score; break
+      case 'relevance': comparison = left.confidence - right.confidence || left.score - right.score; break
     }
     if (comparison) return comparison * sign
     return right.file.name.localeCompare(left.file.name, undefined, { numeric: true })
   })
+}
+
+function semanticConfidence(score: number): number {
+  return Math.min(1, Math.max(0, (score + 1) / 2))
+}
+
+function dateIntentForPlan(plan: SmartSearchPlan | null): DateIntent | null {
+  if (!plan?.dateFrom && !plan?.dateTo) return null
+  const from = plan.dateFrom ?? new Date(0)
+  const to = plan.dateTo ?? endOfDay(new Date())
+  return { from, to, label: `${from.toISOString().slice(0, 10)} to ${to.toISOString().slice(0, 10)}` }
 }
 
 function searchTerms(query: string): string[] {

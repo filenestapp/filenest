@@ -108,6 +108,12 @@ struct IndexedDocumentChunk: Identifiable, Equatable, Sendable {
     let pageStart: Int?
     let pageEnd: Int?
     let kind: DocumentChunkKind
+    let parentIndex: Int?
+    let parentText: String?
+    let tokenCount: Int
+    let tokenizerProfile: String
+    let tokenizerVersion: String
+    let tokenCountAccuracy: TokenCountAccuracy
 }
 
 extension FileRecord: FetchableRecord, MutablePersistableRecord {
@@ -141,6 +147,8 @@ struct TokenUsageRecord: Identifiable, Codable, Equatable {
     var inputTokens: Int
     var outputTokens: Int
     var sessionId: Int64?
+    var tokenizerProfile: String = TokenCounter.generationFallbackProfile
+    var tokenCountAccuracy: TokenCountAccuracy = .estimated
 }
 
 extension TokenUsageRecord: FetchableRecord, MutablePersistableRecord {
@@ -150,6 +158,8 @@ extension TokenUsageRecord: FetchableRecord, MutablePersistableRecord {
         case inputTokens = "input_tokens"
         case outputTokens = "output_tokens"
         case sessionId = "session_id"
+        case tokenizerProfile = "tokenizer_profile"
+        case tokenCountAccuracy = "token_count_accuracy"
     }
     mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
 }

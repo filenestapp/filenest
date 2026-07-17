@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { BrowserWindow, ipcMain } from 'electron'
 import type { FileCategory, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 import { AppController } from './app-controller'
 
@@ -20,7 +20,12 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle('indexer:resume', () => controller.resumeIndexing())
   ipcMain.handle('indexer:cancel', () => controller.cancelIndexing())
   ipcMain.handle('files:search', (_event, query: string, category?: FileCategory | null) => controller.searchFiles(query, category))
-  ipcMain.handle('files:smart-search', (_event, request: LibrarySearchRequest) => controller.searchLibrary(request))
+  ipcMain.handle('files:smart-search', (event, request: LibrarySearchRequest) => controller.searchLibrary(request, event.sender))
+  ipcMain.handle('quick-search:submit', (event, query: string) => {
+    controller.requestLibrarySearch(query)
+    BrowserWindow.fromWebContents(event.sender)?.hide()
+  })
+  ipcMain.handle('quick-search:consume', (_event, id: string) => controller.consumeLibrarySearch(id))
   ipcMain.handle('files:open', (_event, path: string) => controller.openFile(path))
   ipcMain.handle('files:show-in-explorer', (_event, path: string) => controller.showInExplorer(path))
   ipcMain.handle('files:trash', (_event, id: number) => controller.trashFile(id))
@@ -35,6 +40,7 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle('chat:create', (_event, path?: string | null) => controller.createChat(path))
   ipcMain.handle('chat:begin', (_event, path?: string | null) => controller.beginChat(path))
   ipcMain.handle('chat:select', (_event, id: number) => controller.selectChat(id))
+  ipcMain.handle('chat:seen', (_event, id: number) => controller.markChatSeen(id))
   ipcMain.handle('chat:delete', (_event, id: number) => controller.deleteChat(id))
   ipcMain.handle('chat:clear', () => controller.clearChats())
   ipcMain.handle('chat:send', (event, request: SendChatRequest) => controller.sendChat(request, event.sender))

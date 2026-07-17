@@ -611,6 +611,69 @@ final class FileWatcherServiceTests: XCTestCase {
         XCTAssertEqual(try store.allFiles().count, 1)
     }
 
+    func testManualOrganizationProcessesOnlyEligibleNonBaselineEntries() async throws {
+        settings.setAutoOrganize(false)
+        let preserved = try createFile(named: "preserved.txt")
+        let embedder = CountingEmbedder(result: [1, 0])
+        let organizer = OrganizerService(
+            store: store,
+            settings: settings,
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid,
+            subfolderResolver: { _ in "Manual" }
+        )
+        let indexer = IndexerService(store: store, settings: settings, embedder: embedder)
+        let watcher = FileWatcherService(
+            store: store,
+            organizer: organizer,
+            indexer: indexer,
+            settings: settings,
+            minimumStableDuration: 0,
+            directoryMinimumStableDuration: 0,
+            pollingInterval: 10
+        )
+        watcher.preserveExistingEntries(in: [sourceDirectory.path])
+
+        let candidate = try createFile(named: "candidate.txt")
+        let transient = try createFile(named: "~$candidate.txt")
+        let result = await watcher.organizePendingEntries(
+            checkpoint: { true },
+            progress: { _ in }
+        )
+
+        XCTAssertEqual(result.total, 1)
+        XCTAssertEqual(result.completed, 1)
+        XCTAssertEqual(result.moved, 1)
+        XCTAssertEqual(result.failed, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: preserved.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: transient.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: candidate.path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: organizedDirectory
+                .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
+                .appendingPathComponent("Manual", isDirectory: true)
+                .appendingPathComponent(candidate.lastPathComponent)
+                .path
+        ))
+    }
+
+    func testOrganizationExecutionGateSupportsPauseResumeAndStop() async {
+        let gate = OrganizationExecutionGate()
+        await gate.pause()
+        let resumedCheckpoint = Task { await gate.waitUntilRunnable() }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        await gate.resume()
+        let didResume = await resumedCheckpoint.value
+        XCTAssertTrue(didResume)
+
+        await gate.pause()
+        let stoppedCheckpoint = Task { await gate.waitUntilRunnable() }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        await gate.stop()
+        let didContinueAfterStop = await stoppedCheckpoint.value
+        XCTAssertFalse(didContinueAfterStop)
+    }
+
     private func makeWatcher(embedder: EmbeddingProvider,
                              pollingInterval: TimeInterval = 10,
                              directoryMinimumStableDuration: TimeInterval = 0) -> FileWatcherService {

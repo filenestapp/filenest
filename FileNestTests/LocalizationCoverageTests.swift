@@ -12,6 +12,7 @@ final class LocalizationCoverageTests: XCTestCase {
             "FileNest/UI/LibraryView.swift",
             "FileNest/UI/FilePreviewView.swift",
             "FileNest/UI/OnboardingView.swift",
+            "FileNest/UI/QuickSearchPanel.swift",
             "FileNest/UI/RulesView.swift",
             "FileNest/UI/SettingsView.swift",
             "FileNest/UI/StatisticsView.swift",
@@ -93,6 +94,90 @@ final class LocalizationCoverageTests: XCTestCase {
             expectedKeys.isSubset(of: localizedKeys),
             "Missing menu-bar status localization keys: \(expectedKeys.subtracting(localizedKeys).sorted())"
         )
+    }
+
+    func testChatEditAndResendControlsHaveTranslations() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let localizationFiles = ["en.lproj", "zh-Hans.lproj"].map {
+            repositoryRoot.appendingPathComponent("FileNest/\($0)/Localizable.strings")
+        }
+        let expectedKeys: Set<String> = [
+            "Edit and resend this question",
+            "Editing your last question",
+        ]
+
+        for localizationFile in localizationFiles {
+            let source = try String(contentsOf: localizationFile, encoding: .utf8)
+            let localizedKeys = stringKeys(in: source)
+            XCTAssertTrue(
+                expectedKeys.isSubset(of: localizedKeys),
+                "Missing chat edit localization keys in \(localizationFile.path): "
+                    + "\(expectedKeys.subtracting(localizedKeys).sorted())"
+            )
+        }
+    }
+
+    func testIndexConfigurationPromptUsesExplicitAppLocalization() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let expectedKeys: Set<String> = [
+            "Index Processing Settings Changed",
+            "Reindex Now",
+            "Skip and Keep Existing Index",
+            "Chunking, document parsing, OCR, indexing scope, or a service endpoint changed. The existing index remains usable. Reindex now, or skip and use the latest settings for new files.",
+        ]
+
+        for localizationFolder in ["en.lproj", "zh-Hans.lproj"] {
+            let localizationURL = repositoryRoot.appendingPathComponent(
+                "FileNest/\(localizationFolder)/Localizable.strings"
+            )
+            let source = try String(contentsOf: localizationURL, encoding: .utf8)
+            let localizedKeys = stringKeys(in: source)
+            XCTAssertTrue(
+                expectedKeys.isSubset(of: localizedKeys),
+                "Missing index prompt localization keys in \(localizationURL.path): "
+                    + "\(expectedKeys.subtracting(localizedKeys).sorted())"
+            )
+        }
+
+        let appSourceURL = repositoryRoot.appendingPathComponent("FileNest/App/FileNestApp.swift")
+        let appSource = try String(contentsOf: appSourceURL, encoding: .utf8)
+        for key in expectedKeys {
+            XCTAssertTrue(
+                appSource.contains("appState.settings.localized(\"\(key)\"")
+                    || appSource.contains("appState.settings.localized(\n                    \"\(key)\""),
+                "Index prompt does not explicitly localize: \(key)"
+            )
+        }
+    }
+
+    func testSystemNotificationMessagesHaveTranslations() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let expectedKeys: Set<String> = [
+            "File Processing Complete",
+            "File Processing Failed",
+            "%@ finished indexing and processing.",
+            "%d files finished indexing and processing.",
+            "FileNest could not process %@. Open FileNest for details.",
+        ]
+
+        for localizationFolder in ["en.lproj", "zh-Hans.lproj"] {
+            let localizationURL = repositoryRoot.appendingPathComponent(
+                "FileNest/\(localizationFolder)/Localizable.strings"
+            )
+            let source = try String(contentsOf: localizationURL, encoding: .utf8)
+            let localizedKeys = stringKeys(in: source)
+            XCTAssertTrue(
+                expectedKeys.isSubset(of: localizedKeys),
+                "Missing notification localization keys in \(localizationURL.path): "
+                    + "\(expectedKeys.subtracting(localizedKeys).sorted())"
+            )
+        }
     }
 
     private func stringKeys(in source: String) -> Set<String> {

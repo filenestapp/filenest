@@ -15,19 +15,14 @@ final class FileSubfolderClassifier {
         let content = String((file.contentText ?? "").prefix(2_000))
         guard !title.isEmpty || !note.isEmpty || !content.isEmpty else { return nil }
 
-        let instructions = """
-        You are a local file topic classifier. The file is already in a primary folder based on its extension. Choose a short, stable, reusable topic subfolder based on its title, user note, and content.
-        Return JSON only: {"folder":"subfolder name"}. Use 2 to 20 characters. Do not include /, \\, :, a file type, or an extension. Do not explain.
-        Prefer reusable topics such as Contracts, Invoices, Project Materials, Meeting Notes, Learning Materials, Product Design, Travel, or Finance. Do not copy the complete file name.
-        """
-        let context = """
-        File name: \(file.name)
-        Title: \(title)
-        User note: \(note)
-        Content: \(content)
-        """
+        let context = PromptCatalog.Organization.subfolderContext(
+            fileName: file.name,
+            title: title,
+            note: note,
+            content: content
+        )
         guard let response = try? await provider.chat([
-            ChatTurn(role: .system, content: instructions),
+            ChatTurn(role: .system, content: PromptCatalog.Organization.subfolderSystem),
             ChatTurn(role: .user, content: context),
         ], context: nil) else { return nil }
         return Self.parse(response)

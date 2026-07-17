@@ -39,6 +39,10 @@ export interface DocumentChunk {
   pageStart: number | null
   pageEnd: number | null
   kind: DocumentChunkKind
+  tokenCount?: number
+  tokenizerProfile?: string
+  tokenizerVersion?: string
+  tokenCountAccuracy?: 'exact' | 'estimated'
 }
 
 export interface Rule {
@@ -117,6 +121,7 @@ export interface Settings {
   thinkingMode: boolean
   appLanguage: AppLanguage
   appearance: Appearance
+  quickSearchShortcut: string
   onboardingCompleted: boolean
   launchAtLogin: boolean
   automaticUpdateChecks: boolean
@@ -151,6 +156,8 @@ export type LibraryDateField = 'created' | 'modified'
 
 export interface LibrarySearchRequest {
   query: string
+  smart?: boolean
+  requestId?: string
   category?: FileCategory | null
   dateField?: LibraryDateField
   dateFrom?: string | null
@@ -164,6 +171,7 @@ export interface LibrarySearchRequest {
 export interface LibrarySearchResult {
   file: FileRecord
   score: number
+  confidence: number
   matchKind: 'filename' | 'title' | 'note' | 'path' | 'content' | 'semantic' | 'date' | 'all'
   snippet: string | null
   chunkIndex: number | null
@@ -173,6 +181,13 @@ export interface LibrarySearchResponse {
   results: LibrarySearchResult[]
   total: number
   interpretedQuery: string
+  intent: string | null
+  usedAi: boolean
+}
+
+export interface LibrarySearchProgressEvent {
+  requestId: string
+  intent: string
 }
 
 export interface AppSnapshot {
@@ -183,6 +198,10 @@ export interface AppSnapshot {
   selectedSessionId: number | null
   pendingChatAttachmentPath: string | null
   messages: ChatMessage[]
+  runningChatSessionIds: number[]
+  completedChatSessionIds: number[]
+  pendingLibrarySearch: { id: string; query: string } | null
+  quickSearchShortcutError: string | null
   statistics: AppStatistics
   watching: boolean
   indexing: boolean
@@ -207,7 +226,8 @@ export interface ChatStreamEvent {
   delta?: string
   message?: ChatMessage
   error?: string
-  stage?: 'searching' | 'retrieved' | 'generating'
+  stage?: 'planning' | 'searching' | 'retrieved' | 'generating'
+  searchIntent?: string
   relatedFileIds?: number[]
 }
 
@@ -238,6 +258,8 @@ export interface FileNestApi {
   cancelIndexing(): Promise<void>
   searchFiles(query: string, category?: FileCategory | null): Promise<FileRecord[]>
   searchLibrary(request: LibrarySearchRequest): Promise<LibrarySearchResponse>
+  submitQuickSearch(query: string): Promise<void>
+  consumeLibrarySearch(id: string): Promise<void>
   openFile(path: string): Promise<string>
   showInExplorer(path: string): Promise<void>
   trashFile(id: number): Promise<void>
@@ -252,11 +274,14 @@ export interface FileNestApi {
   createChat(attachedFilePath?: string | null): Promise<ChatSession>
   beginChat(attachedFilePath?: string | null): Promise<void>
   selectChat(id: number): Promise<ChatMessage[]>
+  markChatSeen(id: number): Promise<void>
   deleteChat(id: number): Promise<void>
   clearChats(): Promise<void>
   sendChat(request: SendChatRequest): Promise<{ requestId: string }>
   cancelChat(requestId: string): Promise<void>
   onChatStream(callback: (event: ChatStreamEvent) => void): () => void
+  onLibrarySearchProgress(callback: (event: LibrarySearchProgressEvent) => void): () => void
+  onQuickSearchFocus(callback: () => void): () => void
   refreshOllama(): Promise<{ reachable: boolean; models: string[] }>
   installOllama(): Promise<void>
   installDocling(): Promise<void>

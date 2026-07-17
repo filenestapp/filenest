@@ -25,11 +25,13 @@ struct ChatProgress: Equatable {
     enum Phase: Equatable {
         case planningSearch
         case queryingIndex
+        case reranking
         case matchesFound
         case readingFile
         case fileReady
         case analyzing
         case thinking
+        case verifying
     }
 
     let phase: Phase
@@ -40,7 +42,7 @@ struct ChatProgress: Equatable {
     var searchIntent = ""
 }
 
-enum LibrarySearchMatchKind: Equatable {
+enum LibrarySearchMatchKind: String, Codable, Equatable {
     case fileName
     case title
     case note
@@ -49,6 +51,7 @@ enum LibrarySearchMatchKind: Equatable {
     case date
     case filter
     case semantic
+    case entity
     case hybrid
 
     var label: String {
@@ -61,6 +64,7 @@ enum LibrarySearchMatchKind: Equatable {
         case .date: return "Date Match"
         case .filter: return "Filter Match"
         case .semantic: return "Semantic Match"
+        case .entity: return "Exact Entity Match"
         case .hybrid: return "Hybrid Match"
         }
     }
@@ -91,18 +95,126 @@ struct LibrarySearchResult: Identifiable, Equatable {
     }
 }
 
-struct SmartLibrarySearchPlan: Equatable {
+struct SmartLibrarySearchPlan: Codable, Equatable {
     let semanticQuery: String
     let keywords: [String]
+    let exactName: String?
+    let fileExtensions: Set<String>
     let categories: Set<FileCategory>
+    let folderTerms: [String]
+    let itemKind: LibrarySearchItemKind
+    let dateField: LibrarySearchDateField
     let dateInterval: DateInterval?
-    let sortNewestFirst: Bool
+    let minimumSizeBytes: Int64?
+    let maximumSizeBytes: Int64?
+    let hasNote: Bool?
+    let isIndexed: Bool?
+    let sort: LibrarySearchSort
+
+    var sortNewestFirst: Bool { sort == .newest }
+
+    var hasStructuredFilters: Bool {
+        exactName != nil
+            || !fileExtensions.isEmpty
+            || !categories.isEmpty
+            || !folderTerms.isEmpty
+            || itemKind != .any
+            || dateInterval != nil
+            || minimumSizeBytes != nil
+            || maximumSizeBytes != nil
+            || hasNote != nil
+            || isIndexed != nil
+    }
+
+    var hasContentIntent: Bool {
+        !semanticQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !keywords.isEmpty
+            || exactName != nil
+    }
+}
+
+enum LibrarySearchItemKind: String, Codable, Equatable {
+    case any
+    case file
+    case directory
+}
+
+enum LibrarySearchDateField: String, Codable, Equatable {
+    case modified
+    case added
+    case organized
+
+    func date(for file: FileRecord) -> Date? {
+        switch self {
+        case .modified: return file.mtime
+        case .added: return file.addedAt
+        case .organized: return file.organizedAt
+        }
+    }
+}
+
+enum LibrarySearchSort: String, Codable, Equatable {
+    case relevance
+    case newest
+    case oldest
+    case largest
+    case smallest
 }
 
 struct SmartLibrarySearchResponse: Equatable {
     let results: [LibrarySearchResult]
     let plan: SmartLibrarySearchPlan
     let usedAI: Bool
+}
+
+struct CachedLibrarySearch: Equatable {
+    let results: [LibrarySearchResult]
+    let smartPlan: SmartLibrarySearchPlan?
+    let usedAI: Bool
+}
+
+struct CachedLibrarySearchPayload: Codable, Equatable {
+    let results: [CachedLibrarySearchResult]
+    let smartPlan: SmartLibrarySearchPlan?
+    let usedAI: Bool
+}
+
+struct CachedLibrarySearchResult: Codable, Equatable {
+    let fileID: Int64?
+    let path: String
+    let score: Double
+    let confidence: Double
+    let matchKind: LibrarySearchMatchKind
+    let snippet: String?
+    let sectionPath: [String]
+    let pageStart: Int?
+    let pageEnd: Int?
+
+    init(_ result: LibrarySearchResult) {
+        fileID = result.file.id
+        path = result.file.path
+        score = result.score
+        confidence = result.confidence
+        matchKind = result.matchKind
+        snippet = result.snippet
+        sectionPath = result.sectionPath
+        pageStart = result.pageStart
+        pageEnd = result.pageEnd
+    }
+}
+
+struct LibrarySearchHistoryEntry: Identifiable, Equatable, Sendable {
+    let id: Int64
+    let query: String
+    let isSmartSearch: Bool
+    let updatedAt: Date
+    let resultCount: Int
+    let hasValidCache: Bool
+}
+
+struct LibrarySearchCacheRecord: Equatable, Sendable {
+    let revision: Int64
+    let payload: Data
 }
 
 private struct LibrarySearchExecution {
@@ -114,18 +226,36 @@ private struct SmartSearchPlanPayload: Decodable {
     let intent: String?
     let semanticQuery: String?
     let keywords: [String]?
+    let exactName: String?
+    let fileExtensions: [String]?
     let categories: [String]?
+    let folderTerms: [String]?
+    let itemKind: String?
+    let dateField: String?
     let dateFrom: String?
     let dateTo: String?
+    let minimumSizeBytes: Int64?
+    let maximumSizeBytes: Int64?
+    let hasNote: Bool?
+    let isIndexed: Bool?
     let sort: String?
 
     enum CodingKeys: String, CodingKey {
         case intent
         case semanticQuery = "semantic_query"
         case keywords
+        case exactName = "exact_name"
+        case fileExtensions = "file_extensions"
         case categories
+        case folderTerms = "folder_terms"
+        case itemKind = "item_kind"
+        case dateField = "date_field"
         case dateFrom = "date_from"
         case dateTo = "date_to"
+        case minimumSizeBytes = "size_min_bytes"
+        case maximumSizeBytes = "size_max_bytes"
+        case hasNote = "has_note"
+        case isIndexed = "is_indexed"
         case sort
     }
 }
@@ -138,6 +268,8 @@ private enum SmartSearchPlanError: Error {
 final class ChatService {
     private static let attachedChunkLimit = 6
     private static let attachedContextCharacterLimit = 24_000
+    private static let semanticScoreFloor: Float = 0.38
+    private static let semanticScoreWindow: Float = 0.18
     private let store: SQLiteStore
     private let settings: AppSettings
     private let providedEmbedder: EmbeddingProvider?
@@ -214,6 +346,31 @@ final class ChatService {
             messages[index].relatedFiles = resolveRelated(from: messages[index])
         }
         return messages
+    }
+
+    /// Updates the latest editable user question without inserting another message.
+    /// The following assistant answer can then be replaced through `retryAnswer`.
+    @discardableResult
+    func editUserMessage(id: Int64, sessionId: Int64, content rawContent: String) -> ChatMessage? {
+        let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty,
+              var message = loadHistory(sessionId: sessionId).first(where: {
+                  $0.id == id && $0.role == ChatRole.user.rawValue
+              }) else { return nil }
+        message.content = content
+        do {
+            try store.updateChatMessage(message)
+            updateSessionAfterQuestion(sessionId: sessionId, question: content)
+            return message
+        } catch {
+            AppLogService.shared.write(
+                "chat user message edit failed",
+                category: .chat,
+                level: .error,
+                metadata: ["session_id": "\(sessionId)", "message_id": "\(id)", "error": error.localizedDescription]
+            )
+            return nil
+        }
     }
 
     // MARK: - Streaming chat
@@ -318,7 +475,14 @@ final class ChatService {
                 let related = await relatedFiles(
                     for: question,
                     attachedFilePath: attachedFilePath,
-                    smartSearchPlan: smartSearchPlan
+                    smartSearchPlan: smartSearchPlan,
+                    onReranking: {
+                        continuation.yield(.progress(ChatProgress(
+                            phase: .reranking,
+                            scope: .library,
+                            searchIntent: searchIntent
+                        )))
+                    }
                 )
                 continuation.yield(.progress(ChatProgress(
                     phase: isFileChat ? .fileReady : .matchesFound,
@@ -407,6 +571,16 @@ final class ChatService {
                 if fullReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     fullReply = settings.localized("The model returned no content. Try again or switch models.")
                 }
+                if providerCompleted, !isFileChat, !related.files.isEmpty {
+                    continuation.yield(.progress(ChatProgress(
+                        phase: .verifying,
+                        scope: .library,
+                        matchedFileCount: related.files.count,
+                        matchedFiles: related.files,
+                        searchIntent: searchIntent
+                    )))
+                    fullReply = verifiedRAGAnswer(fullReply, retrievalContext: related.context)
+                }
 
                 let totalResponseDuration = Date().timeIntervalSince(responseStartedAt)
                 let inputText = requestTurns.map(\.content).joined(separator: "\n") + "\n" + requestContext
@@ -464,6 +638,40 @@ final class ChatService {
         return settings.cloudContextWindowTokens
     }
 
+    private func verifiedRAGAnswer(_ answer: String, retrievalContext: String) -> String {
+        guard let expression = try? NSRegularExpression(pattern: #"\[F\d+(?::P\d+)?\]"#) else {
+            return answer
+        }
+        let contextRange = NSRange(retrievalContext.startIndex..<retrievalContext.endIndex, in: retrievalContext)
+        let validIDs = Set(expression.matches(in: retrievalContext, range: contextRange).compactMap { match in
+            Range(match.range, in: retrievalContext).map { String(retrievalContext[$0]) }
+        })
+        let answerRange = NSRange(answer.startIndex..<answer.endIndex, in: answer)
+        let answerIDs = expression.matches(in: answer, range: answerRange).compactMap { match in
+            Range(match.range, in: answer).map { String(answer[$0]) }
+        }
+        var verified = answer
+        let invalidIDs = Set(answerIDs).subtracting(validIDs)
+        for invalidID in invalidIDs { verified = verified.replacingOccurrences(of: invalidID, with: "") }
+        let supportedCount = answerIDs.filter(validIDs.contains).count
+        let hasSpecificFactualClaim = verified.range(
+            of: #"(?:\d{2,}|[$€£¥]\s*\d|\b(?:SGD|USD|EUR|CNY|RMB)\s*\d)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        if supportedCount == 0, hasSpecificFactualClaim {
+            verified += "\n\n> " + settings.localized(
+                "Evidence note: this answer did not include a verifiable source citation. Review the matched files before relying on specific details."
+            )
+        }
+        AppLogService.shared.write(
+            "RAG answer citation validation completed",
+            category: .vectorSearch,
+            level: invalidIDs.isEmpty && supportedCount > 0 ? .debug : .warning,
+            metadata: ["supported": "\(supportedCount)", "invalid": "\(invalidIDs.count)"]
+        )
+        return verified
+    }
+
     /// Retained for service tests and non-streaming callers; internally it still uses the default streaming path.
     func ask(_ question: String) async -> ChatMessage {
         let session = loadSessions().first ?? createSession()
@@ -499,13 +707,19 @@ final class ChatService {
         try? store.clearAllChats()
     }
 
-    func searchLibrary(_ rawQuery: String, limit: Int = 200) async -> [LibrarySearchResult] {
-        await executeLibrarySearch(rawQuery, limit: limit, smartPlan: nil)
+    func searchLibrary(
+        _ rawQuery: String,
+        limit: Int = 200,
+        managedRootPath: String? = nil
+    ) async -> [LibrarySearchResult] {
+        let results = await executeLibrarySearch(rawQuery, limit: limit, smartPlan: nil)
+        return Self.existingManagedResults(results, rootPath: managedRootPath)
     }
 
     func smartSearchLibrary(
         _ rawQuery: String,
         limit: Int = 200,
+        managedRootPath: String? = nil,
         onIntentUpdate: ((String) -> Void)? = nil
     ) async -> SmartLibrarySearchResponse {
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -521,8 +735,28 @@ final class ChatService {
             return SmartLibrarySearchResponse(results: [], plan: fallbackPlan, usedAI: false)
         }
         let plan = resolved.plan
-        let results = await executeLibrarySearch(query, limit: limit, smartPlan: plan)
+        let results = Self.existingManagedResults(
+            await executeLibrarySearch(query, limit: limit, smartPlan: plan),
+            rootPath: managedRootPath
+        )
         return SmartLibrarySearchResponse(results: results, plan: plan, usedAI: resolved.usedAI)
+    }
+
+    private static func existingManagedResults(
+        _ results: [LibrarySearchResult],
+        rootPath: String?
+    ) -> [LibrarySearchResult] {
+        guard let rootPath else { return results }
+        let canonicalRoot = canonicalPath(rootPath)
+        return results.filter { result in
+            let path = result.file.path
+            return canonicalPath(path).hasPrefix(canonicalRoot + "/")
+                && FileManager.default.fileExists(atPath: path)
+        }
+    }
+
+    private static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
     private func resolvedSmartSearchPlan(
@@ -561,7 +795,8 @@ final class ChatService {
                 lastIntent = intent
                 onIntentUpdate?(intent)
             }
-            return (try Self.decodeSmartSearchPlan(reply, fallbackQuery: query), true)
+            let decoded = try Self.decodeSmartSearchPlan(reply, fallbackQuery: query)
+            return (Self.reconciledSmartSearchPlan(decoded, fallback: fallbackPlan, query: query), true)
         } catch {
             return (fallbackPlan, false)
         }
@@ -584,18 +819,25 @@ final class ChatService {
         _ rawQuery: String,
         limit: Int,
         smartPlan: SmartLibrarySearchPlan?,
-        sortByConfidence: Bool = false
+        sortByConfidence: Bool = false,
+        onReranking: (() -> Void)? = nil
     ) async -> LibrarySearchExecution {
+        let searchStartedAt = Date()
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, limit > 0 else {
             return LibrarySearchExecution(results: [], semanticHitsByFile: [:])
         }
 
         let semanticQuery = smartPlan?.semanticQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        let effectiveSemanticQuery = semanticQuery.flatMap { $0.isEmpty ? nil : $0 } ?? query
+        let effectiveSemanticQuery = semanticQuery.flatMap { $0.isEmpty ? nil : $0 }
+            ?? Self.contentSearchQuery(in: query)
+        // Keep model paraphrases in vector retrieval only. Lexical ranking must use terms
+        // grounded in the user's original wording, otherwise translated grammar can become evidence.
         let terms = Self.librarySearchTerms(
-            query + " " + effectiveSemanticQuery,
-            additionalTerms: smartPlan?.keywords ?? []
+            query,
+            additionalTerms: (smartPlan?.keywords ?? [])
+                + [smartPlan?.exactName].compactMap { $0 }
+                + (smartPlan?.folderTerms ?? [])
         )
         let relativeDateIntent = smartPlan?.dateInterval.map {
             LibraryRelativeDateIntent(interval: $0, contentYears: [])
@@ -616,10 +858,42 @@ final class ChatService {
 
         var semanticByID = [Int64: VectorSearchHit]()
         var semanticHitsByFile = [Int64: [VectorSearchHit]]()
-        if let queryVector = try? await activeEmbedder().embed(effectiveSemanticQuery), !queryVector.isEmpty {
+        var acceptedSemanticCount = 0
+        var effectiveSemanticThreshold: Float?
+        let entityTerms = IndexerService.extractedEntityTerms(from: query)
+        let entityHits = (try? store.entityChunkMatches(
+            terms: entityTerms,
+            limit: max(20, min(limit * 2, 60))
+        )) ?? []
+        var entityByID = [Int64: VectorSearchHit]()
+        for hit in entityHits {
+            semanticHitsByFile[hit.fileId, default: []].append(hit)
+            if hit.score > (entityByID[hit.fileId]?.score ?? -.infinity) {
+                entityByID[hit.fileId] = hit
+            }
+        }
+        if !effectiveSemanticQuery.isEmpty,
+           let queryVector = try? await activeEmbedder().embed(effectiveSemanticQuery), !queryVector.isEmpty {
             let vectorStore = providedVectorStore ?? AppStateIndexerProxy.shared.vectorStore
-            let hits = await vectorStore.searchChunks(queryVector, k: max(80, min(limit * 2, 240)))
-            for hit in hits where hit.score.isFinite {
+            let hits = await vectorStore.searchChunks(queryVector, k: max(40, min(limit * 6, 120)))
+            let dynamicallyAccepted: [VectorSearchHit]
+            if relativeDateIntent != nil || !Self.requestedYears(in: query).isEmpty {
+                dynamicallyAccepted = hits
+                    .filter { $0.score.isFinite && $0.score >= Self.semanticScoreFloor }
+                    .sorted { $0.score > $1.score }
+            } else {
+                dynamicallyAccepted = Self.dynamicallyAcceptedSemanticHits(hits)
+            }
+            acceptedSemanticCount = dynamicallyAccepted.count
+            effectiveSemanticThreshold = dynamicallyAccepted.map(\.score).min()
+            if settings.makeRerankingProvider() != nil, dynamicallyAccepted.count > 1 {
+                onReranking?()
+            }
+            let acceptedHits = await rerankedSemanticHits(
+                dynamicallyAccepted,
+                query: effectiveSemanticQuery
+            )
+            for hit in acceptedHits {
                 semanticHitsByFile[hit.fileId, default: []].append(hit)
                 if hit.score > (semanticByID[hit.fileId]?.score ?? -.infinity) {
                     semanticByID[hit.fileId] = hit
@@ -627,14 +901,17 @@ final class ChatService {
             }
         }
 
-        var temporalByID = [Int64: FileRecord]()
-        if isRelativeDateOnlyQuery || smartPlan?.dateInterval != nil || smartPlan?.categories.isEmpty == false {
+        var structuredByID = [Int64: FileRecord]()
+        if isRelativeDateOnlyQuery || smartPlan?.hasStructuredFilters == true {
             for file in (try? store.allFiles()) ?? [] {
-                let matchesDate = relativeDateIntent?.contains(file.mtime) ?? true
-                let matchesCategory = smartPlan?.categories.isEmpty != false
-                    || smartPlan?.categories.contains(file.categoryEnum) == true
-                guard matchesDate, matchesCategory, let id = file.id else { continue }
-                temporalByID[id] = file
+                let date: Date? = smartPlan == nil
+                    ? file.mtime
+                    : smartPlan?.dateField.date(for: file)
+                let matchesDate = date.map { relativeDateIntent?.contains($0) ?? true } ?? false
+                guard matchesDate,
+                      smartPlan.map({ Self.matchesStructuredPlan(file, plan: $0) }) ?? true,
+                      let id = file.id else { continue }
+                structuredByID[id] = file
             }
         }
 
@@ -654,23 +931,43 @@ final class ChatService {
             }
             .enumerated()
             .map { ($0.element.key, $0.offset + 1) })
+        let entityRank = Dictionary(uniqueKeysWithValues: entityByID
+            .sorted { lhs, rhs in
+                lhs.value.score == rhs.value.score
+                    ? lhs.key < rhs.key
+                    : lhs.value.score > rhs.value.score
+            }
+            .enumerated()
+            .map { ($0.element.key, $0.offset + 1) })
 
         let candidateIDs = Set(lexicalByID.keys)
             .union(semanticByID.keys)
-            .union(temporalByID.keys)
+            .union(entityByID.keys)
+            .union(structuredByID.keys)
         let results = candidateIDs.compactMap { fileID -> LibrarySearchResult? in
             guard let file = lexicalByID[fileID]?.file
-                ?? temporalByID[fileID]
+                ?? structuredByID[fileID]
                 ?? (try? store.file(id: fileID)) else { return nil }
             let lexical = lexicalByID[fileID]
             let semantic = semanticByID[fileID]
+            let entity = entityByID[fileID]
+            let isExactNameMatch = smartPlan?.exactName.map {
+                Self.fileName(file.name, equals: $0)
+            } ?? false
             var score = 0.0
-            if let rank = lexicalRank[fileID] { score += 0.62 / Double(60 + rank) }
-            if let rank = semanticRank[fileID] { score += 0.38 / Double(60 + rank) }
-            if lexical?.score ?? 0 >= 120 { score += 0.02 }
+            if let rank = lexicalRank[fileID] { score += 0.36 / Double(60 + rank) }
+            if let rank = semanticRank[fileID] { score += 0.44 / Double(60 + rank) }
+            if let rank = entityRank[fileID] { score += 0.20 / Double(60 + rank) }
+            if isExactNameMatch { score += 0.10 }
 
             let matchKind: LibrarySearchMatchKind
-            if lexical != nil, semantic != nil {
+            if isExactNameMatch || lexical?.confidence == 1 {
+                matchKind = .fileName
+            } else if entity != nil, lexical != nil || semantic != nil {
+                matchKind = .hybrid
+            } else if entity != nil {
+                matchKind = .entity
+            } else if lexical != nil, semantic != nil {
                 matchKind = .hybrid
             } else if let lexical {
                 matchKind = lexical.kind
@@ -679,15 +976,20 @@ final class ChatService {
             } else {
                 matchKind = relativeDateIntent != nil ? .date : .filter
             }
-            let semanticSnippet = semantic?.chunkText.flatMap {
+            let semanticSnippet = (entity ?? semantic)?.chunkText.flatMap {
                 Self.compactExcerpt($0, terms: terms)
             }
             let confidence = max(
                 max(
-                    lexical?.confidence ?? 0,
-                    semantic.map { Self.semanticConfidence(for: $0) } ?? 0
+                    max(
+                        isExactNameMatch ? 1 : (lexical?.confidence ?? 0),
+                        semantic.map { Self.semanticConfidence(for: $0) } ?? 0
+                    ),
+                    entity == nil ? 0 : 0.98
                 ),
-                lexical == nil && semantic == nil ? 0.30 : 0
+                lexical == nil && semantic == nil && entity == nil
+                    ? Self.structuredOnlyConfidence(for: smartPlan)
+                    : 0
             )
             return LibrarySearchResult(
                 file: file,
@@ -695,23 +997,15 @@ final class ChatService {
                 confidence: confidence,
                 matchKind: matchKind,
                 snippet: lexical?.snippet ?? semanticSnippet,
-                sectionPath: semantic?.sectionPath ?? [],
-                pageStart: semantic?.pageStart,
-                pageEnd: semantic?.pageEnd
+                sectionPath: (entity ?? semantic)?.sectionPath ?? [],
+                pageStart: (entity ?? semantic)?.pageStart,
+                pageEnd: (entity ?? semantic)?.pageEnd
             )
         }
 
         let filteredResults = results.filter { result in
             guard let smartPlan else { return true }
-            if !smartPlan.categories.isEmpty,
-               !smartPlan.categories.contains(result.file.categoryEnum) {
-                return false
-            }
-            if let interval = smartPlan.dateInterval,
-               !(result.file.mtime >= interval.start && result.file.mtime < interval.end) {
-                return false
-            }
-            return true
+            return Self.matchesStructuredPlan(result.file, plan: smartPlan)
         }
         let requestedYears = Self.requestedYears(in: query)
         let sortedResults = Array(filteredResults.sorted { lhs, rhs in
@@ -743,8 +1037,16 @@ final class ChatService {
             if sortByConfidence, lhs.confidence != rhs.confidence {
                 return lhs.confidence > rhs.confidence
             }
-            if smartPlan?.sortNewestFirst == true, sortByConfidence {
-                if lhs.file.mtime != rhs.file.mtime { return lhs.file.mtime > rhs.file.mtime }
+            if sortByConfidence, let smartPlan {
+                let lhsDate = smartPlan.dateField.date(for: lhs.file) ?? .distantPast
+                let rhsDate = smartPlan.dateField.date(for: rhs.file) ?? .distantPast
+                switch smartPlan.sort {
+                case .newest where lhsDate != rhsDate: return lhsDate > rhsDate
+                case .oldest where lhsDate != rhsDate: return lhsDate < rhsDate
+                case .largest where lhs.file.size != rhs.file.size: return lhs.file.size > rhs.file.size
+                case .smallest where lhs.file.size != rhs.file.size: return lhs.file.size < rhs.file.size
+                default: break
+                }
             } else if smartPlan?.sortNewestFirst == true {
                 func relevanceTier(_ result: LibrarySearchResult) -> Int {
                     guard let fileID = result.file.id else { return 0 }
@@ -752,9 +1054,11 @@ final class ChatService {
                         return semanticByID[fileID] == nil ? 0 : 1
                     }
                     switch lexical.rankingKind {
-                    case .fileName, .title: return 3
-                    case .note, .content: return 2
-                    case .path: return 1
+                    case .content: return 5
+                    case .note: return 4
+                    case .fileName: return lexical.confidence == 1 ? 6 : 3
+                    case .path: return 3
+                    case .title: return 2
                     default: return 0
                     }
                 }
@@ -766,6 +1070,18 @@ final class ChatService {
             if lhs.score != rhs.score { return lhs.score > rhs.score }
             return lhs.file.name.localizedStandardCompare(rhs.file.name) == .orderedAscending
         }.prefix(limit))
+        try? store.recordRAGSearchTrace(
+            query: query,
+            semanticQuery: effectiveSemanticQuery,
+            lexicalCandidates: lexicalByID.count,
+            semanticCandidates: acceptedSemanticCount,
+            entityCandidates: entityByID.count,
+            fusedCandidates: candidateIDs.count,
+            returnedResults: sortedResults.count,
+            semanticThreshold: effectiveSemanticThreshold,
+            reranker: settings.makeRerankingProvider()?.name,
+            duration: Date().timeIntervalSince(searchStartedAt)
+        )
         return LibrarySearchExecution(
             results: sortedResults,
             semanticHitsByFile: semanticHitsByFile
@@ -782,7 +1098,8 @@ final class ChatService {
 
     private func relatedFiles(for question: String,
                               attachedFilePath: String?,
-                              smartSearchPlan: SmartLibrarySearchPlan?) async -> (files: [FileRecord], context: String) {
+                              smartSearchPlan: SmartLibrarySearchPlan?,
+                              onReranking: (() -> Void)? = nil) async -> (files: [FileRecord], context: String) {
         var files: [FileRecord] = []
         var contextParts: [String] = []
         var matchedChunks: [Int64: [VectorSearchHit]] = [:]
@@ -808,7 +1125,7 @@ final class ChatService {
                 ? await doclingProcessor.process(
                     url: url,
                     ext: url.pathExtension,
-                    maxTokens: settings.vectorChunkWords,
+                    maxTokens: settings.chunkTokenLimit,
                     pdfAnalysis: analysis,
                     disableBuiltInOCR: settings.ocrSource != AppSettings.OCRSource.disabled.rawValue
                 )
@@ -842,7 +1159,9 @@ final class ChatService {
         let execution = await executeLibrarySearchDetails(
             question,
             limit: settings.ragResultLimit,
-            smartPlan: smartSearchPlan
+            smartPlan: smartSearchPlan,
+            sortByConfidence: true,
+            onReranking: onReranking
         )
         files = execution.results.map(\.file)
 
@@ -851,10 +1170,13 @@ final class ChatService {
         var seenChunkKeys = Set<String>()
         for fileID in selectedFileIDs {
             for hit in execution.semanticHitsByFile[fileID] ?? [] {
-                let key = "\(hit.fileId):\(hit.chunkIndex ?? -1)"
+                let key = "\(hit.fileId):p\(hit.parentIndex ?? hit.chunkIndex ?? -1)"
                 if seenChunkKeys.insert(key).inserted {
                     matchedChunks[hit.fileId, default: []].append(hit)
                 }
+                // New indexes return the complete parent section directly. Neighbor expansion
+                // remains only for legacy indexes that do not yet have a parent mapping.
+                guard hit.parentText == nil else { continue }
                 guard let chunkIndex = hit.chunkIndex else { continue }
                 let neighbors = await vectorStore.neighboringChunks(
                     fileId: hit.fileId,
@@ -862,14 +1184,17 @@ final class ChatService {
                     radius: 1
                 )
                 for neighbor in neighbors {
-                    let neighborKey = "\(neighbor.fileId):\(neighbor.chunkIndex ?? -1)"
+                    let neighborKey = "\(neighbor.fileId):p\(neighbor.parentIndex ?? neighbor.chunkIndex ?? -1)"
                     if seenChunkKeys.insert(neighborKey).inserted {
                         matchedChunks[neighbor.fileId, default: []].append(neighbor)
                     }
                 }
             }
         }
-        contextParts.append(buildLibraryContext(from: files, matchedChunks: matchedChunks))
+        contextParts.append(buildLibraryContext(
+            from: execution.results,
+            matchedChunks: matchedChunks
+        ))
         return (files, contextParts.joined(separator: "\n\n"))
     }
 
@@ -965,12 +1290,99 @@ final class ChatService {
             candidates.append(String(normalizedQuestion[range]))
             return true
         }
-        if normalizedQuestion.contains("\u{53D1}\u{7968}") || normalizedQuestion.contains("invoice") {
-            candidates.append(contentsOf: ["\u{53D1}\u{7968}", "invoice", "invoices", "inv-"])
+        let tagger = NLTagger(tagSchemes: [.lemma])
+        tagger.string = normalizedQuestion
+        tagger.enumerateTags(
+            in: normalizedQuestion.startIndex..<normalizedQuestion.endIndex,
+            unit: .word,
+            scheme: .lemma
+        ) { tag, range in
+            if let tag { candidates.append(tag.rawValue) }
+            candidates.append(String(normalizedQuestion[range]))
+            return true
         }
         var seen = Set<String>()
         return candidates
             .filter { $0.count >= 2 && !stopWords.contains($0) && seen.insert($0).inserted }
+    }
+
+    private static let genericStructuralWords: Set<String> = [
+        "file", "files", "document", "documents", "folder", "folders", "directory", "directories",
+        "image", "images", "picture", "pictures", "photo", "photos", "video", "videos", "audio",
+        "archive", "archives", "code", "source", "\u{6587}\u{4EF6}", "\u{6587}\u{6863}",
+        "\u{6587}\u{4EF6}\u{5939}", "\u{56FE}\u{7247}", "\u{7167}\u{7247}", "\u{89C6}\u{9891}",
+        "\u{97F3}\u{9891}", "\u{538B}\u{7F29}\u{5305}", "\u{4EE3}\u{7801}", "\u{6E90}\u{7801}",
+    ]
+
+    private static func contentSearchQuery(in query: String) -> String {
+        contentSearchTerms(in: query).joined(separator: " ")
+    }
+
+    /// Derives content evidence from the user query while removing terms that are
+    /// already represented by deterministic filters such as dates and extensions.
+    private static func contentSearchTerms(in query: String) -> [String] {
+        let stripped = strippingStructuralPhrases(from: query)
+        return uniqueSearchTerms(relevanceTerms(in: stripped).filter(isLexicalEvidenceTerm))
+    }
+
+    private static func strippingStructuralPhrases(from query: String) -> String {
+        var output = query.lowercased()
+        let phrases = relativeDatePhrases + Array(genericStructuralWords)
+        for phrase in phrases.sorted(by: { $0.count > $1.count }) {
+            output = output.replacingOccurrences(of: phrase, with: " ")
+        }
+        return output
+    }
+
+    private static func containsStructuralQueryMarker(in value: String) -> Bool {
+        let normalized = value.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return false }
+        if relativeDatePhrases.contains(where: normalized.contains) { return true }
+        if recognizedFileExtensions
+            .filter({ $0.count >= 2 })
+            .contains(where: normalized.contains) {
+            return true
+        }
+        if ["\u{6587}\u{4EF6}", "\u{6587}\u{6863}", "\u{6587}\u{4EF6}\u{5939}", "\u{56FE}\u{7247}",
+            "\u{89C6}\u{9891}", "\u{97F3}\u{9891}", "\u{4EE3}\u{7801}", "\u{538B}\u{7F29}\u{5305}"].contains(where: normalized.contains) {
+            return true
+        }
+        let tokens = Set(normalized.components(separatedBy: CharacterSet.alphanumerics.inverted))
+        return !tokens.isDisjoint(with: genericStructuralWords)
+            || !tokens.isDisjoint(with: recognizedFileExtensions)
+    }
+
+    private static func isLexicalEvidenceTerm(_ rawValue: String) -> Bool {
+        let value = rawValue.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.count >= 2,
+              !containsStructuralQueryMarker(in: value) else { return false }
+        let tagger = NLTagger(tagSchemes: [.lexicalClass])
+        tagger.string = value
+        let lexicalClass = tagger.tag(
+            at: value.startIndex,
+            unit: .word,
+            scheme: .lexicalClass
+        ).0?.rawValue.lowercased()
+        let nonEvidenceClasses: Set<String> = [
+            "preposition", "conjunction", "determiner", "pronoun", "particle", "interjection",
+        ]
+        return lexicalClass.map { !nonEvidenceClasses.contains($0) } ?? true
+    }
+
+    private static func isExactFileNameCandidate(_ rawValue: String) -> Bool {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ext = URL(fileURLWithPath: value).pathExtension.lowercased()
+        return value.contains(".") && recognizedFileExtensions.contains(ext)
+    }
+
+    private static func uniqueSearchTerms(_ terms: [String]) -> [String] {
+        var seen = Set<String>()
+        return terms.compactMap { rawValue in
+            let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty, seen.insert(value.lowercased()).inserted else { return nil }
+            return value
+        }
     }
 
     static func prefersRecentFiles(in question: String) -> Bool {
@@ -992,24 +1404,7 @@ final class ChatService {
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "yyyy-MM-dd"
         let today = formatter.string(from: now)
-        return """
-        Convert the user's file-search request into one strict JSON object. Today is \(today).
-        Return JSON only. Put the intent field first, using this schema:
-        {
-          "intent": "one concise user-facing sentence describing what will be searched and prioritized",
-          "semantic_query": "content meaning to embed, without date, type, or sorting instructions",
-          "keywords": ["exact identifier or lexical term"],
-          "categories": ["documents|images|videos|audio|code|archives|other"],
-          "date_from": "YYYY-MM-DD or null",
-          "date_to": "YYYY-MM-DD or null",
-          "sort": "relevance|newest"
-        }
-        Resolve relative dates such as today, yesterday, this week, last month, this year, and their Chinese equivalents into absolute inclusive dates.
-        Write intent in the same language as the user's request. Keep it to one sentence without line breaks or quotation marks.
-        Preserve distinctive names, invoice numbers, vehicle numbers, and other identifiers in keywords. Use at most 8 concise keywords.
-        Use an empty category list when no type was requested. Use null for both dates when no date was requested.
-        Do not answer the request and do not include Markdown fences.
-        """
+        return PromptCatalog.Search.planner(today: today)
     }
 
     static func streamedSearchIntent(in response: String) -> String? {
@@ -1072,6 +1467,17 @@ final class ChatService {
         let categories = Set((payload.categories ?? []).compactMap {
             FileCategory(rawValue: $0.lowercased())
         })
+        let rawExactName = payload.exactName?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let exactName = rawExactName.isEmpty ? nil : rawExactName
+        let fileExtensions = Set((payload.fileExtensions ?? []).compactMap(normalizedExtension))
+        var seenFolders = Set<String>()
+        let folderTerms = (payload.folderTerms ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seenFolders.insert($0.lowercased()).inserted }
+            .prefix(4)
+        let itemKind = LibrarySearchItemKind(rawValue: payload.itemKind?.lowercased() ?? "") ?? .any
+        let dateField = LibrarySearchDateField(rawValue: payload.dateField?.lowercased() ?? "") ?? .modified
         let dateInterval = smartSearchDateInterval(
             from: payload.dateFrom,
             through: payload.dateTo,
@@ -1079,16 +1485,37 @@ final class ChatService {
         )
         let effectiveSemanticQuery = semanticQuery.isEmpty
             && keywords.isEmpty
+            && exactName == nil
+            && fileExtensions.isEmpty
             && categories.isEmpty
+            && folderTerms.isEmpty
+            && itemKind == .any
             && dateInterval == nil
+            && payload.minimumSizeBytes == nil
+            && payload.maximumSizeBytes == nil
+            && payload.hasNote == nil
+            && payload.isIndexed == nil
             ? fallbackQuery
             : semanticQuery
+        let sizeBounds = normalizedSizeBounds(
+            minimum: payload.minimumSizeBytes,
+            maximum: payload.maximumSizeBytes
+        )
         return SmartLibrarySearchPlan(
             semanticQuery: effectiveSemanticQuery,
             keywords: Array(keywords),
+            exactName: exactName,
+            fileExtensions: fileExtensions,
             categories: categories,
+            folderTerms: Array(folderTerms),
+            itemKind: itemKind,
+            dateField: dateField,
             dateInterval: dateInterval,
-            sortNewestFirst: payload.sort?.lowercased() == "newest"
+            minimumSizeBytes: sizeBounds.minimum,
+            maximumSizeBytes: sizeBounds.maximum,
+            hasNote: payload.hasNote,
+            isIndexed: payload.isIndexed,
+            sort: LibrarySearchSort(rawValue: payload.sort?.lowercased() ?? "") ?? .relevance
         )
     }
 
@@ -1106,12 +1533,155 @@ final class ChatService {
             return DateInterval(start: start, end: end)
         }()
         return SmartLibrarySearchPlan(
-            semanticQuery: query,
-            keywords: Array(relevanceTerms(in: query).prefix(8)),
+            semanticQuery: contentSearchQuery(in: query),
+            keywords: Array(contentSearchTerms(in: query).prefix(8)),
+            exactName: inferredExactFileName(in: query),
+            fileExtensions: inferredFileExtensions(in: query),
             categories: inferredSearchCategories(in: query),
+            folderTerms: [],
+            itemKind: inferredItemKind(in: query),
+            dateField: inferredDateField(in: query),
             dateInterval: relativeIntent?.interval ?? explicitYearInterval,
-            sortNewestFirst: prefersRecentFiles(in: query)
+            minimumSizeBytes: nil,
+            maximumSizeBytes: nil,
+            hasNote: inferredNoteRequirement(in: query),
+            isIndexed: inferredIndexRequirement(in: query),
+            sort: inferredSort(in: query)
         )
+    }
+
+    /// AI may improve the content wording, but it must not create a hard filter that
+    /// was not present in the user's request. Locally recognized constraints win.
+    private static func reconciledSmartSearchPlan(
+        _ aiPlan: SmartLibrarySearchPlan,
+        fallback: SmartLibrarySearchPlan,
+        query: String
+    ) -> SmartLibrarySearchPlan {
+        let useLocalDate = fallback.dateInterval != nil
+        let useLocalExtensions = !fallback.fileExtensions.isEmpty
+        let useLocalCategories = !fallback.categories.isEmpty
+        let useLocalItemKind = fallback.itemKind != .any
+        let aiSemanticQuery = aiPlan.semanticQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let semanticQuery: String
+        if !aiSemanticQuery.isEmpty, !containsStructuralQueryMarker(in: aiSemanticQuery) {
+            // A clean model paraphrase can improve vector recall, but it never
+            // participates in lexical matching or filter construction.
+            semanticQuery = aiSemanticQuery
+        } else {
+            semanticQuery = uniqueSearchTerms(
+                contentSearchTerms(in: query) + aiPlan.keywords.filter(isLexicalEvidenceTerm)
+            ).joined(separator: " ")
+        }
+        let bounds = normalizedSizeBounds(
+            minimum: aiPlan.minimumSizeBytes == 0 ? nil : aiPlan.minimumSizeBytes,
+            maximum: aiPlan.maximumSizeBytes
+        )
+        return SmartLibrarySearchPlan(
+            semanticQuery: semanticQuery,
+            keywords: Array(uniqueSearchTerms(aiPlan.keywords.filter(isLexicalEvidenceTerm)).prefix(8)),
+            exactName: fallback.exactName ?? aiPlan.exactName,
+            fileExtensions: useLocalExtensions ? fallback.fileExtensions : aiPlan.fileExtensions,
+            categories: useLocalCategories ? fallback.categories : aiPlan.categories,
+            folderTerms: aiPlan.folderTerms,
+            itemKind: useLocalItemKind ? fallback.itemKind : aiPlan.itemKind,
+            dateField: useLocalDate ? fallback.dateField : aiPlan.dateField,
+            dateInterval: useLocalDate ? fallback.dateInterval : aiPlan.dateInterval,
+            minimumSizeBytes: bounds.minimum,
+            maximumSizeBytes: bounds.maximum,
+            hasNote: fallback.hasNote,
+            isIndexed: fallback.isIndexed,
+            sort: aiPlan.sort
+        )
+    }
+
+    private static func structuredOnlyConfidence(for plan: SmartLibrarySearchPlan?) -> Double {
+        guard let plan else { return 0.30 }
+        guard plan.hasContentIntent else {
+            return plan.hasStructuredFilters ? 0.60 : 0.30
+        }
+        // A file that satisfies only metadata filters is a candidate, not evidence
+        // that it answers a content-bearing request.
+        return 0.20
+    }
+
+    private static func normalizedExtension(_ value: String) -> String? {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        guard !normalized.isEmpty,
+              normalized.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) }) else {
+            return nil
+        }
+        return normalized
+    }
+
+    private static func normalizedSizeBounds(
+        minimum: Int64?,
+        maximum: Int64?
+    ) -> (minimum: Int64?, maximum: Int64?) {
+        let positiveMinimum = minimum.map { max($0, 0) }
+        let positiveMaximum = maximum.map { max($0, 0) }
+        guard let positiveMinimum, let positiveMaximum, positiveMinimum > positiveMaximum else {
+            return (positiveMinimum, positiveMaximum)
+        }
+        return (positiveMaximum, positiveMinimum)
+    }
+
+    private static func fileName(_ fileName: String, equals requestedName: String) -> Bool {
+        fileName.compare(
+            requestedName,
+            options: [.caseInsensitive, .diacriticInsensitive],
+            range: nil,
+            locale: .current
+        ) == .orderedSame
+    }
+
+    private static func matchesStructuredPlan(
+        _ file: FileRecord,
+        plan: SmartLibrarySearchPlan
+    ) -> Bool {
+        if let exactName = plan.exactName, !fileName(file.name, equals: exactName) {
+            return false
+        }
+        if !plan.fileExtensions.isEmpty,
+           !plan.fileExtensions.contains(file.ext.lowercased()) {
+            return false
+        }
+        if !plan.categories.isEmpty, !plan.categories.contains(file.categoryEnum) {
+            return false
+        }
+        if !plan.folderTerms.isEmpty {
+            let folderMetadata = [file.sourceDir, file.path, file.organizationSubfolder ?? ""]
+                .joined(separator: "\n")
+                .lowercased()
+            if !plan.folderTerms.allSatisfy({
+                folderMetadata.range(
+                    of: $0,
+                    options: [.caseInsensitive, .diacriticInsensitive]
+                ) != nil
+            }) {
+                return false
+            }
+        }
+        switch plan.itemKind {
+        case .any: break
+        case .file where file.isDirectory: return false
+        case .directory where !file.isDirectory: return false
+        default: break
+        }
+        if let interval = plan.dateInterval {
+            guard let date = plan.dateField.date(for: file),
+                  date >= interval.start, date < interval.end else { return false }
+        }
+        if let minimum = plan.minimumSizeBytes, file.size < minimum { return false }
+        if let maximum = plan.maximumSizeBytes, file.size > maximum { return false }
+        let hasNote = !(file.note ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
+        if let required = plan.hasNote, hasNote != required { return false }
+        if let required = plan.isIndexed, (file.indexedAt != nil) != required { return false }
+        return true
     }
 
     private static func smartSearchDateInterval(
@@ -1124,13 +1694,25 @@ final class ChatService {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "yyyy-MM-dd"
-        guard let startValue, let endValue,
-              let rawStart = formatter.date(from: startValue),
-              let rawEnd = formatter.date(from: endValue) else { return nil }
-        let start = calendar.startOfDay(for: min(rawStart, rawEnd))
-        let endStart = calendar.startOfDay(for: max(rawStart, rawEnd))
-        guard let end = calendar.date(byAdding: .day, value: 1, to: endStart) else { return nil }
-        return DateInterval(start: start, end: end)
+        let rawStart = startValue.flatMap { formatter.date(from: $0) }
+        let rawEnd = endValue.flatMap { formatter.date(from: $0) }
+        guard rawStart != nil || rawEnd != nil else { return nil }
+        if let rawStart, let rawEnd {
+            let start = calendar.startOfDay(for: min(rawStart, rawEnd))
+            let endStart = calendar.startOfDay(for: max(rawStart, rawEnd))
+            guard let end = calendar.date(byAdding: .day, value: 1, to: endStart) else { return nil }
+            return DateInterval(start: start, end: end)
+        }
+        if let rawStart {
+            return DateInterval(start: calendar.startOfDay(for: rawStart), end: .distantFuture)
+        }
+        guard let rawEnd,
+              let end = calendar.date(
+                byAdding: .day,
+                value: 1,
+                to: calendar.startOfDay(for: rawEnd)
+              ) else { return nil }
+        return DateInterval(start: .distantPast, end: end)
     }
 
     private static func inferredSearchCategories(in query: String) -> Set<FileCategory> {
@@ -1146,6 +1728,105 @@ final class ChatService {
         return Set(mappings.compactMap { category, terms in
             terms.contains(where: { normalized.contains($0) }) ? category : nil
         })
+    }
+
+    private static let recognizedFileExtensions: Set<String> = [
+        "pdf", "doc", "docx", "docm", "txt", "md", "rtf", "pages", "xls", "xlsx",
+        "xlsm", "ppt", "pptx", "ppsx", "csv", "key", "keynote", "numbers", "epub",
+        "odt", "ods", "odp", "png", "jpg", "jpeg", "gif", "heic", "tiff", "bmp",
+        "svg", "webp", "psd", "sketch", "mp4", "mov", "avi", "mkv", "m4v", "wmv",
+        "flv", "webm", "mp3", "wav", "aac", "flac", "m4a", "ogg", "aiff", "swift",
+        "py", "js", "ts", "tsx", "jsx", "java", "kt", "go", "rs", "c", "cpp", "h",
+        "hpp", "cs", "rb", "php", "sh", "sql", "json", "yaml", "yml", "html", "css",
+        "vue", "lua", "r", "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "dmg", "iso",
+    ]
+
+    private static func inferredFileExtensions(in query: String) -> Set<String> {
+        let normalized = query.lowercased()
+        var extensions = Set(normalized
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { recognizedFileExtensions.contains($0) })
+        let mappings: [([String], [String])] = [
+            (["word"], ["doc", "docx"]),
+            (["excel", "spreadsheet"], ["xls", "xlsx", "csv"]),
+            (["powerpoint", "slides"], ["ppt", "pptx"]),
+            (["markdown"], ["md"]),
+            (["jpeg"], ["jpg", "jpeg"]),
+        ]
+        for (phrases, mappedExtensions) in mappings
+        where phrases.contains(where: normalized.contains) {
+            extensions.formUnion(mappedExtensions)
+        }
+        return extensions
+    }
+
+    private static func inferredExactFileName(in query: String) -> String? {
+        let punctuation = CharacterSet(charactersIn: "\"'“”‘’()[]{}<>,;:!?，。；：！？")
+        for token in query.components(separatedBy: .whitespacesAndNewlines) {
+            let candidate = token.trimmingCharacters(in: punctuation)
+            let ext = URL(fileURLWithPath: candidate).pathExtension.lowercased()
+            if recognizedFileExtensions.contains(ext), candidate.contains(".") {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private static func inferredItemKind(in query: String) -> LibrarySearchItemKind {
+        let normalized = query.lowercased()
+        if [
+            "folders", "directories", "folder only", "directory only",
+            "\u{67E5}\u{627E}\u{6587}\u{4EF6}\u{5939}",
+            "\u{663E}\u{793A}\u{6587}\u{4EF6}\u{5939}",
+            "\u{6587}\u{4EF6}\u{5939}\u{672C}\u{8EAB}",
+        ].contains(where: normalized.contains) {
+            return .directory
+        }
+        if ["files", "file only", "\u{6587}\u{4EF6}"].contains(where: normalized.contains) {
+            return .file
+        }
+        return .any
+    }
+
+    private static func inferredDateField(in query: String) -> LibrarySearchDateField {
+        let normalized = query.lowercased()
+        if ["organized", "moved", "sorted", "\u{6574}\u{7406}", "\u{79FB}\u{52A8}"].contains(where: normalized.contains) {
+            return .organized
+        }
+        if ["added", "imported", "discovered", "\u{6DFB}\u{52A0}", "\u{5BFC}\u{5165}"].contains(where: normalized.contains) {
+            return .added
+        }
+        return .modified
+    }
+
+    private static func inferredNoteRequirement(in query: String) -> Bool? {
+        let normalized = query.lowercased()
+        if ["without note", "no note", "\u{6CA1}\u{6709}\u{5907}\u{6CE8}", "\u{65E0}\u{5907}\u{6CE8}"].contains(where: normalized.contains) {
+            return false
+        }
+        if ["with note", "has note", "\u{6709}\u{5907}\u{6CE8}"].contains(where: normalized.contains) {
+            return true
+        }
+        return nil
+    }
+
+    private static func inferredIndexRequirement(in query: String) -> Bool? {
+        let normalized = query.lowercased()
+        if ["unindexed", "not indexed", "\u{672A}\u{7D22}\u{5F15}"].contains(where: normalized.contains) {
+            return false
+        }
+        if ["indexed", "\u{5DF2}\u{7D22}\u{5F15}"].contains(where: normalized.contains) {
+            return true
+        }
+        return nil
+    }
+
+    private static func inferredSort(in query: String) -> LibrarySearchSort {
+        let normalized = query.lowercased()
+        if ["largest", "biggest", "\u{6700}\u{5927}"].contains(where: normalized.contains) { return .largest }
+        if ["smallest", "\u{6700}\u{5C0F}"].contains(where: normalized.contains) { return .smallest }
+        if ["oldest", "\u{6700}\u{65E9}", "\u{6700}\u{65E7}"].contains(where: normalized.contains) { return .oldest }
+        return prefersRecentFiles(in: query) ? .newest : .relevance
     }
 
     private static let relativeDatePhrases = [
@@ -1333,10 +2014,10 @@ final class ChatService {
         _ query: String,
         additionalTerms: [String] = []
     ) -> [String] {
-        var seen = Set<String>()
-        return ([query.lowercased()] + additionalTerms.map { $0.lowercased() } + relevanceTerms(in: query)).filter {
-            !$0.isEmpty && seen.insert($0).inserted
-        }
+        uniqueSearchTerms(
+            contentSearchTerms(in: query)
+                + additionalTerms.filter { isExactFileNameCandidate($0) || isLexicalEvidenceTerm($0) }
+        )
     }
 
     private static func libraryLexicalMatch(
@@ -1381,14 +2062,14 @@ final class ChatService {
             considerEvidence(confidence: 1, kind: .fileName, source: file.title ?? file.displayPath)
         } else if let strength = evidenceStrength(in: name) {
             considerEvidence(
-                confidence: 0.50 + (0.09 * strength),
+                confidence: 0.60 + (0.09 * strength),
                 kind: .fileName,
                 source: file.title ?? file.displayPath
             )
         }
         if let strength = evidenceStrength(in: title) {
             considerEvidence(
-                confidence: 0.60 + (0.09 * strength),
+                confidence: 0.45 + (0.09 * strength),
                 kind: .title,
                 source: file.title
             )
@@ -1409,7 +2090,7 @@ final class ChatService {
         }
         if let strength = evidenceStrength(in: path) {
             considerEvidence(
-                confidence: 0.35 + (0.09 * strength),
+                confidence: 0.60 + (0.09 * strength),
                 kind: .path,
                 source: file.displayPath
             )
@@ -1422,15 +2103,15 @@ final class ChatService {
         }
 
         if stem == normalizedQuery || name == normalizedQuery {
-            consider(140, .fileName, file.title ?? file.note ?? file.displayPath)
+            consider(500, .fileName, file.title ?? file.note ?? file.displayPath)
         } else if stem.contains(normalizedQuery) || name.contains(normalizedQuery) {
-            consider(120, .fileName, file.title ?? file.note ?? file.displayPath)
+            consider(200, .fileName, file.title ?? file.note ?? file.displayPath)
         }
-        if title == normalizedQuery { consider(115, .title, file.title) }
+        if content.contains(normalizedQuery) { consider(400, .content, file.contentText) }
+        if note.contains(normalizedQuery) { consider(300, .note, file.note) }
+        if path.contains(normalizedQuery) { consider(200, .path, file.displayPath) }
+        if title == normalizedQuery { consider(110, .title, file.title) }
         else if title.contains(normalizedQuery) { consider(100, .title, file.title) }
-        if note.contains(normalizedQuery) { consider(85, .note, file.note) }
-        if content.contains(normalizedQuery) { consider(65, .content, file.contentText) }
-        if path.contains(normalizedQuery) { consider(50, .path, file.displayPath) }
 
         var termScore = 0
         var termMatch: (priority: Int, kind: LibrarySearchMatchKind, source: String?)?
@@ -1443,21 +2124,21 @@ final class ChatService {
             termMatch = (priority, kind, source)
         }
         for term in terms where term != normalizedQuery {
-            if name.contains(term) {
-                termScore += 12
-                recordTermMatch(priority: 5, kind: .fileName, source: file.title ?? file.displayPath)
+            if content.contains(term) {
+                termScore += 40
+                recordTermMatch(priority: 5, kind: .content, source: file.contentText)
+            } else if note.contains(term) {
+                termScore += 30
+                recordTermMatch(priority: 4, kind: .note, source: file.note)
+            } else if name.contains(term) {
+                termScore += 20
+                recordTermMatch(priority: 3, kind: .fileName, source: file.title ?? file.displayPath)
+            } else if path.contains(term) {
+                termScore += 20
+                recordTermMatch(priority: 3, kind: .path, source: file.displayPath)
             } else if title.contains(term) {
                 termScore += 10
-                recordTermMatch(priority: 4, kind: .title, source: file.title)
-            } else if note.contains(term) {
-                termScore += 7
-                recordTermMatch(priority: 3, kind: .note, source: file.note)
-            } else if content.contains(term) {
-                termScore += 4
-                recordTermMatch(priority: 2, kind: .content, source: file.contentText)
-            } else if path.contains(term) {
-                termScore += 3
-                recordTermMatch(priority: 1, kind: .path, source: file.displayPath)
+                recordTermMatch(priority: 2, kind: .title, source: file.title)
             }
         }
         if best == nil, let termMatch, termScore > 0 {
@@ -1476,8 +2157,62 @@ final class ChatService {
         )
     }
 
+    static func dynamicallyAcceptedSemanticHits(_ hits: [VectorSearchHit]) -> [VectorSearchHit] {
+        let finite = hits.filter { $0.score.isFinite }.sorted { $0.score > $1.score }
+        guard let topScore = finite.first?.score, topScore >= semanticScoreFloor else { return [] }
+        let threshold = max(semanticScoreFloor, topScore - semanticScoreWindow)
+        return finite.filter { $0.score >= threshold }
+    }
+
+    private func rerankedSemanticHits(_ hits: [VectorSearchHit], query: String) async -> [VectorSearchHit] {
+        guard let provider = settings.makeRerankingProvider(), hits.count > 1 else { return hits }
+        let candidates = Array(hits.prefix(24))
+        let documents = candidates.map { $0.chunkText ?? "" }
+        do {
+            let results = try await provider.rerank(
+                query: query,
+                documents: documents,
+                topN: candidates.count
+            )
+            let resultByIndex = Dictionary(uniqueKeysWithValues: results.map { ($0.index, $0.score) })
+            let reranked = candidates.enumerated().compactMap { index, hit -> VectorSearchHit? in
+                guard let score = resultByIndex[index] else { return nil }
+                return VectorSearchHit(
+                    fileId: hit.fileId,
+                    score: Float(min(max(score, 0), 1)),
+                    chunkText: hit.chunkText,
+                    chunkIndex: hit.chunkIndex,
+                    sectionPath: hit.sectionPath,
+                    pageStart: hit.pageStart,
+                    pageEnd: hit.pageEnd,
+                    kind: hit.kind,
+                    parentIndex: hit.parentIndex,
+                    parentText: hit.parentText,
+                    entityTerms: hit.entityTerms
+                )
+            }.sorted { $0.score > $1.score }
+            guard !reranked.isEmpty else { return hits }
+            AppLogService.shared.write(
+                "RAG candidates reranked",
+                category: .vectorSearch,
+                level: .debug,
+                metadata: ["provider": provider.name, "candidates": "\(candidates.count)"]
+            )
+            return reranked
+        } catch {
+            AppLogService.shared.write(
+                "RAG reranker unavailable; fused retrieval order retained: \(error.localizedDescription)",
+                category: .vectorSearch,
+                level: .warning,
+                metadata: ["provider": provider.name]
+            )
+            return hits
+        }
+    }
+
     private static func semanticConfidence(for hit: VectorSearchHit) -> Double {
-        let strength = min(max(Double(hit.score), 0), 1)
+        let threshold = Double(semanticScoreFloor)
+        let strength = min(max((Double(hit.score) - threshold) / (1 - threshold), 0), 1)
         let base: Double
         switch hit.kind {
         case .text, .table, .list, .picture:
@@ -1485,9 +2220,9 @@ final class ChatService {
         case .note:
             base = 0.75
         case .title:
-            base = 0.60
+            base = 0.45
         case .metadata:
-            base = 0.35
+            base = 0.60
         }
         return min(base + (0.09 * strength), 1)
     }
@@ -1524,41 +2259,44 @@ final class ChatService {
         return provider
     }
 
-    private func buildLibraryContext(from files: [FileRecord],
+    private func buildLibraryContext(from results: [LibrarySearchResult],
                                      matchedChunks: [Int64: [VectorSearchHit]]) -> String {
-        let responseInstructions = """
-        You are FileNest, a local file assistant. Follow these response rules:
-        - Answer in the same language as the user's latest question.
-        - Return clean, valid Markdown. Start with a direct answer, then use short paragraphs or a flat bullet list only when it improves clarity.
-        - If a table is useful, use valid GitHub-Flavored Markdown with the header, separator, and every data row on separate lines. Add a blank line before and after the table.
-        - Use **bold** only for short labels and `backticks` only for file names or short technical values.
-        - Refer to files by their natural file names. Never expose internal retrieval indexes such as [1] or [2], the label "File:", raw context delimiters, or source-debug metadata.
-        - Retrieved files are ordered by combined filename/title and semantic relevance. For requests asking for recent or latest files, preserve the supplied newest-first order. When the question includes a distinctive identifier found in a filename or title, prefer that direct match over a transcript that only mentions it.
-        - Keep the answer and cited file consistent. Do not describe one file while presenting another file as the primary match.
-        - Do not repeat the same file metadata. The FileNest interface already shows matched-file cards with preview and full location.
-        - Mention a readable parent folder when location matters. Include an exact path only when the user explicitly asks for the exact path.
-        - Do not invent facts. If the retrieved content is insufficient, say so clearly.
-        """
-
-        guard !files.isEmpty else {
-            return responseInstructions + "\n\nNo highly relevant local files were found. Say this clearly and suggest a more specific search phrase."
+        let responseInstructions = PromptCatalog.Chat.libraryAnswerInstructions
+        guard !results.isEmpty else {
+            return responseInstructions + "\n\n" + PromptCatalog.Chat.emptyLibraryAnswer
         }
 
         var lines = [responseInstructions, "RETRIEVED FILES START"]
-        for file in files {
+        let dateFormatter = ISO8601DateFormatter()
+        var remainingParentEvidence = 8
+        var remainingEvidenceCharacters = 20_000
+        for (index, result) in results.enumerated() {
+            let file = result.file
+            let userNote = file.note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             var fileLines = [
                 "FILE START",
+                "Source ID: [F\(index + 1)]",
+                "Retrieval rank (internal): \(index + 1)",
+                "Retrieval evidence (internal): \(Self.libraryEvidenceLabel(for: result)); confidence \(result.confidencePercent)%",
                 "Name: \(file.name)",
-                "Category: \(settings.localized(file.categoryEnum.label))",
-                "Location: \(abbreviatedPath(file.path))",
-                "Modified: \(ISO8601DateFormatter().string(from: file.mtime))",
             ]
-            if let title = file.title, !title.isEmpty {
-                fileLines.append("Title: \(title)")
-            }
             if let id = file.id, let chunks = matchedChunks[id], !chunks.isEmpty {
-                for hit in chunks.prefix(3) {
-                    guard let chunk = hit.chunkText, !chunk.isEmpty else { continue }
+                let prioritizedChunks = chunks.filter { hit in
+                    switch hit.kind {
+                    case .title: return false
+                    case .note: return userNote.isEmpty
+                    default: return true
+                    }
+                }.sorted {
+                    let lhsPriority = Self.contextPriority(for: $0.kind)
+                    let rhsPriority = Self.contextPriority(for: $1.kind)
+                    return lhsPriority == rhsPriority
+                        ? $0.score > $1.score
+                        : lhsPriority > rhsPriority
+                }
+                for hit in prioritizedChunks.prefix(min(4, remainingParentEvidence)) {
+                    guard let chunk = hit.parentText ?? hit.chunkText, !chunk.isEmpty else { continue }
+                    guard remainingEvidenceCharacters > 0 else { break }
                     var location = hit.sectionPath.joined(separator: " › ")
                     if let start = hit.pageStart {
                         let pageLabel = hit.pageEnd.flatMap { $0 == start ? nil : $0 }
@@ -1566,10 +2304,39 @@ final class ChatService {
                         location = location.isEmpty ? pageLabel : "\(location) · \(pageLabel)"
                     }
                     let locationLabel = location.isEmpty ? "" : " (\(location))"
-                    fileLines.append("Relevant excerpt\(locationLabel): \(String(chunk.prefix(1_200)))")
+                    let parentID = hit.parentIndex ?? hit.chunkIndex ?? 0
+                    let excerpt = String(chunk.prefix(min(2_800, remainingEvidenceCharacters)))
+                    fileLines.append(
+                        "Relevant \(Self.contextLabel(for: hit.kind))\(locationLabel) "
+                        + "[F\(index + 1):P\(parentID + 1)]: "
+                        + excerpt
+                    )
+                    remainingParentEvidence -= 1
+                    remainingEvidenceCharacters -= excerpt.count
                 }
-            } else if let content = file.contentText, !content.isEmpty {
-                fileLines.append("Excerpt: \(String(content.prefix(500)))")
+            } else if result.confidence >= 0.90,
+                      let snippet = result.snippet?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !snippet.isEmpty {
+                fileLines.append("Relevant content excerpt: \(String(snippet.prefix(1_200)))")
+            } else if result.confidence >= 0.90,
+                      let content = file.contentText, !content.isEmpty {
+                fileLines.append("Relevant content excerpt: \(String(content.prefix(800)))")
+            }
+            if !userNote.isEmpty {
+                fileLines.append("User note: \(String(userNote.prefix(800)))")
+            }
+            fileLines.append("Metadata: type=\(file.ext.isEmpty ? "none" : file.ext); category=\(file.categoryEnum.rawValue); item=\(file.isDirectory ? "directory" : "file"); size=\(file.size) bytes")
+            fileLines.append("Location metadata: current=\(abbreviatedPath(file.path)); source=\(abbreviatedPath(file.sourceDir))")
+            fileLines.append("Time metadata: modified=\(dateFormatter.string(from: file.mtime)); added=\(dateFormatter.string(from: file.addedAt))")
+            if let organizedAt = file.organizedAt {
+                fileLines.append("Organized: \(dateFormatter.string(from: organizedAt))")
+            }
+            fileLines.append("Indexed: \(file.indexedAt == nil ? "no" : "yes")")
+            if let subfolder = file.organizationSubfolder, !subfolder.isEmpty {
+                fileLines.append("Organization subfolder: \(subfolder)")
+            }
+            if let title = file.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+                fileLines.append("Generated title (lowest-priority evidence): \(title)")
             }
             fileLines.append("FILE END")
             lines.append(fileLines.joined(separator: "\n"))
@@ -1580,13 +2347,7 @@ final class ChatService {
 
     private func buildAttachedFileContext(file: FileRecord, extractedText: String) -> String {
         """
-        You are FileNest in single-file chat mode. Answer only from the attached file below.
-        - Answer in the same language as the user's latest question.
-        - Do not search, mention, or infer facts from the wider file library.
-        - Start with a direct answer. Use concise headings, paragraphs, or lists when useful.
-        - Return clean, valid Markdown. If a table is useful, put the header, separator, and every row on separate lines, with a blank line before and after it.
-        - Do not repeat the path unless the user explicitly asks for it.
-        - If the file does not contain enough information, say so clearly instead of guessing.
+        \(PromptCatalog.Chat.attachedFileInstructions)
 
         ATTACHED FILE START
         Name: \(file.name)
@@ -1595,6 +2356,33 @@ final class ChatService {
         \(extractedText)
         ATTACHED FILE END
         """
+    }
+
+    private static func libraryEvidenceLabel(for result: LibrarySearchResult) -> String {
+        if result.confidence >= 1, result.matchKind == .fileName { return "exact filename" }
+        if result.confidence >= 0.90 { return "extracted content" }
+        if result.confidence >= 0.75 { return "user note" }
+        if result.confidence >= 0.60 { return "file metadata" }
+        if result.confidence >= 0.45 { return "generated title" }
+        return result.matchKind.label.lowercased()
+    }
+
+    private static func contextPriority(for kind: DocumentChunkKind) -> Int {
+        switch kind {
+        case .text, .table, .list, .picture: return 5
+        case .note: return 4
+        case .metadata: return 3
+        case .title: return 2
+        }
+    }
+
+    private static func contextLabel(for kind: DocumentChunkKind) -> String {
+        switch kind {
+        case .text, .table, .list, .picture: return "content excerpt"
+        case .note: return "user-note excerpt"
+        case .metadata: return "metadata excerpt"
+        case .title: return "title excerpt"
+        }
     }
 
     private func buildIndexedAttachedFileContext(file: FileRecord,
@@ -1738,38 +2526,13 @@ final class ChatService {
         )
     }
 
-    /// Uses one estimate across local and cloud providers: 1 token is about 0.75 English words or 1.5 CJK characters.
+    /// Uses the shared fallback profile when a provider does not report exact generation usage.
     static func estimatedTokens(in text: String) -> Int {
-        guard !text.isEmpty else { return 0 }
-        var estimate = 0.0
-        var insideEnglishWord = false
-        for character in text {
-            let isEnglishWordCharacter = character.unicodeScalars.allSatisfy { scalar in
-                guard scalar.isASCII else { return false }
-                return CharacterSet.alphanumerics.contains(scalar)
-                    || scalar.value == 0x27
-                    || scalar.value == 0x2D
-                    || scalar.value == 0x5F
-            }
-            if isEnglishWordCharacter {
-                if !insideEnglishWord { estimate += 4.0 / 3.0 }
-                insideEnglishWord = true
-            } else {
-                insideEnglishWord = false
-                if character.isWhitespace { continue }
-                let isChinese = character.unicodeScalars.allSatisfy { scalar in
-                    switch scalar.value {
-                    case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF,
-                         0x20000...0x2A6DF, 0x2A700...0x2EBEF, 0x30000...0x323AF:
-                        return true
-                    default:
-                        return false
-                    }
-                }
-                estimate += isChinese ? 2.0 / 3.0 : 1
-            }
-        }
-        return max(1, Int(ceil(estimate)))
+        TokenCounter.estimate(
+            text,
+            profile: TokenCounter.generationFallbackProfile,
+            version: TokenCounter.generationFallbackVersion
+        ).count
     }
 }
 

@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, shell } from 'electron'
 import { basename, dirname } from 'node:path'
 import { stat } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import type { AiConnectivityCheck, AppSnapshot, ChatStreamEvent, FileCategory, FileRecord, LibrarySearchRequest, LibrarySearchResponse, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 import { FileNestDatabase } from './database'
 import { AppLogger } from './logger'
@@ -32,10 +33,16 @@ export class AppController {
   private readonly librarySearch = new LibrarySearchService(this.database, this.embeddings, this.logger)
   private readonly ollamaManager = new OllamaManager()
   private selectedSessionId: number | null = null
+  private readonly runningChatSessionIds = new Set<number>()
+  private readonly completedChatSessionIds = new Set<number>()
+  private pendingLibrarySearch: { id: string; query: string } | null = null
+  private quickSearchShortcutError: string | null = null
   private pendingChatAttachmentPath: string | null = null
   private ollama = { reachable: false, models: [] as string[] }
   private indexingProgress: AppSnapshot['indexingProgress'] = null
   onChanged?: () => void
+  onQuickSearchRequested?: () => void
+  onQuickSearchShortcutChanged?: (shortcut: string) => string | null
 
   async initialize(): Promise<void> {
     await this.database.initialize()
@@ -63,6 +70,10 @@ export class AppController {
       selectedSessionId: this.selectedSessionId,
       pendingChatAttachmentPath: this.pendingChatAttachmentPath,
       messages: this.selectedSessionId == null ? [] : this.database.listMessages(this.selectedSessionId),
+      runningChatSessionIds: [...this.runningChatSessionIds],
+      completedChatSessionIds: [...this.completedChatSessionIds],
+      pendingLibrarySearch: this.pendingLibrarySearch,
+      quickSearchShortcutError: this.quickSearchShortcutError,
       statistics: await this.database.statistics(),
       watching: this.watcher.isWatching,
       indexing: this.indexer.isRunning,
@@ -77,6 +88,7 @@ export class AppController {
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
     const previous = this.database.getSettings()
     const next = await this.database.updateSettings(normalizeSettingsPatch(patch, previous))
+    if ('quickSearchShortcut' in patch) this.quickSearchShortcutError = this.onQuickSearchShortcutChanged?.(next.quickSearchShortcut) ?? null
     if ('launchAtLogin' in patch && process.platform === 'win32') app.setLoginItemSettings({ openAtLogin: next.launchAtLogin, path: process.execPath })
     const watcherKeys: Array<keyof Settings> = ['watchDirs', 'enabledExtensions', 'excludeHidden', 'autoOrganize', 'autoOrganizeMode', 'autoOrganizeIntervalSeconds', 'autoOrganizeBatchSize']
     if (watcherKeys.some((key) => JSON.stringify(previous[key]) !== JSON.stringify(next[key])) && this.watcher.isWatching) await this.watcher.start(next)
@@ -123,8 +135,31 @@ export class AppController {
     return this.database.searchFiles(query.trim(), category)
   }
 
-  searchLibrary(request: LibrarySearchRequest): Promise<LibrarySearchResponse> {
-    return this.librarySearch.search(request, this.database.getSettings())
+  searchLibrary(request: LibrarySearchRequest, sender?: Electron.WebContents): Promise<LibrarySearchResponse> {
+    return this.librarySearch.search(request, this.database.getSettings(), (intent) => {
+      if (request.requestId && sender && !sender.isDestroyed()) {
+        sender.send('library:search-progress', { requestId: request.requestId, intent })
+      }
+    })
+  }
+
+  requestLibrarySearch(rawQuery: string): void {
+    const query = rawQuery.trim()
+    if (!query) return
+    this.pendingLibrarySearch = { id: randomUUID(), query }
+    this.onQuickSearchRequested?.()
+    this.notifyChanged()
+  }
+
+  consumeLibrarySearch(id: string): void {
+    if (this.pendingLibrarySearch?.id !== id) return
+    this.pendingLibrarySearch = null
+    this.notifyChanged()
+  }
+
+  setQuickSearchShortcutError(error: string | null): void {
+    this.quickSearchShortcutError = error
+    this.notifyChanged()
   }
 
   async openFile(path: string): Promise<string> { return shell.openPath(path) }
@@ -179,9 +214,10 @@ export class AppController {
     this.notifyChanged()
   }
 
-  selectChat(id: number) { this.selectedSessionId = id; this.pendingChatAttachmentPath = null; this.notifyChanged(); return this.database.listMessages(id) }
-  async deleteChat(id: number): Promise<void> { await this.database.deleteChat(id); if (this.selectedSessionId === id) this.selectedSessionId = this.database.listChatSessions()[0]?.id ?? null; this.notifyChanged() }
-  async clearChats(): Promise<void> { await this.database.clearChats(); this.selectedSessionId = null; this.notifyChanged() }
+  selectChat(id: number) { this.selectedSessionId = id; this.pendingChatAttachmentPath = null; this.completedChatSessionIds.delete(id); this.notifyChanged(); return this.database.listMessages(id) }
+  markChatSeen(id: number): void { this.completedChatSessionIds.delete(id); this.notifyChanged() }
+  async deleteChat(id: number): Promise<void> { await this.database.deleteChat(id); this.runningChatSessionIds.delete(id); this.completedChatSessionIds.delete(id); if (this.selectedSessionId === id) this.selectedSessionId = this.database.listChatSessions()[0]?.id ?? null; this.notifyChanged() }
+  async clearChats(): Promise<void> { await this.database.clearChats(); this.selectedSessionId = null; this.runningChatSessionIds.clear(); this.completedChatSessionIds.clear(); this.notifyChanged() }
 
   async sendChat(request: SendChatRequest, sender: Electron.WebContents): Promise<{ requestId: string }> {
     if (request.attachedFilePath) await this.ensureAttachedFile(request.attachedFilePath)
@@ -189,9 +225,18 @@ export class AppController {
       if (event.sessionId != null) {
         this.selectedSessionId = event.sessionId
         this.pendingChatAttachmentPath = null
+        if (event.type === 'session') {
+          this.runningChatSessionIds.add(event.sessionId)
+          this.completedChatSessionIds.delete(event.sessionId)
+        } else if (event.type === 'done') {
+          this.runningChatSessionIds.delete(event.sessionId)
+          this.completedChatSessionIds.add(event.sessionId)
+        } else if (event.type === 'error') {
+          this.runningChatSessionIds.delete(event.sessionId)
+        }
       }
       if (!sender.isDestroyed()) sender.send('chat:stream', event)
-      if (event.type === 'done') this.notifyChanged()
+      if (event.type === 'session' || event.type === 'done' || event.type === 'error') this.notifyChanged()
     })
     return { requestId }
   }

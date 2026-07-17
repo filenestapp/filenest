@@ -3,6 +3,7 @@ import {
   FileSearch,
   Folder,
   MessageCircle,
+  LoaderCircle,
   MoreHorizontal,
   PlusSquare,
   Settings as SettingsIcon,
@@ -92,6 +93,8 @@ export function Sidebar({
               )}
               <span>{session.title}</span>
               <time>
+                {snapshot.runningChatSessionIds.includes(session.id) && <LoaderCircle className="spin active-blue" size={12} />}
+                {!snapshot.runningChatSessionIds.includes(session.id) && snapshot.completedChatSessionIds.includes(session.id) && <i className="chat-complete-dot" />}
                 {formatDate(
                   session.updatedAt,
                   snapshot.settings.appLanguage,

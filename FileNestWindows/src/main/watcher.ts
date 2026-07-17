@@ -69,6 +69,7 @@ export class FileWatcherService {
     this.watcher.on('unlinkDir', (path) => void this.handleRemoval(path, generation))
     this.watcher.on('error', (error) => void this.logger.log('watcher', 'Watcher error', error))
     this.configureBatchTimer(settings, generation)
+    await this.reconcileOrganizedLibrary(settings, generation)
     await this.reconcileManagedItems(settings, generation)
     await this.reconcileWatchRoots(settings, generation)
     await this.logger.log('watcher', `Started watching: ${settings.watchDirs.join(', ')}`)
@@ -106,6 +107,79 @@ export class FileWatcherService {
       }
     }
     if (generation === this.runGeneration) await this.flushOrganizeQueue(generation)
+  }
+
+  async reconcileOrganizedLibrary(settings: Settings, generation = this.runGeneration): Promise<void> {
+    const root = settings.organizedRoot
+    const existingManaged = this.database.listFiles().filter((file) => isInside(root, file.path))
+    const existingByPath = new Map(existingManaged.map((file) => [canonicalPath(file.path), file]))
+    const diskPaths = new Set<string>()
+    const visit = async (directory: string): Promise<void> => {
+      const entries = await readdir(directory, { withFileTypes: true }).catch(() => [])
+      for (const entry of entries) {
+        if (generation !== this.runGeneration && this.isWatching) return
+        if (settings.excludeHidden && entry.name.startsWith('.')) continue
+        const path = join(directory, entry.name)
+        const existing = existingByPath.get(canonicalPath(path))
+        if (entry.isDirectory()) {
+          if (existing?.isDirectory) {
+            diskPaths.add(canonicalPath(path))
+            continue
+          }
+          await visit(path)
+          continue
+        }
+        if (!entry.isFile()) continue
+        const info = await stat(path).catch(() => null)
+        if (!info) continue
+        diskPaths.add(canonicalPath(path))
+        const ext = normalizedExtension(path)
+        const metadataChanged = existing != null && (existing.size !== info.size || Math.abs(new Date(existing.mtime).getTime() - info.mtime.getTime()) >= 1)
+        if (existing && !metadataChanged && existing.name === entry.name && existing.organizedAt) continue
+        const organizationSubfolder = relative(root, directory).split(/[\\/]/).filter(Boolean).join('/') || null
+        if (existing) {
+          const patch = {
+            name: entry.name,
+            size: info.size,
+            mtime: info.mtime.toISOString(),
+            category: categoryForExtension(ext),
+            organizedAt: existing.organizedAt ?? new Date().toISOString(),
+            organizationSubfolder,
+            ...(metadataChanged ? { indexedAt: null, contentHash: null, indexSignature: null } : {})
+          }
+          await this.database.updateFile(existing.id, patch)
+          if (metadataChanged) {
+            const updated = this.database.getFile(existing.id)
+            if (updated) await this.indexer.indexFile(updated, settings, path, true, () => generation === this.runGeneration || !this.isWatching)
+          }
+          continue
+        }
+        const record = await this.database.upsertFile({
+          path,
+          name: entry.name,
+          ext,
+          size: info.size,
+          mtime: info.mtime.toISOString(),
+          category: categoryForExtension(ext),
+          sourceDir: directory,
+          indexedAt: null,
+          contentHash: null,
+          title: null,
+          contentText: null,
+          discoveredAt: new Date().toISOString(),
+          organizedAt: new Date().toISOString(),
+          note: null,
+          organizationSubfolder,
+          isDirectory: false,
+          indexSignature: null
+        })
+        await this.indexer.indexFile(record, settings, path, true, () => generation === this.runGeneration || !this.isWatching)
+      }
+    }
+    await visit(root)
+    for (const file of existingManaged) {
+      if (!diskPaths.has(canonicalPath(file.path))) await this.database.deleteFile(file.id)
+    }
   }
 
   private async reconcileManagedItems(settings: Settings, generation: number): Promise<void> {
@@ -222,6 +296,10 @@ export class FileWatcherService {
 function isInside(root: string, path: string): boolean {
   const value = relative(root, path)
   return value === '' || (!value.startsWith('..') && !value.includes(`..${process.platform === 'win32' ? '\\' : '/'}`))
+}
+
+function canonicalPath(path: string): string {
+  return process.platform === 'win32' ? path.toLocaleLowerCase() : path
 }
 
 function topLevelEntry(root: string, path: string): string {

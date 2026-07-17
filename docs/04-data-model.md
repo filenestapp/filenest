@@ -7,14 +7,16 @@ Both platforms persist product state in a local SQLite-compatible database. macO
 | Entity | Source | Key fields | Purpose | Relationships | Confidence |
 | --- | --- | --- | --- | --- | --- |
 | File | `files` | id, path, name, category, timestamps, hash, note, index signature | Managed library item | owns chunks and embeddings | High |
-| Document chunk | `document_chunks` | file_id, chunk_idx, text, context, section, pages, kind | Structured searchable content | belongs to file | High on macOS and Windows |
+| Document chunk | `document_chunks` | file_id, chunk_idx, text, context, section, pages, kind, parent_idx, token metadata | Structured searchable content | belongs to file | High on macOS and Windows |
+| Document parent | `document_parents` | file_id, parent_idx, text, context, section, pages, kind, token metadata | Complete answer-time evidence unit | owns retrieval children logically | High on macOS |
 | Embedding | `embeddings` | file_id, chunk index, vector, dimension, model | Semantic search vector | belongs to file/chunk | High |
 | Rule | `rules` | name, pattern, target, priority, enabled, action | Deterministic organization behavior | independent configuration | High |
 | Chat session | `chat_sessions` | title, timestamps, attached path | Conversation boundary | owns messages | High |
 | Chat message | `chat_messages` | role, content, timestamp, related IDs, response metrics | Persistent conversation turn | belongs to session; references files by JSON IDs | High |
-| Token usage | `token_usage` | timestamp, provider, model, token estimates, session | Aggregate model activity | optionally belongs to session | High |
+| Token usage | `token_usage` | timestamp, provider, model, token counts, tokenizer profile, accuracy, session | Aggregate model activity | optionally belongs to session | High |
 | Setting | `settings` | key, value | Persistent application configuration | independent | High |
 | Watch baseline entry | `watch_directory_baseline_entries` | directory path, entry path | Preserve existing items when a folder is added | grouped by watched directory | High on macOS and Windows |
+| RAG search trace | `rag_search_traces` | query, candidate counts, threshold, reranker, latency | Local retrieval evaluation and diagnostics | bounded independent history | High on macOS |
 
 ## File lifecycle
 
@@ -27,7 +29,7 @@ Both platforms persist product state in a local SQLite-compatible database. macO
 
 ## Chunk kinds
 
-The macOS schema supports `title`, `text`, `table`, `list`, `picture`, `note`, and `metadata`. Page ranges and section paths are optional. The note is independently re-embeddable so editing a note does not require reparsing the source document.
+The macOS schema supports `title`, `text`, `table`, `list`, `picture`, `note`, and `metadata`. Page ranges and section paths are optional. Each retrieval chunk records a parent index, extracted entity terms, `token_count`, `tokenizer_profile`, `tokenizer_version`, and `token_count_accuracy`. Parent rows preserve the larger section returned to the answer model. Exact Docling tokenizer counts take precedence; legacy estimates migrate to the shared versioned estimator in place without changing chunk boundaries or vectors. Legacy chunks migrate by treating each old chunk as its own parent. The note is independently re-embeddable so editing a note does not require reparsing the source document.
 
 Windows now persists the same structured chunk vocabulary and contextual text instead of treating the full extracted body as an opaque single field. Windows migrations are additive and preserve existing file, embedding, session, and message rows.
 
@@ -42,6 +44,7 @@ Windows now persists the same structured chunk vocabulary and contextual text in
 | Parent | Child | Cardinality | Enforcement |
 | --- | --- | --- | --- |
 | File | Document chunk | one-to-many | foreign key cascade on macOS |
+| File | Document parent | one-to-many | foreign key cascade on macOS |
 | File | Embedding | one-to-many | foreign key cascade |
 | Chat session | Chat message | one-to-many | session foreign key/cascade in Windows; application migration on macOS |
 | Chat message | File | many-to-many logical reference | JSON array of file IDs, not a foreign-key join table |

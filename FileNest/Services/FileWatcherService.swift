@@ -27,9 +27,102 @@ struct WatchDirectoryInventory: Identifiable, Equatable {
     var isAccessible: Bool { accessState == .accessible }
 }
 
+enum OrganizationJobPhase: Equatable, Sendable {
+    case preparing
+    case waitingForStability
+    case indexing
+    case organizing
+    case paused
+    case stopping
+    case stopped
+    case completed
+    case failed
+}
+
+struct OrganizationJobProgress: Equatable, Sendable {
+    var phase: OrganizationJobPhase
+    var completed: Int
+    var total: Int
+    var moved: Int
+    var skipped: Int
+    var failed: Int
+    var currentFileName: String?
+    var indexingStage: IndexingStage?
+
+    var fractionCompleted: Double {
+        guard total > 0 else { return phase == .completed ? 1 : 0 }
+        return min(1, Double(completed) / Double(total))
+    }
+}
+
+struct OrganizationBatchResult: Equatable, Sendable {
+    let completed: Int
+    let total: Int
+    let moved: Int
+    let skipped: Int
+    let failed: Int
+    let stopped: Bool
+}
+
+/// A visible lifecycle for files discovered by automatic watching.
+enum AutomaticFileProcessingStage: Equatable, Sendable {
+    case queued
+    case indexing(IndexingStage)
+    case waitingForOrganization
+    case organizing
+    case completed
+    case failed(String)
+}
+
+struct AutomaticFileProcessingEvent: Sendable {
+    let fileID: Int64
+    let fileName: String
+    let stage: AutomaticFileProcessingStage
+}
+
+actor OrganizationExecutionGate {
+    private enum State {
+        case running
+        case paused
+        case stopped
+    }
+
+    private var state: State = .running
+
+    func reset() { state = .running }
+    func pause() { if state == .running { state = .paused } }
+    func resume() { if state == .paused { state = .running } }
+    func stop() { state = .stopped }
+
+    func waitUntilRunnable() async -> Bool {
+        while state == .paused {
+            guard !Task.isCancelled else { return false }
+            do {
+                try await Task.sleep(nanoseconds: 80_000_000)
+            } catch {
+                return false
+            }
+        }
+        return state == .running && !Task.isCancelled
+    }
+}
+
 /// File-watching service that uses DispatchSource to monitor configured folders for new files,
 /// then triggers organization and indexing.
 final class FileWatcherService: @unchecked Sendable {
+    private enum EntryExclusion {
+        case transient
+        case hidden
+        case unsupportedExtension
+    }
+
+    private struct ManualCandidate {
+        let url: URL
+        let isDirectory: Bool
+        var fingerprint: String?
+        var stableSince: Date?
+    }
+
     private static let pendingBaselinePathsKey = "watch.pending_baseline_paths.v1"
     private let store: SQLiteStore
     private let organizer: OrganizerService
@@ -42,6 +135,8 @@ final class FileWatcherService: @unchecked Sendable {
     private var runGeneration: UInt64 = 0
     var isRunning: Bool { queue.sync { running } }
     private let settings: AppSettings
+    /// Forwarded to AppState so automatic work is not invisible to the user.
+    var onAutomaticFileProcessing: (@Sendable (AutomaticFileProcessingEvent) -> Void)?
     private var pollTimer: DispatchSourceTimer?
     private var stabilityTracker = FileStabilityTracker()
     private var directoryStabilityTracker = DirectoryStabilityTracker()
@@ -59,6 +154,7 @@ final class FileWatcherService: @unchecked Sendable {
     private var forceOrganizeEntryPaths: Set<String> = []
     private var directoryAccessStates: [String: WatchDirectoryAccessState] = [:]
     private var lastPublishedDirectoryStatuses: [WatchDirectoryStatus] = []
+    private var manualOrganizationActive = false
     var onDirectoryStatusChange: (@Sendable ([WatchDirectoryStatus]) -> Void)?
     var watchedDirectoryCount: Int { queue.sync { sources.count } }
 
@@ -225,6 +321,297 @@ final class FileWatcherService: @unchecked Sendable {
         }
     }
 
+    /// Processes the direct children of watched folders with the same eligibility and stability
+    /// guarantees as automatic discovery. Existing library records are never reclassified here.
+    func organizePendingEntries(
+        in directoryPaths: [String]? = nil,
+        includePreservedEntries: Bool = false,
+        checkpoint: @escaping @Sendable () async -> Bool,
+        progress: @escaping @MainActor @Sendable (OrganizationJobProgress) -> Void
+    ) async -> OrganizationBatchResult {
+        let paths = Self.normalizedDirectoryPaths(directoryPaths ?? settings.watchDirs)
+        queue.sync { manualOrganizationActive = true }
+        defer {
+            queue.async { [weak self] in
+                guard let self else { return }
+                self.manualOrganizationActive = false
+                guard self.running else { return }
+                for path in paths {
+                    self.scanDirectory(URL(fileURLWithPath: path))
+                }
+            }
+        }
+
+        var state = OrganizationJobProgress(
+            phase: .preparing,
+            completed: 0,
+            total: 0,
+            moved: 0,
+            skipped: 0,
+            failed: 0,
+            currentFileName: nil,
+            indexingStage: nil
+        )
+        await progress(state)
+
+        var candidates = [ManualCandidate]()
+        let enabledExtensions = Set(settings.enabledExtensions.map { $0.lowercased() })
+        for path in paths {
+            guard await checkpoint() else {
+                return stoppedResult(from: state)
+            }
+            let directory = URL(fileURLWithPath: path)
+            guard let entries = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey],
+                options: [.skipsSubdirectoryDescendants]
+            ) else { continue }
+            let baseline = includePreservedEntries
+                ? Set<String>()
+                : ((try? store.watchDirectoryBaselineEntries(directoryPath: path)) ?? [])
+            for entry in entries where !baseline.contains(entry.path) {
+                let isDirectory = (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+                guard exclusionReason(
+                    for: entry,
+                    isDirectory: isDirectory,
+                    enabledExtensions: enabledExtensions
+                ) == nil else { continue }
+                candidates.append(ManualCandidate(url: entry, isDirectory: isDirectory))
+            }
+        }
+
+        state.total = candidates.count
+        await progress(state)
+        guard !candidates.isEmpty else {
+            state.phase = .completed
+            await progress(state)
+            return result(from: state, stopped: false)
+        }
+
+        while !candidates.isEmpty {
+            guard await checkpoint() else {
+                state.phase = .stopped
+                await progress(state)
+                return result(from: state, stopped: true)
+            }
+
+            let now = Date()
+            var ready = [ManualCandidate]()
+            var remaining = [ManualCandidate]()
+            for var candidate in candidates {
+                guard let fingerprint = candidateFingerprint(candidate) else {
+                    state.completed += 1
+                    state.skipped += 1
+                    continue
+                }
+                if candidate.fingerprint != fingerprint {
+                    candidate.fingerprint = fingerprint
+                    candidate.stableSince = now
+                    remaining.append(candidate)
+                    continue
+                }
+                let minimumDuration = candidate.isDirectory
+                    ? directoryMinimumStableDuration
+                    : minimumStableDuration
+                if let stableSince = candidate.stableSince,
+                   now.timeIntervalSince(stableSince) >= minimumDuration {
+                    ready.append(candidate)
+                } else {
+                    remaining.append(candidate)
+                }
+            }
+            candidates = remaining
+
+            guard !ready.isEmpty else {
+                state.phase = .waitingForStability
+                state.currentFileName = candidates.first?.url.lastPathComponent
+                state.indexingStage = nil
+                await progress(state)
+                do {
+                    try await Task.sleep(nanoseconds: 250_000_000)
+                } catch {
+                    state.phase = .stopped
+                    await progress(state)
+                    return result(from: state, stopped: true)
+                }
+                continue
+            }
+
+            for candidate in ready {
+                guard await checkpoint() else {
+                    state.phase = .stopped
+                    await progress(state)
+                    return result(from: state, stopped: true)
+                }
+                state.phase = .indexing
+                state.currentFileName = candidate.url.lastPathComponent
+                state.indexingStage = nil
+                await progress(state)
+
+                guard let fileID = register(candidate) else {
+                    state.completed += 1
+                    state.failed += 1
+                    await progress(state)
+                    continue
+                }
+                let progressSnapshot = state
+                let indexed = await indexer.indexFile(
+                    id: fileID,
+                    overridePath: candidate.url,
+                    forceVectorization: candidate.isDirectory,
+                    checkpoint: checkpoint
+                ) { stage in
+                    await progress(OrganizationJobProgress(
+                        phase: .indexing,
+                        completed: progressSnapshot.completed,
+                        total: progressSnapshot.total,
+                        moved: progressSnapshot.moved,
+                        skipped: progressSnapshot.skipped,
+                        failed: progressSnapshot.failed,
+                        currentFileName: candidate.url.lastPathComponent,
+                        indexingStage: stage
+                    ))
+                }
+                guard indexed else {
+                    let canContinue = await checkpoint()
+                    if Task.isCancelled || !canContinue {
+                        state.phase = .stopped
+                        await progress(state)
+                        return result(from: state, stopped: true)
+                    }
+                    state.completed += 1
+                    state.failed += 1
+                    await progress(state)
+                    continue
+                }
+
+                state.phase = .organizing
+                state.indexingStage = nil
+                await progress(state)
+                let pathBeforeMove = (try? store.file(id: fileID))?.path
+                do {
+                    try await organizer.organizeUsingAI(fileId: fileID, checkpoint: checkpoint)
+                    let updated = try? store.file(id: fileID)
+                    if updated?.organizedAt != nil, updated?.path != pathBeforeMove {
+                        state.moved += 1
+                    } else {
+                        state.skipped += 1
+                    }
+                } catch {
+                    state.failed += 1
+                    Self.log(
+                        "manual organization failed: \(error)",
+                        category: .organizeQueue,
+                        level: .error,
+                        metadata: ["entry": candidate.url.lastPathComponent]
+                    )
+                }
+                state.completed += 1
+                await progress(state)
+            }
+        }
+
+        state.phase = state.failed > 0 ? .failed : .completed
+        state.currentFileName = nil
+        state.indexingStage = nil
+        await progress(state)
+        return result(from: state, stopped: false)
+    }
+
+    private func exclusionReason(
+        for entry: URL,
+        isDirectory: Bool,
+        enabledExtensions: Set<String>
+    ) -> EntryExclusion? {
+        let name = entry.lastPathComponent
+        if FileEligibilityPolicy.shouldIgnoreFile(named: name) { return .transient }
+        if settings.excludeHidden && name.hasPrefix(".") { return .hidden }
+        if !isDirectory,
+           enabledExtensions.isNotEmpty,
+           !enabledExtensions.contains(entry.pathExtension.lowercased()) {
+            return .unsupportedExtension
+        }
+        return nil
+    }
+
+    private func candidateFingerprint(_ candidate: ManualCandidate) -> String? {
+        if candidate.isDirectory {
+            return DirectoryInspector.inspect(candidate.url)?.snapshot.signature
+        }
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: candidate.url.path) else {
+            return nil
+        }
+        let size = Int64((attributes[.size] as? NSNumber)?.intValue ?? 0)
+        let modificationDate = (attributes[.modificationDate] as? Date) ?? .distantPast
+        return "\(size)|\(modificationDate.timeIntervalSinceReferenceDate)"
+    }
+
+    private func register(_ candidate: ManualCandidate) -> Int64? {
+        if candidate.isDirectory {
+            guard let inspection = DirectoryInspector.inspect(candidate.url) else { return nil }
+            let existing = try? store.file(path: candidate.url.path)
+            let record = FileRecord(
+                id: existing?.id,
+                path: candidate.url.path,
+                name: candidate.url.lastPathComponent,
+                ext: "",
+                size: inspection.snapshot.totalSize,
+                mtime: inspection.snapshot.latestModificationDate,
+                category: inspection.category.rawValue,
+                sourceDir: candidate.url.deletingLastPathComponent().path,
+                indexedAt: existing?.indexedAt,
+                contentHash: existing?.contentHash,
+                title: existing?.title,
+                contentText: existing?.contentText,
+                discoveredAt: existing?.discoveredAt ?? Date(),
+                organizedAt: existing?.organizedAt,
+                note: existing?.note,
+                organizationSubfolder: existing?.organizationSubfolder,
+                isDirectory: true
+            )
+            return try? store.upsertFile(record)
+        }
+
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: candidate.url.path) else {
+            return nil
+        }
+        let existing = try? store.file(path: candidate.url.path)
+        let record = FileRecord(
+            id: existing?.id,
+            path: candidate.url.path,
+            name: candidate.url.lastPathComponent,
+            ext: candidate.url.pathExtension,
+            size: Int64((attributes[.size] as? NSNumber)?.intValue ?? 0),
+            mtime: (attributes[.modificationDate] as? Date) ?? Date(),
+            category: FileCategory.from(extension: candidate.url.pathExtension).rawValue,
+            sourceDir: candidate.url.deletingLastPathComponent().path,
+            indexedAt: existing?.indexedAt,
+            contentHash: existing?.contentHash,
+            title: existing?.title,
+            contentText: existing?.contentText,
+            discoveredAt: existing?.discoveredAt ?? Date(),
+            organizedAt: existing?.organizedAt,
+            note: existing?.note,
+            organizationSubfolder: existing?.organizationSubfolder
+        )
+        return try? store.upsertFile(record)
+    }
+
+    private func result(from progress: OrganizationJobProgress, stopped: Bool) -> OrganizationBatchResult {
+        OrganizationBatchResult(
+            completed: progress.completed,
+            total: progress.total,
+            moved: progress.moved,
+            skipped: progress.skipped,
+            failed: progress.failed,
+            stopped: stopped
+        )
+    }
+
+    private func stoppedResult(from progress: OrganizationJobProgress) -> OrganizationBatchResult {
+        result(from: progress, stopped: true)
+    }
+
     static func inventories(
         for directoryPaths: [String],
         enabledExtensions: [String],
@@ -377,6 +764,7 @@ final class FileWatcherService: @unchecked Sendable {
     /// Scans a folder for added or modified files; called only on the serial queue, so seen requires no extra locking.
     @discardableResult
     private func scanDirectory(_ url: URL) -> Bool {
+        guard !manualOrganizationActive else { return true }
         let fm = FileManager.default
         let path = url.standardizedFileURL.path
         let entries: [URL]
@@ -401,7 +789,7 @@ final class FileWatcherService: @unchecked Sendable {
             return false
         }
         let previousState = directoryAccessStates[path]
-        updateAccessState(.accessible, for: path)
+        _ = updateAccessState(.accessible, for: path)
         if previousState != nil && previousState != .accessible {
             Self.log(
                 "directory access restored; starting incremental scan",
@@ -452,28 +840,29 @@ final class FileWatcherService: @unchecked Sendable {
             directoryPath: url.standardizedFileURL.path,
             existingEntryPaths: existingPaths
         )
+        let baselineEntries = (try? store.watchDirectoryBaselineEntries(directoryPath: path)) ?? []
+        let storedFilesByPath = (try? store.files(atPaths: existingPaths)) ?? [:]
 
         for entry in entries {
-            let directoryPath = url.standardizedFileURL.path
-            if store.isWatchDirectoryBaselineEntry(
-                directoryPath: directoryPath,
-                entryPath: entry.path
-            ) {
+            if baselineEntries.contains(entry.path) {
                 baselineSkipped += 1
                 continue
             }
             let name = entry.lastPathComponent
-            if FileEligibilityPolicy.shouldIgnoreFile(named: name) {
-                transientSkipped += 1
-                continue
-            }
-            if settings.excludeHidden && name.hasPrefix(".") {
-                hiddenSkipped += 1
-                continue
-            }
-
             var isDir: ObjCBool = false
             fm.fileExists(atPath: entry.path, isDirectory: &isDir)
+            if let exclusion = exclusionReason(
+                for: entry,
+                isDirectory: isDir.boolValue,
+                enabledExtensions: enabledExts
+            ) {
+                switch exclusion {
+                case .transient: transientSkipped += 1
+                case .hidden: hiddenSkipped += 1
+                case .unsupportedExtension: extensionSkipped += 1
+                }
+                continue
+            }
             if isDir.boolValue {
                 guard let inspection = DirectoryInspector.inspect(entry) else {
                     inspectionFailures += 1
@@ -481,7 +870,7 @@ final class FileWatcherService: @unchecked Sendable {
                 }
                 let dedupKey = "directory|\(entry.path)|\(inspection.snapshot.signature)"
                 let shouldOrganize = settings.autoOrganize || forceOrganizeEntryPaths.contains(entry.path)
-                if let existing = try? store.file(path: entry.path),
+                if let existing = storedFilesByPath[entry.path],
                    existing.isDirectory,
                    existing.indexedAt != nil,
                    existing.contentHash == inspection.snapshot.signature {
@@ -491,7 +880,7 @@ final class FileWatcherService: @unchecked Sendable {
                     if shouldOrganize,
                        existing.organizedAt == nil,
                        let id = existing.id {
-                        organizer.enqueue(fileId: id)
+                        organizer.enqueue(fileId: id, force: shouldOrganize && !settings.autoOrganize)
                         finishForcedOrganization(for: entry.path)
                     }
                     continue
@@ -517,12 +906,6 @@ final class FileWatcherService: @unchecked Sendable {
                 continue
             }
 
-            let ext = entry.pathExtension.lowercased()
-            if enabledExts.isNotEmpty && !enabledExts.contains(ext) {
-                extensionSkipped += 1
-                continue
-            }
-
             // Deduplicate processed paths unless their modification time changed.
             let attrs = try? fm.attributesOfItem(atPath: entry.path)
             let mtime = (attrs?[.modificationDate] as? Date) ?? now
@@ -533,7 +916,7 @@ final class FileWatcherService: @unchecked Sendable {
 
             // Verify the content hash once per launch even when metadata is unchanged, so sync-tool overwrites are detected
             // when they preserve size and modification time.
-            if let existing = try? store.file(path: entry.path),
+            if let existing = storedFilesByPath[entry.path],
                existing.size == size,
                abs(existing.mtime.timeIntervalSince(mtime)) < 0.001,
                existing.indexedAt != nil,
@@ -555,7 +938,7 @@ final class FileWatcherService: @unchecked Sendable {
                     if shouldOrganize,
                        existing.organizedAt == nil,
                        let id = existing.id {
-                        organizer.enqueue(fileId: id)
+                        organizer.enqueue(fileId: id, force: shouldOrganize && !settings.autoOrganize)
                         finishForcedOrganization(for: entry.path)
                     }
                     continue
@@ -667,6 +1050,7 @@ final class FileWatcherService: @unchecked Sendable {
         )
         do {
             let id = try store.upsertFile(record)
+            reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .queued)
             Self.log(
                 "stable directory discovered",
                 category: .watchDiscovery,
@@ -677,7 +1061,15 @@ final class FileWatcherService: @unchecked Sendable {
                 ]
             )
             Task {
-                guard await indexer.indexFile(id: id, overridePath: url, forceVectorization: true) else {
+                guard await indexer.indexFile(
+                    id: id,
+                    overridePath: url,
+                    forceVectorization: true,
+                    stageProgress: { [weak self] stage in
+                        self?.reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .indexing(stage))
+                    }
+                ) else {
+                    self.reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .failed("Indexing failed"))
                     Self.log(
                         "directory indexing failed; keeping entry in place",
                         category: .watchDiscovery,
@@ -688,6 +1080,7 @@ final class FileWatcherService: @unchecked Sendable {
                     return
                 }
                 guard await self.isActive(generation: generation) else {
+                    self.reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .failed("Watching paused"))
                     Self.log(
                         "watcher stopped before directory organization",
                         category: .watchLifecycle,
@@ -697,8 +1090,11 @@ final class FileWatcherService: @unchecked Sendable {
                     return
                 }
                 if shouldOrganize {
-                    self.organizer.enqueue(fileId: id)
+                    self.reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .waitingForOrganization)
+                    self.organizer.enqueue(fileId: id, force: shouldOrganize && !self.settings.autoOrganize)
                     self.finishForcedOrganization(for: url.path)
+                } else {
+                    self.reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .completed)
                 }
             }
         } catch {
@@ -733,6 +1129,7 @@ final class FileWatcherService: @unchecked Sendable {
         )
         do {
             let id = try store.upsertFile(record)
+            reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .queued)
             Self.log(
                 "file discovered",
                 category: .watchDiscovery,
@@ -742,7 +1139,14 @@ final class FileWatcherService: @unchecked Sendable {
             // Moving first would invalidate the original path and prevent the indexer from reading the content.
             // Index from the original URL, then let the organizer update the database path after moving.
             Task {
-                guard await indexer.indexFile(id: id, overridePath: url) else {
+                guard await indexer.indexFile(
+                    id: id,
+                    overridePath: url,
+                    stageProgress: { [weak self] stage in
+                        self?.reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .indexing(stage))
+                    }
+                ) else {
+                    self.reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .failed("Indexing failed"))
                     Self.log(
                         "file indexing failed; keeping file in place",
                         category: .watchDiscovery,
@@ -753,6 +1157,7 @@ final class FileWatcherService: @unchecked Sendable {
                     return
                 }
                 guard await self.isActive(generation: generation) else {
+                    self.reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .failed("Watching paused"))
                     Self.log(
                         "watcher stopped before file organization",
                         category: .watchLifecycle,
@@ -762,8 +1167,11 @@ final class FileWatcherService: @unchecked Sendable {
                     return
                 }
                 if shouldOrganize {
-                    self.organizer.enqueue(fileId: id)
+                    self.reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .waitingForOrganization)
+                    self.organizer.enqueue(fileId: id, force: shouldOrganize && !self.settings.autoOrganize)
                     self.finishForcedOrganization(for: url.path)
+                } else {
+                    self.reportAutomaticProcessing(fileID: id, fileName: record.name, stage: .completed)
                 }
             }
         } catch {
@@ -781,6 +1189,18 @@ final class FileWatcherService: @unchecked Sendable {
         queue.async { [weak self] in
             self?.seen.remove(dedupKey)
         }
+    }
+
+    private func reportAutomaticProcessing(
+        fileID: Int64,
+        fileName: String,
+        stage: AutomaticFileProcessingStage
+    ) {
+        onAutomaticFileProcessing?(AutomaticFileProcessingEvent(
+            fileID: fileID,
+            fileName: fileName,
+            stage: stage
+        ))
     }
 
     private func finishForcedOrganization(for path: String) {

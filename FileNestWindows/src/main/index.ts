@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, nativeImage, net, protocol, shell, type MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, net, protocol, screen, shell, type MenuItemConstructorOptions } from 'electron'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { existsSync } from 'node:fs'
@@ -13,6 +13,8 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock()
 if (!hasSingleInstanceLock) app.quit()
 
 let mainWindow: BrowserWindow | null = null
+let quickSearchWindow: BrowserWindow | null = null
+let registeredQuickSearchShortcut: string | null = null
 let tray: Tray | null = null
 let trayMenuTimer: ReturnType<typeof setTimeout> | null = null
 let quitting = false
@@ -90,6 +92,63 @@ function showMainWindow(): void {
   mainWindow.focus()
 }
 
+function createQuickSearchWindow(): BrowserWindow {
+  const window = new BrowserWindow({
+    width: 620,
+    height: 138,
+    show: false,
+    frame: false,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    transparent: true,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true
+    }
+  })
+  window.on('blur', () => window.hide())
+  if (process.env.ELECTRON_RENDERER_URL) void window.loadURL(`${process.env.ELECTRON_RENDERER_URL}#quick-search`)
+  else void window.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'quick-search' })
+  return window
+}
+
+function toggleQuickSearch(): void {
+  if (!quickSearchWindow || quickSearchWindow.isDestroyed()) quickSearchWindow = createQuickSearchWindow()
+  if (quickSearchWindow.isVisible()) {
+    quickSearchWindow.hide()
+    return
+  }
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+  const bounds = quickSearchWindow.getBounds()
+  quickSearchWindow.setPosition(
+    Math.round(display.workArea.x + (display.workArea.width - bounds.width) / 2),
+    Math.round(display.workArea.y + (display.workArea.height - bounds.height) / 2)
+  )
+  quickSearchWindow.show()
+  quickSearchWindow.focus()
+  quickSearchWindow.webContents.send('quick-search:focus')
+}
+
+function registerQuickSearchShortcut(shortcut: string): string | null {
+  if (registeredQuickSearchShortcut) globalShortcut.unregister(registeredQuickSearchShortcut)
+  registeredQuickSearchShortcut = null
+  try {
+    if (!globalShortcut.register(shortcut, toggleQuickSearch)) return 'The shortcut could not be registered. Choose a different combination.'
+    registeredQuickSearchShortcut = shortcut
+    return null
+  } catch {
+    return 'The shortcut could not be registered. Choose a different combination.'
+  }
+}
+
 function createTray(): void {
   const path = resourcePath('tray-icon.png')
   const fallback = resourcePath('app-icon.png')
@@ -110,6 +169,7 @@ async function rebuildTrayMenu(): Promise<void> {
   const recent = snapshot.files.filter((file) => file.organizedAt).slice(0, 4)
   const template: MenuItemConstructorOptions[] = [
     { label: 'Open FileNest', click: showMainWindow },
+    { label: 'Open Quick Search', click: toggleQuickSearch },
     { type: 'separator' },
     { label: 'Start Watching', enabled: !snapshot.watching, click: () => void controller.startWatching() },
     { label: 'Pause Watching', enabled: snapshot.watching, click: () => void controller.stopWatching() },
@@ -130,6 +190,8 @@ async function rebuildTrayMenu(): Promise<void> {
 
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   await controller.initialize()
+  controller.onQuickSearchRequested = showMainWindow
+  controller.onQuickSearchShortcutChanged = registerQuickSearchShortcut
   if (process.env.FILENEST_QA_CAPTURE) await seedQaFixture()
   protocol.handle('filenest-file', (request) => {
     try {
@@ -143,6 +205,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     }
   })
   registerIpc(controller)
+  controller.setQuickSearchShortcutError(registerQuickSearchShortcut(controller.database.getSettings().quickSearchShortcut))
   mainWindow = createWindow()
   createTray()
   app.on('activate', showMainWindow)

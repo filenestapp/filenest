@@ -29,7 +29,8 @@ final class OllamaLLMProvider: LLMProvider {
             msgs.insert(["role": "system", "content": context], at: 0)
         }
         var body: [String: Any] = ["model": model, "messages": msgs, "stream": false]
-        if thinkingEnabled { body["think"] = true }
+        // Some Ollama models enable reasoning by default unless false is explicit.
+        body["think"] = thinkingEnabled
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, resp) = try await session.data(for: req)
@@ -66,7 +67,7 @@ final class OllamaLLMProvider: LLMProvider {
             "images": [imageData.base64EncodedString()],
         ])
         var body: [String: Any] = ["model": model, "messages": messages, "stream": false]
-        if thinkingEnabled { body["think"] = true }
+        body["think"] = thinkingEnabled
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await session.data(for: request)
@@ -108,7 +109,7 @@ final class OllamaLLMProvider: LLMProvider {
                         "messages": messages,
                         "stream": true,
                     ]
-                    if self.thinkingEnabled { body["think"] = true }
+                    body["think"] = self.thinkingEnabled
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                     let (bytes, response) = try await session.bytes(for: request)
@@ -156,7 +157,7 @@ final class OllamaLLMProvider: LLMProvider {
                         "messages": payload,
                         "stream": true,
                     ]
-                    if self.thinkingEnabled { body["think"] = true }
+                    body["think"] = self.thinkingEnabled
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                     let (bytes, response) = try await session.bytes(for: request)
@@ -722,7 +723,7 @@ enum AIConnectivityTester {
     private static func checkChat(_ provider: LLMProvider) async -> AIConnectivityCheck {
         do {
             let reply = try await provider.chat(
-                [ChatTurn(role: .user, content: "Reply with OK only.")],
+                [ChatTurn(role: .user, content: PromptCatalog.Connectivity.chat)],
                 context: nil
             )
             guard !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -736,7 +737,7 @@ enum AIConnectivityTester {
 
     private static func checkEmbedding(_ provider: EmbeddingProvider) async -> AIConnectivityCheck {
         do {
-            let vector = try await provider.embed("FileNest connectivity test")
+            let vector = try await provider.embed(PromptCatalog.Connectivity.embedding)
             guard !vector.isEmpty else { throw URLError(.cannotParseResponse) }
             return AIConnectivityCheck(kind: .embedding, succeeded: true, detail: nil)
         } catch {
@@ -753,6 +754,87 @@ enum AIConnectivityTester {
             return AIConnectivityCheck(kind: .ocr, succeeded: true, detail: nil)
         } catch {
             return AIConnectivityCheck(kind: .ocr, succeeded: false, detail: error.localizedDescription)
+        }
+    }
+}
+
+/// OpenAI/Jina-compatible reranking endpoint. It works with a local Qwen3-Reranker
+/// server or a compatible cloud API and deliberately fails open at the caller.
+final class CompatibleRerankingProvider: RerankingProvider, @unchecked Sendable {
+    let name: String
+    private let baseURL: String
+    private let apiKey: String
+    private let model: String
+    private let session: URLSession
+
+    init(baseURL: String,
+         apiKey: String,
+         model: String,
+         name: String,
+         session: URLSession = .shared) {
+        self.baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.name = name
+        self.session = session
+    }
+
+    func rerank(query: String, documents: [String], topN: Int) async throws -> [RerankItem] {
+        guard !query.isEmpty, !documents.isEmpty, let url = endpointURL else { return [] }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "query": query,
+            "documents": documents,
+            "top_n": min(max(1, topN), documents.count),
+        ])
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let detail = String(data: data, encoding: .utf8) ?? ""
+            throw RerankingError.httpStatus(status, detail)
+        }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawResults = (object["results"] ?? object["data"]) as? [[String: Any]] else {
+            throw RerankingError.invalidResponse
+        }
+        return rawResults.compactMap { value in
+            guard let index = value["index"] as? Int else { return nil }
+            let score = (value["relevance_score"] as? NSNumber)?.doubleValue
+                ?? (value["score"] as? NSNumber)?.doubleValue
+            guard let score, score.isFinite else { return nil }
+            return RerankItem(index: index, score: score)
+        }.sorted { $0.score > $1.score }
+    }
+
+    private var endpointURL: URL? {
+        guard var components = URLComponents(string: baseURL) else { return nil }
+        var path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !path.hasSuffix("rerank") {
+            path = path.hasSuffix("v1") ? "\(path)/rerank" : "\(path.isEmpty ? "v1" : path + "/v1")/rerank"
+        }
+        components.path = "/" + path
+        return components.url
+    }
+}
+
+enum RerankingError: LocalizedError {
+    case httpStatus(Int, String)
+    case invalidResponse
+
+    var errorDescription: String? {
+        switch self {
+        case let .httpStatus(status, detail):
+            return "Reranker request failed with HTTP \(status): \(detail.prefix(240))"
+        case .invalidResponse:
+            return "Reranker returned an invalid response."
         }
     }
 }

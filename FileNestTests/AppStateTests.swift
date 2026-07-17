@@ -33,6 +33,65 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(state.completedChatSessionIDs.isEmpty)
     }
 
+    @MainActor
+    func testChatExecutionPresentationIsIsolatedBySessionAndSurvivesSelectionChanges() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        let previousIndexer = AppStateIndexerProxy.shared.indexer
+        defer { AppStateIndexerProxy.shared.indexer = previousIndexer }
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: temporaryDirectory.appendingPathComponent("organized"),
+            startAutomatically: false
+        )
+        let sessionID: Int64 = 42
+        let user = ChatMessage(
+            id: -1,
+            role: ChatRole.user.rawValue,
+            content: "Find the latest invoice",
+            ts: Date(),
+            relatedFileIds: nil,
+            sessionId: sessionID
+        )
+        let assistant = ChatMessage(
+            id: -2,
+            role: ChatRole.assistant.rawValue,
+            content: "",
+            ts: Date(),
+            relatedFileIds: nil,
+            sessionId: sessionID
+        )
+
+        state.beginChatExecution(
+            sessionID: sessionID,
+            userMessage: user,
+            assistantMessage: assistant,
+            progress: ChatProgress(phase: .queryingIndex)
+        )
+        state.newChat()
+
+        XCTAssertNil(state.selectedChatSessionID)
+        XCTAssertEqual(state.runningChatSessionIDs, [sessionID])
+        XCTAssertEqual(
+            state.presentedChatMessages(sessionID: sessionID, persistedMessages: []).map(\.content),
+            ["Find the latest invoice", ""]
+        )
+        XCTAssertEqual(state.chatExecutionPresentations[sessionID]?.progress?.phase, .queryingIndex)
+
+        state.appendChatExecutionDelta(sessionID: sessionID, delta: "Invoice found")
+        XCTAssertEqual(
+            state.presentedChatMessages(sessionID: sessionID, persistedMessages: []).last?.content,
+            "Invoice found"
+        )
+        XCTAssertNil(state.chatExecutionPresentations[sessionID]?.progress)
+    }
+
     func testIndexingTaskStateDrivesAnimationsAndReindexAvailability() {
         XCTAssertTrue(IndexingTaskState.running.isActive)
         XCTAssertTrue(IndexingTaskState.running.isAnimating)
@@ -44,6 +103,33 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertFalse(IndexingTaskState.stopped.isActive)
         XCTAssertFalse(IndexingTaskState.stopped.blocksReindexButtons)
+    }
+
+    @MainActor
+    func testQuickSearchRequestTrimsInputAndCanBeConsumed() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        let previousIndexer = AppStateIndexerProxy.shared.indexer
+        defer { AppStateIndexerProxy.shared.indexer = previousIndexer }
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: temporaryDirectory.appendingPathComponent("organized"),
+            startAutomatically: false
+        )
+
+        state.requestLibrarySearch("  quarterly invoice  ")
+
+        let request = try XCTUnwrap(state.librarySearchRequest)
+        XCTAssertEqual(request.query, "quarterly invoice")
+
+        state.consumeLibrarySearchRequest(request.id)
+        XCTAssertNil(state.librarySearchRequest)
     }
 
     @MainActor
@@ -189,6 +275,13 @@ final class AppStateTests: XCTestCase {
         let sessionID = try XCTUnwrap(state.persistChatForQuestion())
         XCTAssertEqual(state.selectedChatSessionID, sessionID)
         XCTAssertEqual(try store.allChatSessions().map(\.id), [sessionID])
+
+        state.newChat()
+        state.refreshChatSessions()
+
+        XCTAssertNil(state.selectedChatSessionID)
+        XCTAssertTrue(state.chatMessages.isEmpty)
+        XCTAssertEqual(try store.allChatSessions().map(\.id), [sessionID])
     }
 
     @MainActor
@@ -327,6 +420,98 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(state.canAdvanceReindexConfirmation)
         XCTAssertTrue(state.selectedAdvancedReindexCategories.isEmpty)
         state.cancelReindexConfirmation()
+    }
+
+    @MainActor
+    func testRAGStageSelectionExpandsDependenciesAndSupportsFullReset() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        let previousIndexer = AppStateIndexerProxy.shared.indexer
+        defer { AppStateIndexerProxy.shared.indexer = previousIndexer }
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: temporaryDirectory.appendingPathComponent("organized"),
+            startAutomatically: false
+        )
+
+        state.reindexAll()
+        state.setRAGReindexStage(.structuredChunking, selected: true)
+        XCTAssertEqual(state.selectedRAGReindexStages, [
+            .structuredChunking, .embeddings, .retrievalIndex,
+        ])
+
+        state.setRAGReindexStage(.embeddings, selected: false)
+        XCTAssertEqual(state.selectedRAGReindexStages, [.retrievalIndex])
+
+        state.setFullPipelineReindexSelected(true)
+        XCTAssertTrue(state.isFullPipelineReindexSelected)
+        XCTAssertTrue(state.selectedRAGReindexStages.contains(.parsingAndOCR))
+        XCTAssertTrue(state.selectedRAGReindexStages.contains(.structuredChunking))
+        XCTAssertTrue(state.selectedRAGReindexStages.contains(.embeddings))
+        XCTAssertTrue(state.selectedRAGReindexStages.contains(.retrievalIndex))
+        state.cancelReindexConfirmation()
+    }
+
+    @MainActor
+    func testOrganizerActivityResolvesTheRealFileNameInsteadOfAPlaceholder() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        let organizedDirectory = temporaryDirectory.appendingPathComponent("organized", isDirectory: true)
+        try FileManager.default.createDirectory(at: organizedDirectory, withIntermediateDirectories: true)
+        let fileID = try store.upsertFile(makeFile(in: organizedDirectory, name: "quarterly-report.pdf"))
+        let previousIndexer = AppStateIndexerProxy.shared.indexer
+        defer { AppStateIndexerProxy.shared.indexer = previousIndexer }
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: organizedDirectory,
+            startAutomatically: false
+        )
+
+        state.organizer.onAutomaticOrganizationUpdate?(fileID, .completed, nil)
+        await Task.yield()
+
+        XCTAssertEqual(state.automaticFileProcessingItems.first?.fileName, "quarterly-report.pdf")
+        XCTAssertEqual(state.automaticFileProcessingItems.first?.stage, .completed)
+    }
+
+    @MainActor
+    func testDrawerFileReindexAppearsInProcessingQueue() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        let organizedDirectory = temporaryDirectory.appendingPathComponent("organized", isDirectory: true)
+        try FileManager.default.createDirectory(at: organizedDirectory, withIntermediateDirectories: true)
+        let fileID = try store.upsertFile(makeFile(in: organizedDirectory, name: "archive.bin"))
+        let file = try XCTUnwrap(store.file(id: fileID))
+        let previousIndexer = AppStateIndexerProxy.shared.indexer
+        defer { AppStateIndexerProxy.shared.indexer = previousIndexer }
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: organizedDirectory,
+            startAutomatically: false
+        )
+
+        let succeeded = await state.reindexFile(file)
+
+        XCTAssertTrue(succeeded)
+        let queueItem = try XCTUnwrap(state.automaticFileProcessingItems.first { $0.id == fileID })
+        XCTAssertEqual(queueItem.fileName, "archive.bin")
+        XCTAssertEqual(queueItem.stage, .completed)
+        XCTAssertFalse(queueItem.isActive)
     }
 
     func testLibraryFileQuerySortsByModifiedDateAndSizeInBothDirections() {

@@ -232,6 +232,14 @@ function GeneralSettings({
           </select>
         </SettingRow>
       </SettingsSection>
+      <SettingsSection title={t("Quick Search")} subtitle={t("Use this shortcut from any app to open a centered FileNest search box.")}>
+        <SettingRow label={t("Quick Search Shortcut")} hint={snapshot.quickSearchShortcutError ?? undefined}>
+          <div className="shortcut-controls">
+            <ShortcutRecorder value={snapshot.settings.quickSearchShortcut} onChange={(value) => update({ quickSearchShortcut: value })} />
+            <button className="secondary-button" onClick={() => void update({ quickSearchShortcut: "CommandOrControl+Alt+Space" })}>{t("Reset to Default")}</button>
+          </div>
+        </SettingRow>
+      </SettingsSection>
       <SettingsSection title="Version and Diagnostics">
         <SettingRow label="HTTPS Update URL" hint="Points to the release folder containing latest.yml">
           <input
@@ -294,6 +302,36 @@ function GeneralSettings({
       </SettingsSection>
     </div>
   );
+}
+
+function ShortcutRecorder({ value, onChange }: { value: string; onChange(value: string): Promise<void> }): React.JSX.Element {
+  const [recording, setRecording] = useState(false);
+  return (
+    <button
+      className={`shortcut-recorder ${recording ? "recording" : ""}`}
+      onClick={() => setRecording(true)}
+      onBlur={() => setRecording(false)}
+      onKeyDown={(event) => {
+        if (!recording) return;
+        event.preventDefault();
+        if (event.key === "Escape") { setRecording(false); return; }
+        const shortcut = acceleratorFromEvent(event);
+        if (!shortcut) return;
+        setRecording(false);
+        void onChange(shortcut);
+      }}
+    >
+      {recording ? "Press a shortcut…" : value.replace("CommandOrControl", "Ctrl")}
+    </button>
+  );
+}
+
+function acceleratorFromEvent(event: React.KeyboardEvent): string | null {
+  if (!event.ctrlKey && !event.altKey && !event.metaKey) return null;
+  const ignored = new Set(["Control", "Alt", "Shift", "Meta"]);
+  if (ignored.has(event.key)) return null;
+  const key = event.key === " " ? "Space" : event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  return [event.ctrlKey || event.metaKey ? "CommandOrControl" : null, event.altKey ? "Alt" : null, event.shiftKey ? "Shift" : null, key].filter(Boolean).join("+");
 }
 
 function IndexSettings({

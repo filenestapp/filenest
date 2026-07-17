@@ -79,7 +79,15 @@ sequenceDiagram
 
 ### Retrieval and chat
 
-The query planner combines explicit metadata intent, relative/absolute date intent, direct filename/title/note/path matches, keyword content matches, and semantic chunk matches. Evidence is normalized into a confidence score before UI sorting. Normal library search is automatic and debounced; Smart Search is an explicit escalation from completed normal results and streams a short interpreted intent while the AI plan is built. File chat bypasses library retrieval. Context planning keeps recent turns, compresses older turns, and bounds retrieval to the selected model context window.
+The query planner combines explicit metadata intent, relative/absolute date intent, direct filename/title/note/path matches, keyword content matches, exact chunk entities, and semantic child matches. Lexical, entity, and semantic ranks are fused with reciprocal-rank fusion; semantic acceptance uses a query-relative score window with a safe floor. An optional OpenAI/Jina-compatible reranker processes the strongest candidates and fails open to fused order. Normal library search is automatic and debounced; Smart Search is an explicit escalation from completed normal results and streams a short interpreted intent while the AI plan is built.
+
+The indexer retains Docling sections as answer-time parents (normally 600–1000 tokens) and produces smaller retrieval children (about 280 tokens). A child match resolves to its parent, table children repeat their header, results are deduplicated by parent, and the answer context is capped at eight parents plus a character budget. File chat bypasses library-wide retrieval. Context planning keeps recent turns, compresses older turns, and bounds retrieval to the selected model context window. Library answers receive stable `[F#:P#]` evidence IDs; a deterministic final pass removes invalid IDs and records citation coverage.
+
+Every library retrieval writes a bounded local trace containing candidate counts, the effective semantic threshold, reranker identity, result count, and latency. These traces support offline recall and ranking evaluation without adding a chunk-level FTS index.
+
+### Token accounting
+
+All native chunking, context planning, persisted chunk metadata, previews, and fallback usage statistics use one versioned token counter. The canonical embedding profile is `qwen3-embedding:0.6b`. Docling records an exact count when its Hugging Face tokenizer is available; native and provider fallback paths record a reproducible estimate together with `tokenizer_profile`, `tokenizer_version`, and `token_count_accuracy`. Exact values are never replaced by estimate migrations. Existing estimates are recalculated in place without changing chunk boundaries or vectors. Chat metrics carry an approximation marker until a provider exposes authoritative usage metadata.
 
 On Windows, `LibrarySearchService` owns renderer-independent lexical, date, semantic, sorting, and paging behavior. The renderer calls it through the typed preload contract instead of filtering a snapshot locally.
 

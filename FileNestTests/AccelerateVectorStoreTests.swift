@@ -94,6 +94,64 @@ final class AccelerateVectorStoreTests: XCTestCase {
         XCTAssertEqual(neighbors.last?.kind, .table)
     }
 
+    func testExactChunkTokenMetadataSurvivesVectorPersistence() async throws {
+        let fileId = try insertFile(named: "tokenized.pdf")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let replaced = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(
+                vector: [1, 0],
+                text: "Invoice total SGD 500",
+                contextualText: "Document: Invoice\n\nInvoice total SGD 500",
+                tokenCount: 11,
+                tokenizerProfile: TokenCounter.canonicalProfile,
+                tokenizerVersion: "huggingface-tokenizer-v1",
+                tokenCountAccuracy: .exact
+            )],
+            model: "test-model"
+        )
+        XCTAssertTrue(replaced)
+
+        let chunk = try XCTUnwrap(store.documentChunks(fileID: fileId).first)
+        XCTAssertEqual(chunk.tokenCount, 11)
+        XCTAssertEqual(chunk.tokenizerProfile, TokenCounter.canonicalProfile)
+        XCTAssertEqual(chunk.tokenizerVersion, "huggingface-tokenizer-v1")
+        XCTAssertEqual(chunk.tokenCountAccuracy, .exact)
+    }
+
+    func testParentSectionAndEntityTermsSurviveVectorPersistence() async throws {
+        let fileId = try insertFile(named: "invoice.pdf")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let replaced = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(
+                vector: [1, 0],
+                text: "INV-20250377",
+                contextualText: "Invoice INV-20250377",
+                sectionPath: ["Invoices"],
+                kind: .text,
+                parentIndex: 4,
+                parentText: "Invoice INV-20250377 was issued to Waterdrop Inc.",
+                entityTerms: ["inv-20250377"]
+            )],
+            model: "test-model"
+        )
+        XCTAssertTrue(replaced)
+
+        let hits = await vectorStore.searchChunks([1, 0], k: 1)
+        let hit = try XCTUnwrap(hits.first)
+        XCTAssertEqual(hit.parentIndex, 4)
+        XCTAssertEqual(hit.parentText, "Invoice INV-20250377 was issued to Waterdrop Inc.")
+        XCTAssertEqual(hit.entityTerms, ["inv-20250377"])
+
+        let entityHit = try XCTUnwrap(store.entityChunkMatches(
+            terms: ["INV-20250377"],
+            limit: 10
+        ).first)
+        XCTAssertEqual(entityHit.fileId, fileId)
+        XCTAssertEqual(entityHit.parentIndex, 4)
+    }
+
     func testReplacingOneFileKeepsOtherFilesInMemoryAndSQLite() async throws {
         let firstId = try insertFile(named: "first.md")
         let secondId = try insertFile(named: "second.md")
@@ -140,6 +198,145 @@ final class AccelerateVectorStoreTests: XCTestCase {
         try assertPersistedChunks(fileId: fileId, expectedIndexes: [])
         let hits = await vectorStore.search([1, 0], k: 1)
         XCTAssertTrue(hits.isEmpty)
+    }
+
+    func testRebuildRetrievalIndexPreservesChunksAndStoredEmbeddings() async throws {
+        let fileId = try insertFile(named: "retrieval.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let replaced = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [
+                EmbeddingChunk(vector: [1, 0], text: "primary retrieval chunk"),
+                EmbeddingChunk(vector: [0, 1], text: "secondary retrieval chunk"),
+            ],
+            model: "test-model"
+        )
+        XCTAssertTrue(replaced)
+
+        try await store.dbPool.write { db in
+            try db.execute(sql: "DROP TABLE IF EXISTS vec_embeddings")
+        }
+
+        let rebuilt = await vectorStore.rebuildRetrievalIndex()
+
+        XCTAssertTrue(rebuilt)
+        XCTAssertEqual(vectorStore.count, 2)
+        try assertPersistedChunks(fileId: fileId, expectedIndexes: [0, 1])
+        let hits = await vectorStore.searchChunks([1, 0], k: 1)
+        XCTAssertEqual(hits.first?.fileId, fileId)
+        XCTAssertEqual(hits.first?.chunkText, "primary retrieval chunk")
+    }
+
+    func testShadowRebuildKeepsActiveIndexUntilAtomicCommit() async throws {
+        let fileId = try insertFile(named: "shadow.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let initialReplaceSucceeded = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(vector: [1, 0], text: "active generation")],
+            model: "old-model"
+        )
+        XCTAssertTrue(initialReplaceSucceeded)
+        var stagedFile = try XCTUnwrap(store.file(id: fileId))
+        stagedFile.title = "Shadow title"
+        stagedFile.contentText = "Shadow content"
+        stagedFile.contentHash = "shadow-hash"
+        stagedFile.indexedAt = Date(timeIntervalSince1970: 2_000)
+        stagedFile.indexSignature = "shadow-signature"
+
+        let shadowStarted = await vectorStore.beginShadowRebuild()
+        XCTAssertTrue(shadowStarted)
+        let shadowReplaceSucceeded = await vectorStore.replaceShadow(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(vector: [0, 1], text: "shadow generation")],
+            model: "new-model"
+        )
+        XCTAssertTrue(shadowReplaceSucceeded)
+        let metadataStaged = await vectorStore.stageShadowMetadata(stagedFile)
+        XCTAssertTrue(metadataStaged)
+
+        let hitsBeforeCommit = await vectorStore.searchChunks([1, 0], k: 1)
+        let activeBeforeCommit = try XCTUnwrap(hitsBeforeCommit.first)
+        XCTAssertEqual(activeBeforeCommit.chunkText, "active generation")
+        XCTAssertNil(try store.file(id: fileId)?.title)
+
+        let committed = await vectorStore.commitShadowRebuild(expectedFileCount: 1)
+        XCTAssertTrue(committed)
+
+        let hitsAfterCommit = await vectorStore.searchChunks([0, 1], k: 1)
+        let activeAfterCommit = try XCTUnwrap(hitsAfterCommit.first)
+        XCTAssertEqual(activeAfterCommit.chunkText, "shadow generation")
+        let committedFile = try XCTUnwrap(store.file(id: fileId))
+        XCTAssertEqual(committedFile.title, "Shadow title")
+        XCTAssertEqual(committedFile.contentText, "Shadow content")
+        XCTAssertEqual(committedFile.contentHash, "shadow-hash")
+        XCTAssertEqual(committedFile.indexSignature, "shadow-signature")
+    }
+
+    func testShadowCommitPreservesCompatibleFileIndexedAfterSnapshot() async throws {
+        let rebuiltFileId = try insertFile(named: "snapshot.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let initialReplaceSucceeded = await vectorStore.replace(
+            fileId: rebuiltFileId,
+            chunks: [EmbeddingChunk(vector: [1, 0], text: "active snapshot")],
+            model: "shared-model"
+        )
+        XCTAssertTrue(initialReplaceSucceeded)
+
+        let shadowStarted = await vectorStore.beginShadowRebuild()
+        XCTAssertTrue(shadowStarted)
+        let shadowReplaceSucceeded = await vectorStore.replaceShadow(
+            fileId: rebuiltFileId,
+            chunks: [EmbeddingChunk(vector: [0, 1], text: "rebuilt snapshot")],
+            model: "shared-model"
+        )
+        XCTAssertTrue(shadowReplaceSucceeded)
+        var stagedFile = try XCTUnwrap(store.file(id: rebuiltFileId))
+        stagedFile.indexedAt = Date(timeIntervalSince1970: 3_000)
+        stagedFile.indexSignature = "rebuilt-signature"
+        let metadataStaged = await vectorStore.stageShadowMetadata(stagedFile)
+        XCTAssertTrue(metadataStaged)
+
+        let concurrentFileId = try insertFile(named: "arrived-during-rebuild.md")
+        let concurrentReplaceSucceeded = await vectorStore.replace(
+            fileId: concurrentFileId,
+            chunks: [EmbeddingChunk(vector: [0.5, 0.5], text: "concurrent generation")],
+            model: "shared-model"
+        )
+        XCTAssertTrue(concurrentReplaceSucceeded)
+
+        let committed = await vectorStore.commitShadowRebuild(expectedFileCount: 1)
+        XCTAssertTrue(committed)
+        let concurrentHits = await vectorStore.searchChunks([0.5, 0.5], k: 2)
+        XCTAssertTrue(concurrentHits.contains { $0.fileId == concurrentFileId })
+        XCTAssertEqual(vectorStore.count, 2)
+    }
+
+    func testDiscardedOrIncompleteShadowRebuildPreservesActiveIndex() async throws {
+        let fileId = try insertFile(named: "preserved.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let initialReplaceSucceeded = await vectorStore.replace(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(vector: [1, 0], text: "preserved generation")],
+            model: "old-model"
+        )
+        XCTAssertTrue(initialReplaceSucceeded)
+
+        let shadowStarted = await vectorStore.beginShadowRebuild()
+        XCTAssertTrue(shadowStarted)
+        let shadowReplaceSucceeded = await vectorStore.replaceShadow(
+            fileId: fileId,
+            chunks: [EmbeddingChunk(vector: [0, 1], text: "incomplete generation")],
+            model: "new-model"
+        )
+        XCTAssertTrue(shadowReplaceSucceeded)
+        let committed = await vectorStore.commitShadowRebuild(expectedFileCount: 1)
+        XCTAssertFalse(committed)
+        await vectorStore.discardShadowRebuild()
+
+        let activeHits = await vectorStore.searchChunks([1, 0], k: 1)
+        let active = try XCTUnwrap(activeHits.first)
+        XCTAssertEqual(active.chunkText, "preserved generation")
+        XCTAssertEqual(vectorStore.count, 1)
     }
 
     func testVectorEncodingRoundTripsAndRejectsMalformedData() {

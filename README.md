@@ -31,13 +31,20 @@ PaddleOCR 优先；GLM-OCR 或云端 OCR 回退
         ↓
 qwen3-embedding:0.6b / Apple NLEmbedding / 云端 Embedding
         ↓
-SQLite + sqlite-vec + Accelerate 缓存
+Parent（600–1000 tokens）+ Child（约 280 tokens）检索单元
+        ↓
+SQLite + sqlite-vec + 关键词/实体/向量 RRF 融合
+        ↓
+可选 Qwen3-Reranker 本地或云端重排
         ↓
 本地 Ollama 或云端 LLM 问答
 ```
 
 - 结构化切片保留标题、正文、表格、列表、图片、Note、章节与页码信息。
 - 默认切片目标为 600–1000 tokens，并支持 overlap 配置。
+- Docling 可用时保存 Qwen3 tokenizer 的精确 token 数；其他路径使用同一版本化估算器，并明确记录 profile、version 与 exact/estimated 状态。
+- 索引会从章节 Parent 生成更小的检索 Child；命中 Child 后向模型回填完整 Parent，表格 Child 会重复表头。
+- 发票号、邮箱、日期、金额等高精度实体会进入独立召回通道，和文件关键词、向量结果通过 RRF 融合。
 - 已索引文件的 Note 可独立重新向量化，无需重新解析源文档。
 - 索引提交前会再次校验源文件版本，防止旧任务覆盖新内容。
 - 重建索引支持仅处理新文件、Embedding 变化、切片设置变化、OCR/解析器变化，以及暂停、恢复、停止和重新开始。
@@ -45,6 +52,7 @@ SQLite + sqlite-vec + Accelerate 缓存
 ### 搜索与聊天
 
 - 普通搜索融合文件名、标题、路径、Note、内容、日期意图与向量相似度。
+- 向量阈值按每次查询的分数分布动态调整；可配置兼容 `/v1/rerank` 的本地或云端重排服务，失败时自动回退。
 - 普通结果页按置信度展示，并可按需触发耗时更长的 Smart Search。
 - Smart Search 使用 AI 将自然语言转为语义查询、关键词、文件类型、日期和排序条件。
 - Find with Chat 复用智能检索规划，并流式展示检索意图、匹配和生成阶段。
@@ -52,6 +60,7 @@ SQLite + sqlite-vec + Accelerate 缓存
 - 会话和输入草稿本地持久化；切换页面不会中断正在生成的回答。
 - 模型失败时可以从云端切换到本地，或直接返回向量检索结果。
 - 回答支持 Markdown、引用文件预览、重试替换、token usage、首响与总耗时。
+- RAG 上下文限制为最多 8 个 Parent，并使用稳定的 `[F#:P#]` 证据编号；完成后会校验回答引用。
 
 ### 本地 AI 与云端 AI
 

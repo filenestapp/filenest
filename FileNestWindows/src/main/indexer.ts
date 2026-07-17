@@ -3,6 +3,7 @@ import { FileNestDatabase } from './database'
 import { ContentExtractor } from './content-extractor'
 import { EmbeddingService } from './embedding'
 import { AppLogger } from './logger'
+import { estimateCanonicalTokens, tokenUnits } from './token-counter'
 
 interface ActiveIndexTask {
   key: string
@@ -233,11 +234,16 @@ export function buildDocumentChunks(
       const context = [section.path.length ? `Section: ${section.path.join(' > ')}` : '', section.page ? `Page: ${section.page}` : '', value]
         .filter(Boolean)
         .join('\n')
+      const measurement = estimateCanonicalTokens(context)
       chunks.push({
         ...makeChunk(value, section.kind, section.path),
         contextualText: context,
         pageStart: section.page,
-        pageEnd: section.page
+        pageEnd: section.page,
+        tokenCount: measurement.count,
+        tokenizerProfile: measurement.tokenizerProfile,
+        tokenizerVersion: measurement.tokenizerVersion,
+        tokenCountAccuracy: measurement.accuracy
       })
     }
   }
@@ -245,7 +251,14 @@ export function buildDocumentChunks(
 }
 
 function makeChunk(text: string, kind: DocumentChunkKind, sectionPath: string[]): DocumentChunk {
-  return { index: 0, text, contextualText: text, sectionPath, pageStart: null, pageEnd: null, kind }
+  const measurement = estimateCanonicalTokens(text)
+  return {
+    index: 0, text, contextualText: text, sectionPath, pageStart: null, pageEnd: null, kind,
+    tokenCount: measurement.count,
+    tokenizerProfile: measurement.tokenizerProfile,
+    tokenizerVersion: measurement.tokenizerVersion,
+    tokenCountAccuracy: measurement.accuracy
+  }
 }
 
 function splitSections(text: string): Array<{ text: string; path: string[]; page: number | null; kind: DocumentChunkKind }> {
@@ -296,13 +309,32 @@ function inferChunkKind(text: string): DocumentChunkKind {
 export function chunkText(text: string, wordsPerChunk: number, overlap: number): string[] {
   const normalized = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
   if (!normalized) return []
-  const units = normalized.match(/[\p{Script=Han}]|[\p{L}\p{N}_'-]+|[^\s]/gu) ?? []
+  const units = tokenUnits(normalized)
   const size = Math.max(50, wordsPerChunk)
   const safeOverlap = Math.min(Math.max(0, overlap), size - 1)
   const chunks: string[] = []
-  for (let start = 0; start < units.length; start += size - safeOverlap) {
-    chunks.push(units.slice(start, start + size).join(' ').replace(/([\p{Script=Han}])\s+(?=[\p{Script=Han}])/gu, '$1').trim())
-    if (start + size >= units.length) break
+  let start = 0
+  while (start < units.length && chunks.length < 500) {
+    let end = start
+    let cost = 0
+    while (end < units.length && cost + units[end].weight <= size + Number.EPSILON) {
+      cost += units[end].weight
+      end += 1
+    }
+    if (end === start) end += 1
+    chunks.push(joinUnits(units.slice(start, end).map((unit) => unit.value)))
+    if (end >= units.length) break
+    let nextStart = end
+    let retained = 0
+    while (nextStart > start && retained + units[nextStart - 1].weight <= safeOverlap + Number.EPSILON) {
+      nextStart -= 1
+      retained += units[nextStart].weight
+    }
+    start = nextStart > start ? nextStart : end
   }
-  return chunks.slice(0, 500)
+  return chunks
+}
+
+function joinUnits(units: string[]): string {
+  return units.join(' ').replace(/([\p{Script=Han}])\s+(?=[\p{Script=Han}])/gu, '$1').trim()
 }

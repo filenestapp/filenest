@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -9,6 +9,7 @@ import {
   Play,
   RefreshCw,
   Search,
+  Sparkles,
   Square,
   Trash2,
   WandSparkles,
@@ -34,11 +35,13 @@ const PAGE_SIZE = 50;
 
 export function LibraryPage({
   snapshot,
+  externalSearch,
   onInspect,
   onStartChat,
   onRefresh,
 }: {
   snapshot: AppSnapshot;
+  externalSearch: { id: string; query: string } | null;
   onInspect(file: FileRecord): void;
   onStartChat(file: FileRecord): void;
   onRefresh(): Promise<void>;
@@ -53,29 +56,66 @@ export function LibraryPage({
   const [total, setTotal] = useState(0);
   const [interpretedQuery, setInterpretedQuery] = useState("");
   const [busy, setBusy] = useState(false);
+  const [smartSearchEnabled, setSmartSearchEnabled] = useState(false);
+  const [smartIntent, setSmartIntent] = useState("");
+  const [searchError, setSearchError] = useState("");
+  const activeSearchRequest = useRef<string | null>(null);
+  const handledExternalSearch = useRef<string | null>(null);
 
-  const search = useCallback(async (): Promise<void> => {
-    const response = await window.fileNest.searchLibrary({
-      query,
-      category,
-      sortField,
-      sortDirection,
-      offset,
-      limit: PAGE_SIZE,
-    });
-    setResults(response.results);
-    setTotal(response.total);
-    setInterpretedQuery(response.interpretedQuery);
+  const search = useCallback(async (smart = false): Promise<void> => {
+    const requestId = crypto.randomUUID();
+    activeSearchRequest.current = requestId;
+    setBusy(true);
+    setSearchError("");
+    try {
+      const response = await window.fileNest.searchLibrary({
+        query,
+        smart,
+        requestId,
+        category,
+        sortField,
+        sortDirection,
+        offset,
+        limit: PAGE_SIZE,
+      });
+      if (activeSearchRequest.current === requestId) {
+        setResults(response.results);
+        setTotal(response.total);
+        setInterpretedQuery(response.interpretedQuery);
+        setSmartIntent(response.intent ?? "");
+        setSmartSearchEnabled(smart);
+      }
+    } catch (error) {
+      if (activeSearchRequest.current === requestId) setSearchError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (activeSearchRequest.current === requestId) setBusy(false);
+    }
   }, [category, offset, query, sortDirection, sortField]);
 
-  useEffect(() => { void search(); }, [search, snapshot.files]);
+  useEffect(() => {
+    setSmartSearchEnabled(false);
+    setSmartIntent("");
+    const timer = window.setTimeout(() => void search(false), 250);
+    return () => window.clearTimeout(timer);
+  }, [search, snapshot.files]);
+  useEffect(() => window.fileNest.onLibrarySearchProgress((event) => {
+    if (event.requestId === activeSearchRequest.current) setSmartIntent(event.intent);
+  }), []);
+  useEffect(() => {
+    if (!externalSearch || handledExternalSearch.current === externalSearch.id) return;
+    handledExternalSearch.current = externalSearch.id;
+    setCategory(null);
+    setOffset(0);
+    setQuery(externalSearch.query);
+    void window.fileNest.consumeLibrarySearch(externalSearch.id);
+  }, [externalSearch]);
 
   const run = async (action: () => Promise<void>): Promise<void> => {
     setBusy(true);
     try {
       await action();
       await onRefresh();
-      await search();
+      await search(smartSearchEnabled);
     } finally {
       setBusy(false);
     }
@@ -133,11 +173,11 @@ export function LibraryPage({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") { setOffset(0); void search(); }
+              if (event.key === "Enter") { setOffset(0); void search(false); }
             }}
             placeholder={t("Search names, contents, notes, or dates such as 'last week'…")}
           />
-          <button onClick={() => { setOffset(0); void search(); }}>{t("Search")}</button>
+          <button onClick={() => { setOffset(0); void search(false); }}>{t("Search")}</button>
         </div>
         <div className="category-filters">
           <button className={category === null ? "selected" : ""} onClick={() => setFilterCategory(null)}>{t("All")}</button>
@@ -168,6 +208,15 @@ export function LibraryPage({
         {interpretedQuery && interpretedQuery !== query.trim() && (
           <small className="query-interpretation">{t("Interpreted as")}: {interpretedQuery}</small>
         )}
+        {searchError && <small className="search-error">{searchError}</small>}
+        {query.trim() && !smartSearchEnabled && !busy && (
+          <div className="smart-search-suggestion">
+            <Sparkles size={16} />
+            <span><strong>{t("Not finding what you need?")}</strong><small>{t("Smart Search uses AI to understand your request more precisely and may take a little longer.")}</small></span>
+            <button onClick={() => void search(true)}>{t("Try Smart Search")}</button>
+          </div>
+        )}
+        {smartSearchEnabled && smartIntent && <div className="smart-search-intent"><Sparkles size={14} /><span>{smartIntent}</span></div>}
       </div>
       <div className="file-table" role="table">
         <div className="file-table-header" role="row">
@@ -178,7 +227,7 @@ export function LibraryPage({
             <div className="empty-library">
               <FolderOpen size={38} /><strong>{t("No Files Found")}</strong><span>{t("Adjust the search criteria or place files in a watched folder.")}</span>
             </div>
-          ) : results.map(({ file, matchKind, snippet }) => (
+          ) : results.map(({ file, matchKind, snippet, confidence }) => (
             <div key={file.id} className="file-row" role="row" onDoubleClick={() => void window.fileNest.openFile(file.path)}>
               <div className="file-name-cell">
                 <FileTypeIcon file={file} size={22} />
@@ -186,7 +235,7 @@ export function LibraryPage({
                   <strong>{file.name}</strong>
                   <span>{snippet || file.title || file.path}</span>
                 </div>
-                {file.indexedAt && <small>● {t("Indexed")} · {t(matchKind)}</small>}
+                {file.indexedAt && <small>● {t(matchKind)} · {t("Confidence")} {Math.round(Math.min(1, Math.max(0, confidence)) * 100)}%</small>}
               </div>
               <span>{t(categoryLabels[file.category])}</span>
               <span>{formatBytes(file.size)}</span>

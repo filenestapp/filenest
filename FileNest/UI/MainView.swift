@@ -37,14 +37,6 @@ struct MainView: View {
         nonmutating set { selectionRawValue = newValue.rawValue }
     }
 
-    private var watchPath: String {
-        if FileNestEnvironment.isUIPreview { return "~/FileNestWatch" }
-        guard let first = appState.settings.watchDirs.first else {
-            return appState.settings.localized("No watched folder")
-        }
-        return URL(fileURLWithPath: first).tildeAbbreviatedPath
-    }
-
     var body: some View {
         HStack(spacing: 0) {
             if !isSidebarCollapsed {
@@ -65,7 +57,14 @@ struct MainView: View {
             }
 
             ZStack {
-                ChatView(isActive: selection == .chat)
+                ChatView(
+                    isActive: selection == .chat,
+                    returnFromFileChat: {
+                        if appState.returnFromFileChat() == .library {
+                            selection = .library
+                        }
+                    }
+                )
                     .opacity(selection == .chat ? 1 : 0)
                     .allowsHitTesting(selection == .chat)
                     .disabled(selection != .chat)
@@ -77,6 +76,20 @@ struct MainView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(FileNestTheme.surface)
+            .overlay(alignment: .topTrailing) {
+                if appState.hasActiveAutomaticFileProcessing {
+                    AutomaticProcessingQueueView(appState: appState, maximumItems: 2)
+                        .padding(12)
+                        .frame(width: 286, alignment: .leading)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(FileNestTheme.border, lineWidth: 1)
+                        }
+                        .padding(16)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
 
             if let previewedFile = appState.previewedFile {
                 Rectangle()
@@ -96,6 +109,7 @@ struct MainView: View {
         .background(.ultraThinMaterial)
         .animation(.easeInOut(duration: 0.18), value: isSidebarCollapsed)
         .animation(.easeInOut(duration: 0.2), value: appState.previewedFile?.path)
+        .animation(.easeInOut(duration: 0.2), value: appState.hasActiveAutomaticFileProcessing)
         .toolbar {
             if #available(macOS 26.0, *) {
                 ToolbarItem(placement: .navigation) {
@@ -114,12 +128,16 @@ struct MainView: View {
                 appState.startWatching()
             }
             presentOnboardingIfNeeded()
+            routePendingLibrarySearch()
         }
         .onChange(of: appState.isOnboardingPresented) { isPresented in
             if isPresented { presentOnboardingIfNeeded() }
         }
         .onChange(of: appState.previewedFile?.path) { previewPath in
             coordinateSidebar(withPreviewPath: previewPath)
+        }
+        .onChange(of: appState.librarySearchRequest?.id) { _ in
+            routePendingLibrarySearch()
         }
     }
 
@@ -168,7 +186,6 @@ struct MainView: View {
             Divider().frame(height: 16)
 
             SidebarStatusBar(
-                watchPath: watchPath,
                 placement: .toolbar,
                 openSettings: openSettings
             )
@@ -185,7 +202,7 @@ struct MainView: View {
     private func startDocumentChat(_ file: FileRecord) {
         selection = .chat
         guard !FileNestEnvironment.isUIPreview else { return }
-        appState.newChat(attachedFilePath: file.path)
+        appState.startFileChat(attachedFilePath: file.path, returnDestination: .library)
     }
 
     private func coordinateSidebar(withPreviewPath previewPath: String?) {
@@ -207,6 +224,11 @@ struct MainView: View {
         openWindow(id: "onboarding")
     }
 
+    private func routePendingLibrarySearch() {
+        guard appState.librarySearchRequest != nil else { return }
+        selection = .library
+    }
+
     private func openSettings(_ section: SettingsSection) {
         appState.selectSettingsSection(section)
         NSApp.activate(ignoringOtherApps: true)
@@ -221,7 +243,11 @@ private struct FileNestSidebar: View {
     @State private var previewSelectionID = UIShowcaseData.chatSessions.first?.id
 
     private var sessions: [ChatSession] {
-        FileNestEnvironment.isUIPreview ? UIShowcaseData.chatSessions : appState.chatSessions
+        let source = FileNestEnvironment.isUIPreview ? UIShowcaseData.chatSessions : appState.chatSessions
+        return source.sorted {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return ($0.id ?? 0) > ($1.id ?? 0)
+        }
     }
 
     private var selectedSessionID: Int64? {
@@ -230,14 +256,6 @@ private struct FileNestSidebar: View {
 
     private var visibleSessions: ArraySlice<ChatSession> {
         sessions.prefix(25)
-    }
-
-    private var watchPath: String {
-        if FileNestEnvironment.isUIPreview { return "~/FileNestWatch" }
-        guard let first = appState.settings.watchDirs.first else {
-            return appState.settings.localized("No watched folder")
-        }
-        return URL(fileURLWithPath: first).tildeAbbreviatedPath
     }
 
     var body: some View {
@@ -282,7 +300,6 @@ private struct FileNestSidebar: View {
                 .frame(maxHeight: .infinity)
 
             SidebarStatusBar(
-                watchPath: watchPath,
                 placement: .sidebar,
                 openSettings: openSettings
             )
@@ -294,6 +311,9 @@ private struct FileNestSidebar: View {
         Button {
             withAnimation(.easeOut(duration: 0.16)) {
                 selection = item
+            }
+            if item == .chat, !FileNestEnvironment.isUIPreview {
+                appState.newChat()
             }
         } label: {
             HStack(spacing: 12) {
@@ -414,6 +434,12 @@ private struct RecentChatRow: View {
             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
         )
         .contentShape(Rectangle())
+        .help(
+            Text("Last updated") + Text(": ") + Text(
+                session.updatedAt,
+                format: .dateTime.year().month().day().hour().minute()
+            )
+        )
     }
 }
 
@@ -430,7 +456,6 @@ private struct SidebarStatusBar: View {
     }
 
     @EnvironmentObject private var appState: AppState
-    let watchPath: String
     let placement: Placement
     let openSettings: (SettingsSection) -> Void
     @State private var settingsHovered = false
@@ -439,7 +464,9 @@ private struct SidebarStatusBar: View {
     @State private var isPopoverHovered = false
     @State private var dismissTask: Task<Void, Never>?
 
-    private var isIndexing: Bool { appState.indexingState.isActive }
+    private var isIndexing: Bool {
+        appState.indexingState.isActive || appState.hasActiveAutomaticFileProcessing
+    }
 
     private var watchIcon: String {
         if appState.hasActiveWatchDirectories { return "folder.fill" }
@@ -453,7 +480,15 @@ private struct SidebarStatusBar: View {
         return .secondary
     }
 
+    private var watchPaths: [String] {
+        if FileNestEnvironment.isUIPreview { return ["~/Desktop", "~/Downloads"] }
+        return appState.settings.watchDirs.map {
+            URL(fileURLWithPath: $0).tildeAbbreviatedPath
+        }
+    }
+
     private var indexIcon: String {
+        if appState.hasActiveAutomaticFileProcessing { return "arrow.triangle.2.circlepath" }
         switch appState.indexingState {
         case .running: return "arrow.triangle.2.circlepath"
         case .paused: return "pause.circle.fill"
@@ -466,6 +501,7 @@ private struct SidebarStatusBar: View {
     }
 
     private var indexColor: Color {
+        if appState.hasActiveAutomaticFileProcessing { return FileNestTheme.accentBlue }
         switch appState.indexingState {
         case .running, .stopping: return FileNestTheme.accentBlue
         case .paused, .stopped: return .secondary
@@ -475,9 +511,17 @@ private struct SidebarStatusBar: View {
         }
     }
 
-    private var indexTitle: String { appState.indexingStatusTitle }
+    private var indexTitle: String {
+        appState.hasActiveAutomaticFileProcessing
+            ? appState.automaticProcessingStatusTitle
+            : appState.indexingStatusTitle
+    }
 
-    private var indexedSubtitle: String { appState.indexingStatusSubtitle }
+    private var indexedSubtitle: String {
+        appState.hasActiveAutomaticFileProcessing
+            ? appState.automaticProcessingStatusSubtitle
+            : appState.indexingStatusSubtitle
+    }
 
     private var aiChoice: AppSettings.LLMChoice {
         AppSettings.LLMChoice(rawValue: appState.settings.llmChoice) ?? .ollama
@@ -548,8 +592,8 @@ private struct SidebarStatusBar: View {
         SidebarStatusButton(
             icon: indexIcon,
             color: indexColor,
-            label: localized(isIndexing ? appState.indexingStatusTitle : "Index Status"),
-            isAnimating: appState.indexingState.isAnimating,
+            label: localized(isIndexing ? indexTitle : "Index Status"),
+            isAnimating: appState.indexingState.isAnimating || appState.hasActiveAutomaticFileProcessing,
             popoverArrowEdge: .bottom,
             isPresented: panelBinding(for: .indexing),
             onActivate: { toggle(.indexing) },
@@ -602,12 +646,32 @@ private struct SidebarStatusBar: View {
             title: localized(appState.watchStatusTitle),
             subtitle: localized(appState.watchStatusSubtitle)
         ) {
-            Text(watchPath)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
+            if watchPaths.isEmpty {
+                Text(localized("No watched folder"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 7) {
+                        ForEach(watchPaths, id: \.self) { path in
+                            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                                Image(systemName: "folder")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(watchColor)
+                                    .frame(width: 13)
+                                Text(path)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .textSelection(.enabled)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .frame(maxHeight: 112)
+            }
 
             HStack(spacing: 8) {
                 Button {
@@ -652,8 +716,12 @@ private struct SidebarStatusBar: View {
             color: indexColor,
             title: localized(indexTitle),
             subtitle: localized(indexedSubtitle),
-            isAnimating: appState.indexingState.isAnimating
+            isAnimating: appState.indexingState.isAnimating || appState.hasActiveAutomaticFileProcessing
         ) {
+            if !appState.automaticFileProcessingItems.isEmpty {
+                AutomaticProcessingQueueView(appState: appState)
+            }
+
             IndexingStatusProgressView(
                 appState: appState,
                 showsHeader: false,

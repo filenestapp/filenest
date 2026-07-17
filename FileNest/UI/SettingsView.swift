@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var selectedSection: SettingsSection = .general
     @State private var selectedModelProfileID = OllamaModelRecommendation.defaultProfile.id
     @State private var modelPendingDeletion: OllamaModelInfo?
+    @State private var isShowingDeleteRerankerConfirmation = false
     @State private var vectorExtensionsDraft = ""
     @State private var updateFeedDraft = ""
     @State private var isShowingClearLogsConfirmation = false
@@ -65,15 +66,9 @@ struct SettingsView: View {
         .onChange(of: appState.selectedSettingsSection) { section in
             selectedSection = section
         }
-        .task {
-            async let ollamaRefresh: Void = appState.ollama.refresh(host: appState.settings.ollamaHost)
-            async let paddleRefresh: Void = appState.paddleOCR.refresh()
-            appState.docling.refresh()
-            _ = await (ollamaRefresh, paddleRefresh)
-            async let ollamaUpdates: Void = appState.ollama.checkForUpdates()
-            async let doclingUpdates: Void = appState.docling.checkForUpdates()
-            async let paddleUpdates: Void = appState.paddleOCR.checkForUpdates()
-            _ = await (ollamaUpdates, doclingUpdates, paddleUpdates)
+        .task(id: selectedSection) {
+            guard selectedSection == .aiModels else { return }
+            await appState.refreshModelServicesIfNeeded()
         }
         .confirmationDialog(
             "Delete Local Model?",
@@ -112,6 +107,18 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This deletes all local diagnostic logs currently retained by FileNest and cannot be undone.")
+        }
+        .confirmationDialog(
+            "Delete Local Reranker?",
+            isPresented: $isShowingDeleteRerankerConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Reranker Model", role: .destructive) {
+                Task { try? await appState.reranker.deleteModel() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes Qwen3-Reranker-0.6B from this Mac. FileNest will keep your reranker settings and you can download the model again later.")
         }
         .confirmationDialog(
             "How Should Existing Files in the New Folder Be Handled?",
@@ -238,6 +245,38 @@ struct SettingsView: View {
                     openWindow(id: "onboarding")
                 } label: {
                     Label("Open Setup Assistant Again", systemImage: "wand.and.stars")
+                }
+            }
+
+            Section("Quick Search") {
+                LabeledContent("Quick Search Shortcut") {
+                    HStack(spacing: 8) {
+                        ShortcutRecorder(
+                            shortcut: QuickSearchShortcut(
+                                keyCode: appState.settings.quickSearchShortcutKeyCode,
+                                modifiers: appState.settings.quickSearchShortcutModifiers
+                            ),
+                            recordingTitle: appState.settings.localized("Press a shortcut…"),
+                            accessibilityLabel: appState.settings.localized("Quick Search Shortcut"),
+                            onChange: appState.settings.setQuickSearchShortcut
+                        )
+                        .frame(width: 132, height: 28)
+
+                        Button("Reset to Default") {
+                            appState.settings.setQuickSearchShortcut(.defaultValue)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+
+                Text("Use this shortcut from any app to open a centered FileNest search box.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+
+                if let error = appState.quickSearchShortcutRegistrationError {
+                    Label(LocalizedStringKey(error), systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(FileNestTheme.warning)
                 }
             }
 
@@ -568,7 +607,30 @@ struct SettingsView: View {
                 } label: {
                     Label("Organize Existing Files in Watched Folders…", systemImage: "wand.and.stars")
                 }
-                .disabled(appState.settings.watchDirs.isEmpty)
+                .disabled(appState.settings.watchDirs.isEmpty || appState.organizationState.isActive)
+
+                if appState.organizationState.isActive,
+                   let progress = appState.organizationProgress {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(LocalizedStringKey(appState.organizationStatusTitle))
+                                .font(.system(size: 11, weight: .medium))
+                            Spacer()
+                            if appState.organizationState == .running {
+                                Button("Pause Organization") { appState.pauseOrganization() }
+                            } else if appState.organizationState == .paused {
+                                Button("Resume Organization") { appState.resumeOrganization() }
+                            }
+                            Button("Stop Organization", role: .destructive) {
+                                appState.stopOrganization()
+                            }
+                        }
+                        ProgressView(value: progress.fractionCompleted)
+                        Text(LocalizedStringKey(appState.organizationStatusSubtitle))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 Text("Process previously preserved, unorganized files at any time.")
                     .font(.system(size: 10))
@@ -642,7 +704,7 @@ struct SettingsView: View {
                         get: { appState.settings.vectorChunkWords },
                         set: { appState.settings.setVectorChunkWords($0) }
                     ), in: 600...1_000, step: 50) {
-                        LabeledContent("Chunk size") {
+                        LabeledContent("Parent chunk maximum") {
                             Text(appState.settings.localizedFormat(
                                 "%d tokens",
                                 appState.settings.vectorChunkWords
@@ -652,10 +714,23 @@ struct SettingsView: View {
                     }
 
                     Stepper(value: Binding(
+                        get: { appState.settings.vectorRetrievalChunkTokens },
+                        set: { appState.settings.setVectorRetrievalChunkTokens($0) }
+                    ), in: 120...appState.settings.vectorChunkWords, step: 20) {
+                        LabeledContent("Retrieval chunk target") {
+                            Text(appState.settings.localizedFormat(
+                                "%d tokens",
+                                appState.settings.vectorRetrievalChunkTokens
+                            ))
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Stepper(value: Binding(
                         get: { appState.settings.vectorChunkOverlap },
                         set: { appState.settings.setVectorChunkOverlap($0) }
-                    ), in: 0...max(0, appState.settings.vectorChunkWords - 1), step: 10) {
-                        LabeledContent("Chunk overlap") {
+                    ), in: 0...max(0, appState.settings.vectorRetrievalChunkTokens - 1), step: 10) {
+                        LabeledContent("Maximum semantic overlap") {
                             Text(appState.settings.localizedFormat(
                                 "%d tokens",
                                 appState.settings.vectorChunkOverlap
@@ -681,7 +756,7 @@ struct SettingsView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
 
-                    Text("Long documents are split with overlapping sliding windows to reduce information loss from context limits. Images add dimensions, camera details, and non-location EXIF metadata to the index.")
+                    Text("Paragraphs stay intact whenever possible. Oversized paragraphs split only between complete sentences, and overlap repeats complete semantic units without cutting words.")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
 
@@ -961,6 +1036,8 @@ struct SettingsView: View {
                 }
             }
 
+            rerankerServiceSettings
+
             Section("OCR Model") {
                 Picker("Source", selection: Binding(
                     get: { appState.settings.ocrSource },
@@ -989,7 +1066,7 @@ struct SettingsView: View {
                             installedVersion: appState.paddleOCR.installedVersion,
                             status: appState.paddleOCR.updateStatus,
                             isInstalling: appState.paddleOCR.isInstalling,
-                            onCheck: { Task { await appState.paddleOCR.checkForUpdates() } },
+                            onCheck: { Task { await appState.refreshModelServicesIfNeeded(force: true) } },
                             onUpdate: { Task { await appState.paddleOCR.update() } }
                         )
                     }
@@ -1088,10 +1165,201 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Service Updates") {
+                HStack(spacing: 8) {
+                    Label("Automatic Version Detection", systemImage: "clock.arrow.circlepath")
+                    Spacer()
+                    Text(lastAIModelVersionCheckText)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Text("Checks Ollama, PaddleOCR, and Docling when this page opens, and skips repeated checks for 24 hours.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
             doclingServiceSettings
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+    }
+
+    private var lastAIModelVersionCheckText: String {
+        guard let checkedAt = appState.settings.lastAIModelVersionCheckAt else {
+            return appState.settings.localized("Not checked yet")
+        }
+        let formatter = DateFormatter()
+        let language = AppSettings.AppLanguage(rawValue: appState.settings.appLanguage) ?? .system
+        formatter.locale = language.locale
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return appState.settings.localizedFormat("Last checked: %@", formatter.string(from: checkedAt))
+    }
+
+    private var rerankerServiceSettings: some View {
+        Section("Retrieval Reranker") {
+            Picker("Source", selection: Binding(
+                get: { appState.settings.rerankerSource },
+                set: { source in
+                    appState.settings.setRerankerSource(source)
+                    guard source == AppSettings.RerankerSource.local.rawValue,
+                          RerankerServiceManager.isModelInstalled else { return }
+                    Task { await appState.reranker.start() }
+                }
+            )) {
+                ForEach(AppSettings.RerankerSource.allCases) { source in
+                    Text(LocalizedStringKey(source.label)).tag(source.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if appState.settings.rerankerSource == AppSettings.RerankerSource.local.rawValue {
+                LabeledContent("Model") {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("Qwen3-Reranker-0.6B")
+                        Text("0.6B parameters · 32K context")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                LabeledContent("Local Status") {
+                    HStack(spacing: 7) {
+                        if appState.reranker.isInstalling || appState.reranker.state == .starting {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: rerankerStatusIcon)
+                                .foregroundStyle(rerankerStatusColor)
+                        }
+                        Text(LocalizedStringKey(rerankerStatusText))
+                    }
+                }
+
+                if appState.reranker.isInstalling {
+                    SettingsOperationProgress(
+                        status: appState.reranker.installStatus,
+                        progress: appState.reranker.installProgress
+                    )
+                } else if !RerankerServiceManager.isModelInstalled {
+                    HStack {
+                        Label("About 1.25 GB download; stored only on this Mac.", systemImage: "internaldrive")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            Task { await appState.reranker.install() }
+                        } label: {
+                            Label("Download Reranker", systemImage: "arrow.down.circle")
+                        }
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        InstalledModelLabel()
+                        Text(rerankerDiskSizeText)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if appState.reranker.isRunning {
+                            Button("Stop Service") {
+                                Task { await appState.reranker.stop() }
+                            }
+                        } else {
+                            Button("Start Service") {
+                                Task { await appState.reranker.start() }
+                            }
+                        }
+                        Button(role: .destructive) {
+                            isShowingDeleteRerankerConfirmation = true
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                }
+
+                if let error = appState.reranker.lastError {
+                    Label(appState.settings.localizedRuntimeMessage(error), systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(FileNestTheme.warning)
+                }
+
+                DisclosureGroup("Advanced Local Service") {
+                    TextField("Reranker Base URL", text: Binding(
+                        get: { appState.settings.rerankerBaseURL },
+                        set: { appState.settings.setRerankerBaseURL($0) }
+                    ), prompt: Text("http://127.0.0.1:11435/v1"))
+                    .padding(.top, 6)
+                    Text("The managed service uses 127.0.0.1:11435. Change this only when connecting to another compatible local reranker.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            } else if appState.settings.rerankerSource == AppSettings.RerankerSource.cloud.rawValue {
+                Toggle("Reuse chat API credentials", isOn: Binding(
+                    get: { appState.settings.rerankerReuseChatCredentials },
+                    set: { appState.settings.setRerankerReuseChatCredentials($0) }
+                ))
+                .toggleStyle(.checkbox)
+
+                if !appState.settings.rerankerReuseChatCredentials {
+                    TextField("Reranker Base URL", text: Binding(
+                        get: { appState.settings.rerankerBaseURL },
+                        set: { appState.settings.setRerankerBaseURL($0) }
+                    ), prompt: Text("https://api.example.com/v1"))
+                    SecureField("Reranker API Key", text: Binding(
+                        get: { appState.settings.rerankerAPIKey },
+                        set: { appState.settings.setRerankerAPIKey($0) }
+                    ), prompt: Text("API key"))
+                }
+                TextField("Reranker Model", text: Binding(
+                    get: { appState.settings.rerankerModel },
+                    set: { appState.settings.setRerankerModel($0) }
+                ), prompt: Text("Qwen/Qwen3-Reranker-0.6B"))
+                Label("Search candidates are sent to the configured reranking service.", systemImage: "exclamationmark.shield")
+                    .font(.system(size: 10))
+                    .foregroundStyle(FileNestTheme.warning)
+            } else {
+                Text("Reranking is disabled. FileNest keeps the fused keyword and vector retrieval order.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Reranking refines the final candidate order after hybrid retrieval. If the service is unavailable, search continues with the original order.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var rerankerStatusText: String {
+        switch appState.reranker.state {
+        case .unavailable: return "Not downloaded"
+        case .installed: return "Installed · service stopped"
+        case .starting: return "Starting local service…"
+        case .running: return "Ready"
+        case .failed: return "Service unavailable"
+        }
+    }
+
+    private var rerankerStatusIcon: String {
+        switch appState.reranker.state {
+        case .running: return "checkmark.circle.fill"
+        case .installed: return "stop.circle"
+        case .failed: return "exclamationmark.triangle.fill"
+        default: return "circle.dashed"
+        }
+    }
+
+    private var rerankerStatusColor: Color {
+        switch appState.reranker.state {
+        case .running: return FileNestTheme.success
+        case .failed: return FileNestTheme.warning
+        default: return .secondary
+        }
+    }
+
+    private var rerankerDiskSizeText: String {
+        ByteCountFormatter.string(
+            fromByteCount: appState.reranker.modelDiskBytes,
+            countStyle: .file
+        )
     }
 
     private var doclingServiceSettings: some View {
@@ -1131,7 +1399,7 @@ struct SettingsView: View {
                     installedVersion: appState.docling.installedVersion,
                     status: appState.docling.updateStatus,
                     isInstalling: appState.docling.isInstalling,
-                    onCheck: { Task { await appState.docling.checkForUpdates() } },
+                    onCheck: { Task { await appState.refreshModelServicesIfNeeded(force: true) } },
                     onUpdate: { Task { await appState.docling.update() } }
                 )
             }
@@ -1286,7 +1554,7 @@ struct SettingsView: View {
                     installedVersion: appState.ollama.installedVersion,
                     status: appState.ollama.updateStatus,
                     isInstalling: appState.ollama.isInstalling,
-                    onCheck: { Task { await appState.ollama.checkForUpdates() } },
+                    onCheck: { Task { await appState.refreshModelServicesIfNeeded(force: true) } },
                     onUpdate: {
                         Task {
                             await appState.ollama.update(

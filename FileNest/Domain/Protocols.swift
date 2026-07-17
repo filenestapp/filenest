@@ -26,10 +26,46 @@ extension EmbeddingProvider {
     }
 }
 
-/// OCR for images or scanned documents. The caller converts pages into size-limited image data.
+struct OCRBoundingBox: Equatable, Sendable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+
+    var minX: Double { x }
+    var minY: Double { y }
+    var maxX: Double { x + width }
+    var maxY: Double { y + height }
+}
+
+struct OCRTextObservation: Equatable, Sendable {
+    let text: String
+    let confidence: Double?
+    let bounds: OCRBoundingBox?
+}
+
+struct OCRRecognitionResult: Equatable, Sendable {
+    let text: String
+    let observations: [OCRTextObservation]
+
+    init(text: String, observations: [OCRTextObservation] = []) {
+        self.text = text
+        self.observations = observations
+    }
+}
+
+/// OCR for images or scanned documents. Providers may return positioned observations
+/// so large-image callers can merge overlapping tiles without losing reading order.
 protocol OCRProvider {
     var name: String { get }
     func recognize(imageData: Data, mimeType: String) async throws -> String
+    func recognizeResult(imageData: Data, mimeType: String) async throws -> OCRRecognitionResult
+}
+
+extension OCRProvider {
+    func recognizeResult(imageData: Data, mimeType: String) async throws -> OCRRecognitionResult {
+        OCRRecognitionResult(text: try await recognize(imageData: imageData, mimeType: mimeType))
+    }
 }
 
 /// Large language model for conversations.
@@ -132,6 +168,103 @@ enum DocumentChunkKind: String, Codable, Sendable {
     case metadata
 }
 
+enum TokenCountAccuracy: String, Codable, Sendable {
+    case exact
+    case estimated
+}
+
+struct TokenMeasurement: Equatable, Codable, Sendable {
+    let count: Int
+    let tokenizerProfile: String
+    let tokenizerVersion: String
+    let accuracy: TokenCountAccuracy
+}
+
+/// Canonical token accounting shared by native chunking, context planning, persistence,
+/// previews, and usage fallbacks. Exact counts supplied by a model tokenizer always win.
+enum TokenCounter {
+    static let canonicalProfile = "qwen3-embedding:0.6b"
+    static let canonicalVersion = "qwen3-embedding-0.6b-v1"
+    static let generationFallbackProfile = "generation-fallback:qwen3-compatible"
+    static let generationFallbackVersion = "filenest-unicode-v1"
+
+    static func estimate(
+        _ text: String,
+        profile: String = canonicalProfile,
+        version: String = canonicalVersion
+    ) -> TokenMeasurement {
+        let count = estimatedWeights(Array(text)).reduce(0, +)
+        return TokenMeasurement(
+            count: text.isEmpty ? 0 : max(1, Int(ceil(count))),
+            tokenizerProfile: profile,
+            tokenizerVersion: version,
+            accuracy: .estimated
+        )
+    }
+
+    static func exact(
+        count: Int,
+        profile: String = canonicalProfile,
+        version: String = canonicalVersion
+    ) -> TokenMeasurement {
+        TokenMeasurement(
+            count: max(0, count),
+            tokenizerProfile: profile,
+            tokenizerVersion: version,
+            accuracy: .exact
+        )
+    }
+
+    static func estimatedWeights(_ characters: [Character]) -> [Double] {
+        var weights = Array(repeating: 0.0, count: characters.count)
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            if character.isWhitespace {
+                index += 1
+            } else if isCJKCharacter(character) {
+                weights[index] = 2.0 / 3.0
+                index += 1
+            } else if isASCIIWordCharacter(character) {
+                let start = index
+                while index < characters.count, isASCIIWordCharacter(characters[index]) {
+                    index += 1
+                }
+                let perCharacter = (4.0 / 3.0) / Double(index - start)
+                for wordIndex in start..<index { weights[wordIndex] = perCharacter }
+            } else {
+                // Symbols often form individual tokens, so keeping a weight of one avoids
+                // underestimating source code, identifiers, and dense tabular content.
+                weights[index] = 1
+                index += 1
+            }
+        }
+        return weights
+    }
+
+    private static func isASCIIWordCharacter(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy { scalar in
+            guard scalar.isASCII else { return false }
+            return CharacterSet.alphanumerics.contains(scalar)
+                || scalar.value == 0x27
+                || scalar.value == 0x2D
+                || scalar.value == 0x5F
+        }
+    }
+
+    private static func isCJKCharacter(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy { scalar in
+            switch scalar.value {
+            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF,
+                 0x20000...0x2A6DF, 0x2A700...0x2EBEF, 0x30000...0x323AF:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+}
+
 struct StructuredDocumentChunk: Equatable, Codable, Sendable {
     let text: String
     let contextualText: String
@@ -139,19 +272,44 @@ struct StructuredDocumentChunk: Equatable, Codable, Sendable {
     let pageStart: Int?
     let pageEnd: Int?
     let kind: DocumentChunkKind
+    /// Stable source unit shown to the model after a smaller retrieval child matches.
+    let parentIndex: Int?
+    let parentText: String?
+    /// Exact identifiers and business entities extracted without an LLM.
+    let entityTerms: [String]
+    let tokenCount: Int?
+    let tokenizerProfile: String?
+    let tokenizerVersion: String?
+    let tokenCountAccuracy: TokenCountAccuracy?
 
     init(text: String,
          contextualText: String? = nil,
          sectionPath: [String] = [],
          pageStart: Int? = nil,
          pageEnd: Int? = nil,
-         kind: DocumentChunkKind = .text) {
+         kind: DocumentChunkKind = .text,
+         parentIndex: Int? = nil,
+         parentText: String? = nil,
+         entityTerms: [String] = [],
+         tokenCount: Int? = nil,
+         tokenizerProfile: String? = nil,
+         tokenizerVersion: String? = nil,
+         tokenCountAccuracy: TokenCountAccuracy? = nil) {
+        let contextualText = contextualText ?? text
+        let fallback = TokenCounter.estimate(contextualText)
         self.text = text
-        self.contextualText = contextualText ?? text
+        self.contextualText = contextualText
         self.sectionPath = sectionPath
         self.pageStart = pageStart
         self.pageEnd = pageEnd
         self.kind = kind
+        self.parentIndex = parentIndex
+        self.parentText = parentText
+        self.entityTerms = entityTerms
+        self.tokenCount = tokenCount ?? fallback.count
+        self.tokenizerProfile = tokenizerProfile ?? fallback.tokenizerProfile
+        self.tokenizerVersion = tokenizerVersion ?? fallback.tokenizerVersion
+        self.tokenCountAccuracy = tokenCountAccuracy ?? fallback.accuracy
     }
 }
 
@@ -163,6 +321,13 @@ struct EmbeddingChunk {
     let pageStart: Int?
     let pageEnd: Int?
     let kind: DocumentChunkKind
+    let parentIndex: Int?
+    let parentText: String?
+    let entityTerms: [String]
+    let tokenCount: Int
+    let tokenizerProfile: String
+    let tokenizerVersion: String
+    let tokenCountAccuracy: TokenCountAccuracy
 
     init(vector: [Float],
          text: String?,
@@ -170,14 +335,30 @@ struct EmbeddingChunk {
          sectionPath: [String] = [],
          pageStart: Int? = nil,
          pageEnd: Int? = nil,
-         kind: DocumentChunkKind = .text) {
+         kind: DocumentChunkKind = .text,
+         parentIndex: Int? = nil,
+         parentText: String? = nil,
+         entityTerms: [String] = [],
+         tokenCount: Int? = nil,
+         tokenizerProfile: String? = nil,
+         tokenizerVersion: String? = nil,
+         tokenCountAccuracy: TokenCountAccuracy? = nil) {
+        let contextualText = contextualText ?? text ?? ""
+        let fallback = TokenCounter.estimate(contextualText)
         self.vector = vector
         self.text = text
-        self.contextualText = contextualText ?? text
+        self.contextualText = contextualText
         self.sectionPath = sectionPath
         self.pageStart = pageStart
         self.pageEnd = pageEnd
         self.kind = kind
+        self.parentIndex = parentIndex
+        self.parentText = parentText
+        self.entityTerms = entityTerms
+        self.tokenCount = tokenCount ?? fallback.count
+        self.tokenizerProfile = tokenizerProfile ?? fallback.tokenizerProfile
+        self.tokenizerVersion = tokenizerVersion ?? fallback.tokenizerVersion
+        self.tokenCountAccuracy = tokenCountAccuracy ?? fallback.accuracy
     }
 }
 
@@ -190,6 +371,9 @@ struct VectorSearchHit {
     let pageStart: Int?
     let pageEnd: Int?
     let kind: DocumentChunkKind
+    let parentIndex: Int?
+    let parentText: String?
+    let entityTerms: [String]
 
     init(fileId: Int64,
          score: Float,
@@ -198,7 +382,10 @@ struct VectorSearchHit {
          sectionPath: [String] = [],
          pageStart: Int? = nil,
          pageEnd: Int? = nil,
-         kind: DocumentChunkKind = .text) {
+         kind: DocumentChunkKind = .text,
+         parentIndex: Int? = nil,
+         parentText: String? = nil,
+         entityTerms: [String] = []) {
         self.fileId = fileId
         self.score = score
         self.chunkText = chunkText
@@ -207,6 +394,9 @@ struct VectorSearchHit {
         self.pageStart = pageStart
         self.pageEnd = pageEnd
         self.kind = kind
+        self.parentIndex = parentIndex
+        self.parentText = parentText
+        self.entityTerms = entityTerms
     }
 }
 
@@ -221,6 +411,16 @@ protocol VectorStore {
     func neighboringChunks(fileId: Int64, around chunkIndex: Int, radius: Int) async -> [VectorSearchHit]
     func loadAll() async  // Load the in-memory index at startup.
     var count: Int { get }
+}
+
+struct RerankItem: Sendable {
+    let index: Int
+    let score: Double
+}
+
+protocol RerankingProvider: Sendable {
+    var name: String { get }
+    func rerank(query: String, documents: [String], topN: Int) async throws -> [RerankItem]
 }
 
 extension VectorStore {

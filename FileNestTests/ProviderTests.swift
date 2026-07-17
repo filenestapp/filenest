@@ -46,6 +46,19 @@ final class ProviderTests: XCTestCase {
         }
     }
 
+    private struct StructuredOCRResultStub: OCRProvider {
+        let name: String
+        let result: OCRRecognitionResult
+
+        func recognize(imageData: Data, mimeType: String) async throws -> String {
+            result.text
+        }
+
+        func recognizeResult(imageData: Data, mimeType: String) async throws -> OCRRecognitionResult {
+            result
+        }
+    }
+
     private final class RequestConcurrencyProbe: @unchecked Sendable {
         private let lock = NSLock()
         private var active = 0
@@ -192,6 +205,7 @@ final class ProviderTests: XCTestCase {
         let body = try requestJSON(request)
         XCTAssertEqual(body["model"] as? String, "qwen")
         XCTAssertEqual(body["stream"] as? Bool, false)
+        XCTAssertEqual(body["think"] as? Bool, false)
         let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         XCTAssertEqual(messages.map { $0["role"] }, ["system", "user"])
         XCTAssertEqual(messages.map { $0["content"] }, ["local context", "question"])
@@ -765,25 +779,64 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(emptyResult, "recognized by GLM")
     }
 
+    func testPaddleOCRFallbackUsesGLMForLowConfidenceNonemptyResult() async throws {
+        let weakPrimary = StructuredOCRResultStub(
+            name: "paddle",
+            result: OCRRecognitionResult(
+                text: "Groue CTO",
+                observations: [OCRTextObservation(
+                    text: "Groue CTO",
+                    confidence: 0.41,
+                    bounds: OCRBoundingBox(x: 10, y: 10, width: 80, height: 20)
+                )]
+            )
+        )
+        let provider = FallbackOCRProvider(
+            primary: weakPrimary,
+            fallback: OCRResultStub(name: "glm", text: "Group CTO")
+        )
+
+        let result = try await provider.recognizeResult(
+            imageData: Data([1]),
+            mimeType: "image/png"
+        )
+
+        XCTAssertEqual(result.text, "Group CTO")
+    }
+
     func testPaddleOCRProviderKeepsWorkerProtocolIndependentFromPythonPipeline() async throws {
         let script = #"""
 import json
 import sys
 for line in sys.stdin:
     request = json.loads(line)
-    print(json.dumps({"id": request["id"], "ok": True, "text": "Paddle text"}), flush=True)
+    print(json.dumps({
+        "id": request["id"],
+        "ok": True,
+        "text": "Paddle text",
+        "observations": [{
+            "text": "Paddle text",
+            "confidence": 0.93,
+            "box": [10, 20, 110, 50]
+        }]
+    }), flush=True)
 """#
         let provider = PaddleOCRProvider(
             pythonExecutableURL: URL(fileURLWithPath: "/usr/bin/python3"),
             workerScript: script
         )
 
-        let text = try await provider.recognize(
+        let result = try await provider.recognizeResult(
             imageData: Data([1, 2, 3]),
             mimeType: "image/png"
         )
 
-        XCTAssertEqual(text, "Paddle text")
+        XCTAssertEqual(result.text, "Paddle text")
+        XCTAssertEqual(result.observations, [OCRTextObservation(
+            text: "Paddle text",
+            confidence: 0.93,
+            bounds: OCRBoundingBox(x: 10, y: 20, width: 100, height: 30)
+        )])
     }
 
     func testCloudOCROpenAIFormatUsesVisionContent() async throws {
@@ -835,6 +888,37 @@ for line in sys.stdin:
         await assertURLError(.badURL) {
             _ = try await provider.chat([ChatTurn(role: .user, content: "question")], context: nil)
         }
+    }
+
+    func testCompatibleRerankerBuildsV1EndpointAndParsesScores() async throws {
+        let endpoint = "https://reranker.test/v1/rerank"
+        registerJSON(endpoint, status: 200, object: [
+            "results": [
+                ["index": 1, "relevance_score": 0.91],
+                ["index": 0, "relevance_score": 0.62],
+            ],
+        ])
+        let provider = CompatibleRerankingProvider(
+            baseURL: "https://reranker.test",
+            apiKey: "secret",
+            model: "Qwen/Qwen3-Reranker-0.6B",
+            name: "test-reranker",
+            session: session
+        )
+
+        let results = try await provider.rerank(
+            query: "invoice",
+            documents: ["first", "second"],
+            topN: 2
+        )
+
+        XCTAssertEqual(results.map(\.index), [1, 0])
+        XCTAssertEqual(results.first?.score ?? 0, 0.91, accuracy: 0.0001)
+        let request = try XCTUnwrap(URLProtocolStub.request(for: endpoint))
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        let body = try requestJSON(request)
+        XCTAssertEqual(body["query"] as? String, "invoice")
+        XCTAssertEqual(body["top_n"] as? Int, 2)
     }
 
     private func registerJSON(_ url: String, status: Int, object: Any) {

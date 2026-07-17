@@ -7,6 +7,7 @@ import { SettingsPage } from "./SettingsPage";
 import { FileInspector } from "./components";
 import { Onboarding } from "./Onboarding";
 import { resolveLanguage } from "./i18n";
+import { QuickSearchPanel } from "./QuickSearchPanel";
 
 export default function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
@@ -26,6 +27,13 @@ export default function App(): React.JSX.Element {
     document.documentElement.dataset.theme = snapshot.settings.appearance;
     document.documentElement.lang = resolveLanguage(snapshot.settings.appLanguage) === "en" ? "en" : "zh-CN";
   }, [snapshot?.settings.appearance, snapshot?.settings.appLanguage]);
+  useEffect(() => {
+    if (snapshot?.pendingLibrarySearch) {
+      setPage("library");
+      setInspectedFile(null);
+    }
+  }, [snapshot?.pendingLibrarySearch?.id]);
+  if (location.hash === "#quick-search") return <QuickSearchPanel language={snapshot?.settings.appLanguage ?? "system"} />;
   if (!snapshot)
     return (
       <div className="app-loading">
@@ -79,16 +87,18 @@ export default function App(): React.JSX.Element {
         onClearChats={() => void clearChats()}
       />
       <div className="app-content">
-        {page === "chat" && (
+        <div className={`persistent-page ${page === "chat" ? "active" : "hidden"}`}>
           <ChatPage
             snapshot={snapshot}
+            active={page === "chat"}
             onRefresh={refresh}
             onInspect={setInspectedFile}
           />
-        )}
+        </div>
         {page === "library" && (
           <LibraryPage
             snapshot={snapshot}
+            externalSearch={snapshot.pendingLibrarySearch}
             onInspect={setInspectedFile}
             onStartChat={(file) => void startFileChat(file)}
             onRefresh={refresh}

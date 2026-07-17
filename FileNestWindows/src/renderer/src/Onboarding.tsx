@@ -22,6 +22,9 @@ export function Onboarding({
   const [step, setStep] = useState(0);
   const [organizeExisting, setOrganizeExisting] = useState(false);
   const [doclingBusy, setDoclingBusy] = useState(false);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [generationModel, setGenerationModel] = useState(snapshot.settings.ollamaModel);
+  const [embeddingModel, setEmbeddingModel] = useState(snapshot.settings.ollamaEmbeddingModel);
   const t = (value: string): string =>
     translate(value, snapshot.settings.appLanguage);
   const update = (patch: Partial<Settings>): Promise<Settings> =>
@@ -32,6 +35,17 @@ export function Onboarding({
     await update({ onboardingCompleted: true });
     await window.fileNest.startWatching();
     await onComplete();
+  };
+  const downloadSelectedModels = async (): Promise<void> => {
+    setModelBusy(true);
+    try {
+      for (const model of [generationModel, embeddingModel]) {
+        if (!snapshot.ollama.models.includes(model)) await window.fileNest.pullOllamaModel(model);
+      }
+      await onComplete();
+    } finally {
+      setModelBusy(false);
+    }
   };
   return (
     <div className="onboarding">
@@ -169,6 +183,32 @@ export function Onboarding({
               >
                 {t("Download Ollama for Windows")}
               </button>
+              <div className="onboarding-models">
+                <label>
+                  <span>{t("Generation Model")}</span>
+                  <select value={generationModel} onChange={(event) => {
+                    const model = event.target.value;
+                    setGenerationModel(model);
+                    void update({ ollamaModel: model });
+                  }}>
+                    {["qwen3.5:2b", "qwen3.5:4b", "qwen3.5:9b"].map((model) => <option key={model} value={model}>{model}{model === "qwen3.5:9b" ? ` · ${t("Default")}` : ""}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span>{t("Embedding Model")}</span>
+                  <select value={embeddingModel} onChange={(event) => {
+                    const model = event.target.value;
+                    setEmbeddingModel(model);
+                    void update({ ollamaEmbeddingModel: model });
+                  }}>
+                    {["qwen3-embedding:0.6b", "qwen3-embedding:4b", "qwen3-embedding:8b"].map((model) => <option key={model} value={model}>{model}{model === "qwen3-embedding:0.6b" ? ` · ${t("Default")}` : ""}</option>)}
+                  </select>
+                </label>
+                <button className="secondary-button" disabled={modelBusy || !snapshot.ollama.reachable} onClick={() => void downloadSelectedModels()}>
+                  {modelBusy && <LoaderCircle className="spin" size={16} />}
+                  {t("Download Selected Models")}
+                </button>
+              </div>
               <button
                 className="text-action"
                 disabled={doclingBusy || snapshot.docling.installed}

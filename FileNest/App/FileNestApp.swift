@@ -1,7 +1,99 @@
 import AppKit
 import SwiftUI
+import UserNotifications
+
+/// Delivers native macOS banners for terminal background events. SwiftUI and AppState remain
+/// the source of truth for live progress; system notifications are only an out-of-app summary.
+final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    static let shared = SystemNotificationService()
+
+    private let center = UNUserNotificationCenter.current()
+
+    private override init() {
+        super.init()
+    }
+
+    func configure() {
+        center.delegate = self
+        center.getNotificationSettings { [weak self] settings in
+            guard settings.authorizationStatus == .notDetermined else { return }
+            self?.center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+                if let error {
+                    AppLogService.shared.write(
+                        "system notification authorization failed: \(error)",
+                        category: .appLifecycle,
+                        level: .warning
+                    )
+                } else {
+                    AppLogService.shared.write(
+                        granted
+                            ? "system notification authorization granted"
+                            : "system notification authorization denied",
+                        category: .appLifecycle,
+                        level: granted ? .notice : .warning
+                    )
+                }
+            }
+        }
+    }
+
+    func post(title: String, body: String, identifier: String) {
+        center.getNotificationSettings { [weak self] settings in
+            guard let self else { return }
+            switch settings.authorizationStatus {
+            case .authorized, .provisional:
+                self.deliver(title: title, body: body, identifier: identifier)
+            case .notDetermined:
+                self.center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    guard granted else { return }
+                    self.deliver(title: title, body: body, identifier: identifier)
+                }
+            case .denied, .ephemeral:
+                break
+            @unknown default:
+                break
+            }
+        }
+    }
+
+    private func deliver(title: String, body: String, identifier: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+        center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) { error in
+            guard let error else { return }
+            AppLogService.shared.write(
+                "system notification delivery failed: \(error)",
+                category: .appLifecycle,
+                level: .warning,
+                metadata: ["identifier": identifier]
+            )
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        await MainActor.run {
+            MainWindowPresenter.shared.present()
+        }
+    }
+}
 
 final class FileNestAppDelegate: NSObject, NSApplicationDelegate {
+    private var isTerminating = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.async {
@@ -15,6 +107,30 @@ final class FileNestAppDelegate: NSObject, NSApplicationDelegate {
     ) -> Bool {
         MainWindowPresenter.shared.present()
         return false
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isTerminating else { return .terminateLater }
+        isTerminating = true
+        Task { @MainActor in
+            await AppLifecycleCoordinator.shared.shutdownManagedServices()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+}
+
+@MainActor
+final class AppLifecycleCoordinator {
+    static let shared = AppLifecycleCoordinator()
+    weak var appState: AppState?
+
+    func register(_ appState: AppState) {
+        self.appState = appState
+    }
+
+    func shutdownManagedServices() async {
+        await appState?.shutdownManagedServices()
     }
 }
 
@@ -69,6 +185,7 @@ struct FileNestApp: App {
             MenuBarView()
                 .environmentObject(appState)
                 .fileNestEnvironment(appState.settings)
+                .fileNestOverlayScrollStyle()
                 .frame(width: 380, height: 660)
         } label: {
             MenuBarStatusIcon(
@@ -111,21 +228,28 @@ struct FileNestApp: App {
                 }
             }
             .fileNestEnvironment(appState.settings)
+            .fileNestOverlayScrollStyle()
             .alert(
-                "Index Processing Settings Changed",
+                appState.settings.localized("Index Processing Settings Changed"),
                 isPresented: Binding(
                     get: { appState.isIndexConfigurationPromptPresented },
                     set: { _ in }
                 )
             ) {
-                Button("Reindex Now") {
+                Button {
                     appState.reindexForPendingConfigurationChange()
+                } label: {
+                    Text(verbatim: appState.settings.localized("Reindex Now"))
                 }
-                Button("Skip and Keep Existing Index", role: .cancel) {
+                Button(role: .cancel) {
                     appState.skipPendingConfigurationChange()
+                } label: {
+                    Text(verbatim: appState.settings.localized("Skip and Keep Existing Index"))
                 }
             } message: {
-                Text("Chunking, document parsing, OCR, indexing scope, or a service endpoint changed. The existing index remains usable. Reindex now, or skip and use the latest settings for new files.")
+                Text(verbatim: appState.settings.localized(
+                    "Chunking, document parsing, OCR, indexing scope, or a service endpoint changed. The existing index remains usable. Reindex now, or skip and use the latest settings for new files."
+                ))
             }
             .sheet(
                 isPresented: Binding(
@@ -146,8 +270,21 @@ struct FileNestApp: App {
         .commands {
             FileNestSettingsCommands(appState: appState)
             CommandMenu("FileNest") {
-                Button("Organize Now") { appState.organizeNow() }
-                    .keyboardShortcut("O", modifiers: [.command, .shift])
+                Button("Open Quick Search") {
+                    appState.toggleQuickSearchPanel()
+                }
+                Divider()
+                if appState.organizationState == .running {
+                    Button("Pause Organization") { appState.pauseOrganization() }
+                    Button("Stop Organization", role: .destructive) { appState.stopOrganization() }
+                } else if appState.organizationState == .paused {
+                    Button("Resume Organization") { appState.resumeOrganization() }
+                    Button("Stop Organization", role: .destructive) { appState.stopOrganization() }
+                } else {
+                    Button("Organize Now") { appState.organizeNow() }
+                        .keyboardShortcut("O", modifiers: [.command, .shift])
+                        .disabled(appState.indexingState.isActive)
+                }
                 Button {
                     appState.reindexAll()
                 } label: {
@@ -177,6 +314,7 @@ struct FileNestApp: App {
             SettingsView()
                 .environmentObject(appState)
                 .fileNestEnvironment(appState.settings)
+                .fileNestOverlayScrollStyle()
         }
         .defaultSize(width: 1040, height: 760)
         .windowResizability(.contentMinSize)
@@ -185,6 +323,7 @@ struct FileNestApp: App {
             OnboardingView()
                 .environmentObject(appState)
                 .fileNestEnvironment(appState.settings)
+                .fileNestOverlayScrollStyle()
         }
         .defaultSize(width: 920, height: 700)
         .windowResizability(.contentSize)
@@ -227,10 +366,11 @@ private struct ReindexConfirmationView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if appState.reindexConfirmationStep == .finalConfirmation {
-                finalConfirmation
-            } else {
+            if appState.reindexConfirmationStep == .selection {
                 selection
+            } else {
+                // Keep the final step mounted while the sheet dismissal animation runs.
+                finalConfirmation
             }
         }
         .frame(width: 560)
@@ -241,24 +381,44 @@ private struct ReindexConfirmationView: View {
         VStack(alignment: .leading, spacing: 18) {
             confirmationHeader(
                 step: "First Confirmation · 1/2",
-                title: "Choose Reindex Scope",
-                detail: "By default, process embedding model changes and new unindexed files; Advanced mode can reprocess configuration changes."
+                title: "Reset RAG Pipeline Stages",
+                detail: "Reset only the stages you need. Selecting an upstream stage automatically includes every persisted downstream stage."
             )
 
-            selectionRow(
-                title: "Embedding model changes",
-                detail: appState.hasEmbeddingConfigurationChange
-                    ? "The model or source changed; all vectors will be regenerated"
-                    : "The current model and source have not changed",
-                icon: "point.3.connected.trianglepath.dotted",
-                isSelected: Binding(
-                    get: { appState.isEmbeddingChangeReindexSelected },
-                    set: { appState.setEmbeddingChangeReindexSelected($0) }
-                )
-            )
+            Toggle(isOn: Binding(
+                get: { appState.isFullPipelineReindexSelected },
+                set: { appState.setFullPipelineReindexSelected($0) }
+            )) {
+                Label {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Reset the full RAG pipeline")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("Reparse sources, rebuild chunks and vectors, recreate sqlite-vec, and restart the local reranker")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90")
+                        .foregroundStyle(FileNestTheme.accent)
+                }
+            }
+            .toggleStyle(.checkbox)
+            .padding(12)
+            .background(FileNestTheme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+
+            VStack(spacing: 0) {
+                ForEach(RAGReindexStage.allCases) { stage in
+                    ragStageRow(stage)
+                    if stage != RAGReindexStage.allCases.last {
+                        Divider().padding(.leading, 36)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .background(.secondary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
 
             selectionRow(
-                title: "New unindexed files",
+                title: "Include new unindexed files",
                 detail: appState.unindexedFileCount > 0
                     ? appState.settings.localizedFormat("%d unindexed files detected", appState.unindexedFileCount)
                     : "No unindexed files detected",
@@ -268,51 +428,10 @@ private struct ReindexConfirmationView: View {
                     set: { appState.setUnindexedFilesReindexSelected($0) }
                 )
             )
-
-            DisclosureGroup(isExpanded: $appState.isReindexAdvancedExpanded) {
-                VStack(spacing: 10) {
-                    if appState.pendingAdvancedReindexCategories.isEmpty {
-                        Text("No other indexing configuration changes were detected.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        ForEach(IndexContentChangeCategory.allCases) { category in
-                            if appState.pendingAdvancedReindexCategories.contains(category) {
-                                Toggle(isOn: Binding(
-                                    get: { appState.selectedAdvancedReindexCategories.contains(category) },
-                                    set: { appState.setAdvancedReindexCategory(category, selected: $0) }
-                                )) {
-                                    Label {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(LocalizedStringKey(category.title))
-                                                .font(.system(size: 13, weight: .medium))
-                                            Text(LocalizedStringKey(category.detail))
-                                                .font(.system(size: 11))
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    } icon: {
-                                        Image(systemName: category.systemImage)
-                                            .foregroundStyle(FileNestTheme.accent)
-                                    }
-                                }
-                                .toggleStyle(.checkbox)
-                            }
-                        }
-                    }
-                    Text("Selecting any advanced category rereads source files and uses all current settings to parse, chunk, and generate vectors.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(.top, 12)
-            } label: {
-                Label("Advanced Mode", systemImage: "slider.horizontal.3")
-                    .font(.system(size: 13, weight: .semibold))
-            }
+            .disabled(appState.unindexedFileCount == 0)
 
             if !appState.canAdvanceReindexConfirmation {
-                Label("No changes requiring reindexing were detected. Expand Advanced Mode for details.", systemImage: "checkmark.circle")
+                Label("No reset stage is selected and no new files require indexing.", systemImage: "checkmark.circle")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -332,12 +451,14 @@ private struct ReindexConfirmationView: View {
             confirmationHeader(
                 step: "Final Confirmation · 2/2",
                 title: "Start Reindexing?",
-                detail: "You can pause or stop while it runs. Configuration baselines update only after full success."
+                detail: "Review the effective pipeline below. You can pause or stop document processing while it runs."
             )
 
             VStack(alignment: .leading, spacing: 10) {
-                if appState.hasDefaultEmbeddingRebuildSelection {
-                    Label("Regenerate Embedding vectors (reuse existing chunks)", systemImage: "checkmark.circle.fill")
+                ForEach(RAGReindexStage.allCases) { stage in
+                    if appState.selectedRAGReindexStages.contains(stage) {
+                        Label(LocalizedStringKey(stage.title), systemImage: "checkmark.circle.fill")
+                    }
                 }
                 if appState.isUnindexedFilesReindexSelected && appState.unindexedFileCount > 0 {
                     Label {
@@ -349,21 +470,13 @@ private struct ReindexConfirmationView: View {
                         Image(systemName: "checkmark.circle.fill")
                     }
                 }
-                ForEach(IndexContentChangeCategory.allCases) { category in
-                    if appState.selectedAdvancedReindexCategories.contains(category) {
-                        Label {
-                            Text("Reprocess: ") + Text(LocalizedStringKey(category.title))
-                        } icon: {
-                            Image(systemName: "checkmark.circle.fill")
-                        }
-                    }
-                }
             }
             .font(.system(size: 12))
             .foregroundStyle(FileNestTheme.accent)
 
-            if !appState.selectedAdvancedReindexCategories.isEmpty {
-                Label("Advanced rebuilding rereads all managed files. Duration depends on document count and OCR/parsing settings.", systemImage: "exclamationmark.triangle")
+            if appState.selectedRAGReindexStages.contains(.parsingAndOCR)
+                || appState.selectedRAGReindexStages.contains(.structuredChunking) {
+                Label("The selected stages reread every managed source file. OCR and Docling may make this significantly slower.", systemImage: "exclamationmark.triangle")
                     .font(.system(size: 11))
                     .foregroundStyle(FileNestTheme.warning)
             }
@@ -409,6 +522,46 @@ private struct ReindexConfirmationView: View {
         .toggleStyle(.checkbox)
     }
 
+    private func ragStageRow(_ stage: RAGReindexStage) -> some View {
+        let unavailable = stage == .rerankerRuntime
+            && (appState.settings.rerankerSource != AppSettings.RerankerSource.local.rawValue
+                || !RerankerServiceManager.isModelInstalled)
+        return Toggle(isOn: Binding(
+            get: { appState.selectedRAGReindexStages.contains(stage) },
+            set: { appState.setRAGReindexStage(stage, selected: $0) }
+        )) {
+            HStack(spacing: 10) {
+                Image(systemName: stage.systemImage)
+                    .frame(width: 18)
+                    .foregroundStyle(FileNestTheme.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 7) {
+                        Text(LocalizedStringKey(stage.title))
+                            .font(.system(size: 13, weight: .medium))
+                        if appState.hasDetectedChange(for: stage) {
+                            Text("Change detected")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(FileNestTheme.warning)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(FileNestTheme.warning.opacity(0.12), in: Capsule())
+                        } else {
+                            Text(unavailable ? "Unavailable" : "Up to date")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text(LocalizedStringKey(stage.detail))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 9)
+        }
+        .toggleStyle(.checkbox)
+        .disabled(unavailable)
+    }
+
     private func actionBar<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 10) {
             Spacer()
@@ -422,6 +575,7 @@ private struct MenuBarStatusIcon: View {
     let baseImage: NSImage
     let showsWatchingBadge: Bool
     let showsIndexingSpinner: Bool
+    @State private var indexingRotationStep = 0
 
     var body: some View {
         Image(nsImage: baseImage)
@@ -439,18 +593,29 @@ private struct MenuBarStatusIcon: View {
             }
             .overlay(alignment: .bottomTrailing) {
                 if showsIndexingSpinner {
-                    TimelineView(.periodic(from: .now, by: 0.55)) { context in
-                        Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90.circle.fill")
-                            .symbolRenderingMode(.hierarchical)
-                            .font(.system(size: 7.5, weight: .bold))
-                            .foregroundStyle(.primary)
-                            .rotationEffect(.degrees(rotationAngle(at: context.date)))
-                            .offset(x: 1, y: 0.5)
-                    }
+                    Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90.circle.fill")
+                        .symbolRenderingMode(.hierarchical)
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundStyle(.primary)
+                        .rotationEffect(.degrees(Double(indexingRotationStep) * 45))
+                        .offset(x: 1, y: 0.5)
                 }
             }
             .frame(width: 16, height: 16)
             .accessibilityValue(Text(LocalizedStringKey(accessibilityStatus)))
+            .task(id: showsIndexingSpinner) {
+                indexingRotationStep = 0
+                guard showsIndexingSpinner else { return }
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(nanoseconds: 550_000_000)
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled else { return }
+                    indexingRotationStep = (indexingRotationStep + 1) % 8
+                }
+            }
     }
 
     private var accessibilityStatus: String {
@@ -460,11 +625,6 @@ private struct MenuBarStatusIcon: View {
         case (false, true): return "Indexing"
         case (false, false): return "Paused"
         }
-    }
-
-    private func rotationAngle(at date: Date) -> Double {
-        let frame = Int(date.timeIntervalSinceReferenceDate / 0.55) % 8
-        return Double(frame) * 45
     }
 }
 
