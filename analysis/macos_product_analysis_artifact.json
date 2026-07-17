@@ -1,0 +1,582 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "FileNest Mac 版本产品与商业分析",
+    "generatedAt": "2026-07-16T22:40:00+08:00",
+    "cards": [],
+    "charts": [
+      {
+        "id": "readiness-rubric",
+        "title": "公开商业发布准备度（决策评分）",
+        "subtitle": "0–5 分；这是基于仓库证据的决策量表，不是客户 KPI",
+        "type": "horizontalBar",
+        "dataset": "readiness",
+        "sourceId": "readiness_extract",
+        "encodings": {
+          "x": {
+            "field": "dimension",
+            "type": "nominal",
+            "label": "维度"
+          },
+          "y": {
+            "field": "score",
+            "type": "quantitative",
+            "label": "评分"
+          },
+          "label": {
+            "field": "score",
+            "type": "quantitative"
+          }
+        },
+        "xAxisTitle": "评分（0–5）",
+        "valueFormat": "number",
+        "layout": "full"
+      },
+      {
+        "id": "setup-download-burden",
+        "title": "本地完整路径的模型下载量",
+        "subtitle": "按 onboarding 推荐模型组合估算的最低下载量",
+        "type": "horizontalBar",
+        "dataset": "setup_burden",
+        "sourceId": "setup_burden_extract",
+        "encodings": {
+          "x": {
+            "field": "device_tier",
+            "type": "nominal",
+            "label": "Mac 内存档位"
+          },
+          "y": {
+            "field": "download_gb",
+            "type": "quantitative",
+            "label": "下载量"
+          },
+          "label": {
+            "field": "download_gb",
+            "type": "quantitative"
+          }
+        },
+        "xAxisTitle": "估算下载量（GB）",
+        "valueFormat": "number",
+        "layout": "full"
+      }
+    ],
+    "tables": [
+      {
+        "id": "product-capability-matrix",
+        "title": "Mac 版能力盘点",
+        "subtitle": "从当前实现判断产品闭环的覆盖度",
+        "dataset": "feature_matrix",
+        "density": "comfortable",
+        "sourceId": "feature_matrix_extract",
+        "defaultSort": {
+          "field": "order",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "order",
+            "label": "序号",
+            "type": "number"
+          },
+          {
+            "field": "area",
+            "label": "环节",
+            "type": "text"
+          },
+          {
+            "field": "status",
+            "label": "当前状态",
+            "type": "text"
+          },
+          {
+            "field": "evidence",
+            "label": "实现证据",
+            "type": "text"
+          },
+          {
+            "field": "business_implication",
+            "label": "业务含义",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "release-gates",
+        "title": "公开发布门槛",
+        "subtitle": "按对用户信任与商业验证的影响排序",
+        "dataset": "release_gates",
+        "density": "comfortable",
+        "sourceId": "release_gates_extract",
+        "defaultSort": {
+          "field": "priority",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "priority",
+            "label": "优先级",
+            "type": "number"
+          },
+          {
+            "field": "gate",
+            "label": "门槛",
+            "type": "text"
+          },
+          {
+            "field": "status",
+            "label": "判断",
+            "type": "text"
+          },
+          {
+            "field": "evidence",
+            "label": "主要证据",
+            "type": "text"
+          },
+          {
+            "field": "required_action",
+            "label": "发布前动作",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "readiness_extract",
+        "label": "发布准备度量表数据",
+        "path": "analysis/macos_product_business_analysis.ipynb",
+        "query": {
+          "id": "readiness-rubric-extract",
+          "engine": "artifact-snapshot",
+          "sql": "SELECT dimension, score, evidence FROM readiness ORDER BY score DESC",
+          "description": "读取笔记本生成并人工复核的 0–5 发布准备度量表。",
+          "executed_at": "2026-07-16T22:30:00+08:00",
+          "tables_used": ["readiness"],
+          "filters": ["仅保留六个公开发布决策维度"],
+          "metric_definitions": ["score 是基于仓库证据的决策评分，不是客户 KPI"]
+        }
+      },
+      {
+        "id": "setup_burden_extract",
+        "label": "本地模型下载量估算",
+        "path": "analysis/macos_product_business_analysis.ipynb",
+        "query": {
+          "id": "setup-burden-extract",
+          "engine": "artifact-snapshot",
+          "sql": "SELECT device_tier, download_gb, model_mix FROM setup_burden ORDER BY download_gb ASC",
+          "description": "读取 onboarding 推荐模型组合的下载量估算。",
+          "executed_at": "2026-07-16T22:30:00+08:00",
+          "tables_used": ["setup_burden"],
+          "filters": ["每个内存档位使用 onboarding 推荐的生成模型"],
+          "metric_definitions": ["download_gb 为生成、embedding 和 OCR 模型标注大小之和"]
+        }
+      },
+      {
+        "id": "feature_matrix_extract",
+        "label": "Mac 产品能力矩阵",
+        "path": "FileNest",
+        "query": {
+          "id": "feature-matrix-extract",
+          "engine": "artifact-snapshot",
+          "sql": "SELECT order, area, status, evidence, business_implication FROM feature_matrix ORDER BY order ASC",
+          "description": "将源码审查中可定位的能力按产品闭环环节汇总。",
+          "executed_at": "2026-07-16T22:20:00+08:00",
+          "tables_used": ["feature_matrix"],
+          "filters": ["仅纳入当前 macOS target 中可定位的实现"],
+          "metric_definitions": ["已实现表示仓库存在相应产品代码，不表示生产环境已经验证"]
+        }
+      },
+      {
+        "id": "release_gates_extract",
+        "label": "公开发布门槛清单",
+        "path": "FileNest",
+        "query": {
+          "id": "release-gates-extract",
+          "engine": "artifact-snapshot",
+          "sql": "SELECT priority, gate, status, evidence, required_action FROM release_gates ORDER BY priority ASC",
+          "description": "按用户信任、首次价值和商业验证影响汇总发布门槛。",
+          "executed_at": "2026-07-16T22:20:00+08:00",
+          "tables_used": ["release_gates"],
+          "filters": ["优先级越小越应先处理"],
+          "metric_definitions": ["阻塞表示会显著影响公开商业发布，不代表核心功能不可用"]
+        }
+      },
+      {
+        "id": "analysis_notebook",
+        "label": "可复现的仓库量化分析笔记本",
+        "path": "analysis/macos_product_business_analysis.ipynb",
+        "query": {
+          "description": "统计 Mac Swift 源码、测试、本地化、QA 证据、产品分层代码量，并计算发布准备度量表与本地模型下载负担。",
+          "language": "python",
+          "executed_at": "2026-07-16T22:30:00+08:00",
+          "tables_used": [
+            "FileNest/**/*.swift",
+            "FileNestTests/**/*.swift",
+            "FileNest/Resources/*.lproj/Localizable.strings",
+            "design/qa/README.md",
+            "FileNest/UI/Onboarding/OnboardingView.swift"
+          ],
+          "filters": [
+            "仅分析原生 macOS target",
+            "排除构建产物与第三方依赖源码"
+          ],
+          "metric_definitions": [
+            "源码行数为仓库内 FileNest 目录下 Swift 文件的物理行数",
+            "下载量为 onboarding 推荐的生成、embedding 与 OCR 模型标注大小之和",
+            "准备度是 0–5 决策量表，不是产品 KPI"
+          ]
+        }
+      },
+      {
+        "id": "test_run",
+        "label": "macOS 测试与覆盖率运行摘要",
+        "path": "analysis/test_run_summary.json",
+        "query": {
+          "description": "运行 macOS Debug scheme 的完整 XCTest，并读取结果包中的应用行覆盖率。",
+          "language": "shell",
+          "executed_at": "2026-07-16T22:23:27+08:00",
+          "tables_used": [
+            "FileNest.xcodeproj",
+            "FileNestTests/**/*.swift"
+          ],
+          "filters": [
+            "destination=platform=macOS",
+            "configuration=Debug"
+          ],
+          "metric_definitions": [
+            "应用行覆盖率仅统计 FileNest.app",
+            "测试数为本次 xcodebuild 测试实际执行数"
+          ]
+        }
+      },
+      {
+        "id": "source_tree_review",
+        "label": "Mac 产品实现与发布配置审查",
+        "path": "FileNest",
+        "query": {
+          "description": "审查产品闭环、设置存储、onboarding、更新、签名与商业化相关实现。",
+          "language": "source-review",
+          "executed_at": "2026-07-16T22:20:00+08:00",
+          "tables_used": [
+            "project.yml",
+            "FileNest/App",
+            "FileNest/UI",
+            "FileNest/Services",
+            "FileNest/Storage",
+            "FileNest/Providers"
+          ],
+          "filters": [
+            "以当前代码为准，不以过时 README 的 MVP 描述为准",
+            "未发现的能力只标为仓库未见，不推断外部系统状态"
+          ],
+          "metric_definitions": [
+            "阻塞表示会显著影响用户信任、首次价值或公开商业发布",
+            "能力状态基于可定位的当前源码，不代表生产环境已验证"
+          ]
+        }
+      },
+      {
+        "id": "qa_evidence",
+        "label": "界面 QA 迭代记录",
+        "path": "design/qa/README.md",
+        "query": {
+          "description": "核对已有界面 QA 轮次、截图和历史测试记录。",
+          "language": "markdown",
+          "executed_at": "2026-07-16T22:12:00+08:00",
+          "tables_used": [
+            "design/qa/README.md",
+            "design/qa"
+          ],
+          "filters": [
+            "历史测试数不替代本次测试运行结果"
+          ],
+          "metric_definitions": [
+            "QA 轮次来自文档明确列出的迭代编号",
+            "QA 图片数来自 design/qa 下的图像文件计数"
+          ]
+        }
+      },
+      {
+        "id": "apple_spotlight",
+        "label": "Apple Spotlight 官方指南",
+        "href": "https://support.apple.com/en-ie/guide/mac-help/mchlp1008/mac"
+      },
+      {
+        "id": "hazel",
+        "label": "Hazel 官方产品页",
+        "href": "https://www.noodlesoft.com/"
+      },
+      {
+        "id": "raycast",
+        "label": "Raycast 官方定价与 AI 扩展说明",
+        "href": "https://www.raycast.com/pricing"
+      },
+      {
+        "id": "declutter",
+        "label": "Declutter 官方产品页",
+        "href": "https://declutter.pholidlabs.com/"
+      },
+      {
+        "id": "dhito",
+        "label": "Dhito 官方产品页",
+        "href": "https://dhito.io/"
+      },
+      {
+        "id": "devonthink",
+        "label": "DEVONthink 官方定价页",
+        "href": "https://mail.devontechnologies.com/apps/devonthink/pricing"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "report-title",
+        "type": "markdown",
+        "body": "# FileNest Mac 版本产品与商业分析\n\n基于 2026 年 7 月 16 日的 macOS 源码、测试运行、QA 记录与官方竞品资料。"
+      },
+      {
+        "id": "executive-summary",
+        "type": "markdown",
+        "body": "## 执行摘要\n\n- **结论：Mac 版已经适合定向私测，但不适合立即公开商业发布。** 核心闭环已经完整，代码与 UX 成熟度明显领先于分发、安全、激活和商业验证。\n- **最值得聚焦的切口**不是泛化的“AI 文件管理”，而是隐私敏感、文档密集的 Mac 工作流：文件自动归档后，仍能被语义检索、引用和问答。\n- **未来 4–6 周应暂停横向扩功能。** 先提供低下载量的首次价值路径，把云端密钥迁入 Keychain，完成 Developer ID 签名、公证与正式更新通道，再用 20–30 名目标用户验证留存和付费意愿。\n- **商业风险大于技术风险。** 当前仓库没有可信的激活、留存、任务成功率、付费意愿或收入数据，因此不能把功能完整度等同于产品市场匹配。"
+      },
+      {
+        "id": "product-loop-heading",
+        "type": "markdown",
+        "body": "## 产品闭环完整，但成熟度分布失衡\n\n当前 Mac 实现已经覆盖“监听文件夹 → 提取与索引 → 搜索/预览 → 引用式问答 → 规则或 AI 自动整理”的完整循环，并同时提供本地 Ollama、Apple 自然语言 embedding 和云端 provider 路径。它已经不是 README 所描述的早期 MVP，而是功能面较广的原生 macOS 产品。",
+        "sourceId": "source_tree_review"
+      },
+      {
+        "id": "repo-scale-evidence",
+        "type": "markdown",
+        "body": "仓库当前包含 **40 个 Mac Swift 源文件、24,502 行产品代码、19 个测试文件、7,082 行测试代码**；英文和简体中文各有 **837 个本地化键**，QA 目录记录了 **12 轮界面迭代与 75 张图片**。但 UI 自身占约 39.8% 的产品代码，说明后续维护面并不小。",
+        "sourceId": "analysis_notebook"
+      },
+      {
+        "id": "test-evidence",
+        "type": "markdown",
+        "body": "本次 macOS Debug 测试实际执行 **255 项，0 失败**；应用整体行覆盖率为 **38.69%**。存储、索引、文件监听、聊天和 provider 等核心层覆盖率较高，而 SwiftUI、安装器和更新流程覆盖明显偏低。结论是核心逻辑具备较好的回归保护，但“用户第一次安装到成功使用”的高风险路径仍主要依赖人工 QA。",
+        "sourceId": "test_run"
+      },
+      {
+        "id": "readiness-chart-intro",
+        "type": "markdown",
+        "body": "下面的量表用于回答一个具体问题：**哪些维度阻碍公开商业发布？** 评分来自可定位的实现证据和缺口，不代表真实客户行为。"
+      },
+      {
+        "id": "readiness-chart-block",
+        "type": "chart",
+        "chartId": "readiness-rubric"
+      },
+      {
+        "id": "readiness-chart-takeaway",
+        "type": "markdown",
+        "body": "核心闭环获得最高分，是因为关键功能已实现且测试通过；市场验证和商业化接近底部，是因为没有真实用户行为、付费或渠道数据。平均 **2.58/5** 的意义不是产品“只有一半完成”，而是公开发布所需的非功能性工作尚未补齐。",
+        "sourceId": "analysis_notebook"
+      },
+      {
+        "id": "capability-table-intro",
+        "type": "markdown",
+        "body": "从产品链路看，FileNest 的优势不是某一个孤立功能，而是把自动整理、语义检索和可引用问答放在同一个原生 Mac 工作流中。"
+      },
+      {
+        "id": "capability-table-block",
+        "type": "table",
+        "tableId": "product-capability-matrix"
+      },
+      {
+        "id": "market-heading",
+        "type": "markdown",
+        "body": "## 市场定位：交集有价值，但单点能力都已有替代品\n\n用户对文件查找的最低预期由免费的 [Spotlight](https://support.apple.com/en-ie/guide/mac-help/mchlp1008/mac) 建立；规则自动化有成熟的 [Hazel](https://www.noodlesoft.com/)；快捷搜索与 AI 工作流可由 [Raycast](https://www.raycast.com/pricing) 承接；而 [Declutter](https://declutter.pholidlabs.com/) 已直接主张本地 AI 整理、常驻监听、语义搜索与 OCR，[Dhito](https://dhito.io/) 主张端侧语义搜索与对话，[DEVONthink](https://mail.devontechnologies.com/apps/devonthink/pricing) 则覆盖高端知识管理。\n\n因此，“AI 文件管理器”本身不是可防守定位。FileNest 更有机会的叙事是：**面向隐私敏感、文档密集的 Mac 用户，在无需改变 Finder 使用习惯的前提下，让落盘、归档、回找和问答成为一条连续工作流。** 这一定位仍是假设，必须用目标人群的持续使用和付费行为验证。"
+      },
+      {
+        "id": "activation-heading",
+        "type": "markdown",
+        "body": "## 首次激活成本是当前最大的体验风险\n\n完整本地路径要求用户理解并安装 Ollama、Docling、PaddleOCR 以及多个模型。按 onboarding 中标注的推荐组合估算，用户在体验完整承诺前需下载约 **5.54–9.44 GB**；同时应用最低部署目标是 macOS 13，而 Ollama 安装流程在代码中要求 macOS 14，本地 PaddleOCR 还限定 Apple Silicon。",
+        "sourceId": "analysis_notebook"
+      },
+      {
+        "id": "setup-chart-block",
+        "type": "chart",
+        "chartId": "setup-download-burden"
+      },
+      {
+        "id": "setup-chart-takeaway",
+        "type": "markdown",
+        "body": "这个负担会把产品最强的“本地隐私”卖点变成首次价值障碍。更稳妥的默认路径是先用 Apple NLEmbedding、元数据和关键词搜索提供零额外下载的成功体验，再把生成模型和 OCR 作为按需升级；云端路径则必须清楚解释数据边界。"
+      },
+      {
+        "id": "release-heading",
+        "type": "markdown",
+        "body": "## 公开发布仍有四类硬门槛\n\n最严重的问题不是界面细节，而是用户信任与可运营性：云端 API key 当前写入 SQLite settings，仓库未见 Keychain；签名仍是开发证书配置，正式 appcast、Developer ID、公证与发布演练未形成闭环；仓库未见产品分析、试用、授权、付费墙或 StoreKit；也没有真实用户留存或付费数据。",
+        "sourceId": "source_tree_review"
+      },
+      {
+        "id": "release-table-block",
+        "type": "table",
+        "tableId": "release-gates"
+      },
+      {
+        "id": "recommendations-heading",
+        "type": "markdown",
+        "body": "## 建议：用 90 天把“功能产品”变成“可验证业务”\n\n**0–30 天：降低风险与激活成本**\n\n- 将所有云端凭证迁入 Keychain，并增加删除/重置路径。\n- 把零额外下载的搜索路径设为默认，让用户在首次会话内完成“添加文件夹 → 找到一个文件”。\n- 完成 Developer ID 签名、公证、正式 appcast 与回滚演练；明确 macOS 13/14 和 Intel/Apple Silicon 的支持矩阵。\n- 增加明确自愿加入、可关闭的事件记录；至少测量 onboarding 完成、首次索引、首次成功搜索、首次规则执行与首周回访。\n\n**31–60 天：只验证一个窄人群**\n\n- 招募 20–30 名隐私敏感、文档密集的 Mac 用户，例如合同、发票、研究资料或项目文档使用者。\n- 每周观察真实任务，不以功能偏好投票代替行为；记录安装失败点、首次价值时间、搜索成功率、自动整理纠错率和引用问答采纳。\n- 设定继续门槛：目标用户能在不被陪同的情况下完成核心任务，并在第 2–4 周重复使用。\n\n**61–90 天：验证付费与渠道**\n\n- 只在重复使用成立后测试价格；优先比较一次性授权加一年更新与订阅，而不是先实现复杂计费。\n- 制作面向单一场景的落地页和演示，测试“本地隐私 + 自动归档 + 可回溯问答”的信息是否优于泛化 AI 文件管理叙事。\n- 若留存或付费意愿不成立，收缩到表现最强的一个环节，而不是继续扩大功能面。"
+      },
+      {
+        "id": "further-questions",
+        "type": "markdown",
+        "body": "## 仍需回答的问题\n\n1. 哪类文档工作流的痛点频率最高，且 Spotlight、Hazel 或现有知识库不能充分解决？\n2. 用户是否真的需要“自动整理 + 搜索 + 问答”三者同时存在，还是其中一个环节贡献了大部分价值？\n3. 目标用户愿意为纯本地隐私承担多少安装时间、磁盘空间和设备限制？\n4. 错误移动文件的可接受率是多少，撤销和审计是否足以建立信任？\n5. 一次性授权、年度更新和订阅中，哪种模式最符合本地 Mac 工具的购买心智？"
+      },
+      {
+        "id": "caveats",
+        "type": "markdown",
+        "body": "## 假设与局限\n\n- 本分析以 2026 年 7 月 16 日工作区中的 macOS 源码为准；README 与交接文档部分描述早期 MVP，已用当前实现交叉核对。\n- 测试通过证明回归状态，不证明生产稳定性、真实任务成功率或用户满意度。\n- 准备度分数是便于决策的主观量表，证据可追溯，但不是统计模型。\n- 模型下载量使用 onboarding 中标注的文件大小相加，实际下载、缓存和磁盘占用可能不同。\n- 竞品事实来自官方页面，用于说明替代选择；未获得其客户规模、留存或收入，因此不据此估算市场份额。\n- 仓库没有可信的客户、渠道、收入或产品分析数据。涉及目标人群、定位和 90 天计划的部分是待验证建议，而不是已证实结论。"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-16T22:40:00+08:00",
+    "status": "ready",
+    "datasets": {
+      "readiness": [
+        {
+          "dimension": "核心产品闭环",
+          "score": 5,
+          "evidence": "监听、索引、搜索、问答与整理均已实现"
+        },
+        {
+          "dimension": "可靠性与测试",
+          "score": 4,
+          "evidence": "255 项测试通过；核心层覆盖较高"
+        },
+        {
+          "dimension": "体验与本地化",
+          "score": 4,
+          "evidence": "完整原生 UI、双语与多轮 QA"
+        },
+        {
+          "dimension": "分发与安全",
+          "score": 1.5,
+          "evidence": "开发签名；凭证明文存入 SQLite"
+        },
+        {
+          "dimension": "市场验证",
+          "score": 0.5,
+          "evidence": "没有可信用户行为与留存数据"
+        },
+        {
+          "dimension": "商业化与渠道",
+          "score": 0.5,
+          "evidence": "仓库未见计费、试用或 GTM 系统"
+        }
+      ],
+      "setup_burden": [
+        {
+          "device_tier": "8GB Mac",
+          "download_gb": 5.54,
+          "model_mix": "小型生成模型 + embedding + OCR"
+        },
+        {
+          "device_tier": "16GB Mac",
+          "download_gb": 6.24,
+          "model_mix": "中型生成模型 + embedding + OCR"
+        },
+        {
+          "device_tier": "24GB+ Mac",
+          "download_gb": 9.44,
+          "model_mix": "大型生成模型 + embedding + OCR"
+        }
+      ],
+      "feature_matrix": [
+        {
+          "order": 1,
+          "area": "采集",
+          "status": "已实现",
+          "evidence": "监控文件夹、文件监听、导入和过滤",
+          "business_implication": "能融入 Finder 之外的持续工作流"
+        },
+        {
+          "order": 2,
+          "area": "理解与索引",
+          "status": "已实现",
+          "evidence": "文本提取、OCR、Docling、向量索引",
+          "business_implication": "支持复杂文档和语义回找"
+        },
+        {
+          "order": 3,
+          "area": "检索与预览",
+          "status": "已实现",
+          "evidence": "关键词/语义搜索、筛选、Quick Look、全屏预览",
+          "business_implication": "可以替代部分手工文件定位"
+        },
+        {
+          "order": 4,
+          "area": "问答",
+          "status": "已实现",
+          "evidence": "流式聊天、会话、RAG 引用",
+          "business_implication": "把回找扩展为文档理解"
+        },
+        {
+          "order": 5,
+          "area": "整理",
+          "status": "已实现",
+          "evidence": "规则、AI 子文件夹分类、撤销相关能力",
+          "business_implication": "形成区别于纯搜索工具的闭环"
+        },
+        {
+          "order": 6,
+          "area": "分发与变现",
+          "status": "未闭环",
+          "evidence": "Sparkle 已接入，但生产签名、appcast、试用与付费未完成",
+          "business_implication": "无法稳妥转为公开商业产品"
+        }
+      ],
+      "release_gates": [
+        {
+          "priority": 1,
+          "gate": "云端凭证安全",
+          "status": "阻塞",
+          "evidence": "API key 写入 SQLite settings，仓库未见 Keychain",
+          "required_action": "迁移到 Keychain；提供清除与迁移测试"
+        },
+        {
+          "priority": 2,
+          "gate": "生产分发",
+          "status": "阻塞",
+          "evidence": "开发签名配置；生产 appcast 与公证未闭环",
+          "required_action": "Developer ID 签名、公证、更新与回滚演练"
+        },
+        {
+          "priority": 3,
+          "gate": "首次价值",
+          "status": "需改进",
+          "evidence": "本地完整路径需多工具与 5.54–9.44 GB 模型",
+          "required_action": "默认启用零下载搜索；模型按需安装"
+        },
+        {
+          "priority": 4,
+          "gate": "市场验证",
+          "status": "阻塞",
+          "evidence": "无激活、留存、任务成功率或付费意愿数据",
+          "required_action": "用 20–30 名窄人群做 4–6 周私测"
+        },
+        {
+          "priority": 5,
+          "gate": "商业化",
+          "status": "阻塞",
+          "evidence": "仓库未见试用、授权、计费或渠道系统",
+          "required_action": "留存成立后再验证价格与授权模式"
+        },
+        {
+          "priority": 6,
+          "gate": "核心功能",
+          "status": "通过",
+          "evidence": "核心闭环完整且 255 项测试通过",
+          "required_action": "保持回归保护，补 UI 与安装更新自动化"
+        }
+      ]
+    },
+    "accessIssues": []
+  },
+  "sources": []
+}

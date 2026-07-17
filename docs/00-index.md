@@ -25,6 +25,10 @@
 
 The deterministic inventory used as a starting point is retained under `_inventory/`. It includes build products and dependencies, so it is not used as primary product evidence.
 
+## Supplemental analysis
+
+- [macOS product and business analysis snapshot](../analysis/README.md) records the July 16, 2026 decision report, its reproducible notebook, source artifact, and test-run evidence. It is historical product research rather than the current engineering specification.
+
 ## Stack summary
 
 | Runtime | UI | Persistence | Retrieval | Packaging |

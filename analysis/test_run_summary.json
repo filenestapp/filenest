@@ -1,0 +1,16 @@
+{
+  "command": "xcodebuild -project FileNest.xcodeproj -scheme FileNest -configuration Debug -destination platform=macOS test",
+  "executed_at": "2026-07-16T22:23:27+08:00",
+  "status": "passed",
+  "tests_executed": 255,
+  "failures": 0,
+  "unexpected_failures": 0,
+  "test_duration_seconds": 17.955,
+  "application_line_coverage": 0.3869,
+  "covered_application_lines": 15295,
+  "total_application_lines": 39533,
+  "notes": [
+    "The macOS test destination completed successfully.",
+    "Xcode reported an unrelated CoreSimulator framework version warning before macOS testing."
+  ]
+}
