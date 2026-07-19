@@ -89,11 +89,16 @@ struct MenuBarView: View {
                 .controlSize(.small)
             }
 
-            if appState.indexingState.isActive ||
+            if appState.organizationState.isActive ||
+                appState.indexingState.isActive ||
                 appState.indexingState == .stopped ||
                 appState.indexingState == .failed {
                 Divider()
-                IndexingStatusProgressView(appState: appState)
+                if appState.organizationState.isActive {
+                    ManualOrganizationQueueView(appState: appState, maximumItems: 3, showsControls: false)
+                } else {
+                    IndexingStatusProgressView(appState: appState)
+                }
             }
 
             if !appState.automaticFileProcessingItems.isEmpty {
@@ -145,38 +150,23 @@ struct MenuBarView: View {
                 }
                 .buttonStyle(QuietButtonStyle())
             } else {
-                Button {
-                    appState.organizeNow()
-                } label: {
+                OrganizeNowMenu {
                     Label("Organize Now", systemImage: "sparkles")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(GradientButtonStyle())
-                .disabled(appState.indexingState.isActive)
             }
 
-            if appState.organizationState.isActive,
-               let progress = appState.organizationProgress {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(LocalizedStringKey(appState.organizationStatusTitle))
-                        .font(.system(size: 11, weight: .medium))
-                    ProgressView(value: progress.fractionCompleted)
-                    Text(LocalizedStringKey(appState.organizationStatusSubtitle))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+            if !appState.organizationState.isActive {
+                Button {
+                    appState.reindexAll()
+                } label: {
+                    IndexingButtonLabel(defaultTitle: "Reindex", appState: appState)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .buttonStyle(QuietButtonStyle())
+                .disabled(appState.reindexButtonsDisabled)
             }
-
-            Button {
-                appState.reindexAll()
-            } label: {
-                IndexingButtonLabel(defaultTitle: "Reindex", appState: appState)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(QuietButtonStyle())
-            .disabled(appState.reindexButtonsDisabled)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
@@ -197,7 +187,10 @@ struct MenuBarView: View {
             } else {
                 VStack(spacing: 2) {
                     ForEach(files) { file in
-                        MenuBarFileRow(file: file)
+                        MenuBarFileRow(
+                            file: file,
+                            localizedCategory: appState.settings.localized(file.categoryEnum.label)
+                        )
                     }
                 }
             }
@@ -228,8 +221,8 @@ struct MenuBarView: View {
 }
 
 private struct MenuBarFileRow: View {
-    @EnvironmentObject private var appState: AppState
     let file: FileRecord
+    let localizedCategory: String
 
     var body: some View {
         Button {
@@ -271,9 +264,8 @@ private struct MenuBarFileRow: View {
 
     private var subtitle: String {
         let folder = URL(fileURLWithPath: file.path).deletingLastPathComponent().lastPathComponent
-        let category = appState.settings.localized(file.categoryEnum.label)
-        guard !folder.isEmpty, folder != file.categoryEnum.folderName else { return category }
-        return "\(category) / \(folder)"
+        guard !folder.isEmpty, folder != file.categoryEnum.folderName else { return localizedCategory }
+        return "\(localizedCategory) / \(folder)"
     }
 }
 

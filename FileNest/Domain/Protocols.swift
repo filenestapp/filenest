@@ -164,6 +164,7 @@ enum DocumentChunkKind: String, Codable, Sendable {
     case table
     case list
     case picture
+    case transcript
     case note
     case metadata
 }

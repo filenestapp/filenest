@@ -91,11 +91,13 @@ final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegat
     }
 }
 
+@MainActor
 final class FileNestAppDelegate: NSObject, NSApplicationDelegate {
     private var isTerminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        FileNestScrollerStyleCoordinator.shared.start()
         DispatchQueue.main.async {
             MainWindowPresenter.shared.present()
         }
@@ -188,11 +190,8 @@ struct FileNestApp: App {
                 .fileNestOverlayScrollStyle()
                 .frame(width: 380, height: 660)
         } label: {
-            MenuBarStatusIcon(
-                baseImage: menuBarBaseIcon(),
-                showsWatchingBadge: appState.hasActiveWatchDirectories,
-                showsIndexingSpinner: appState.indexingState.isAnimating
-            )
+            Image(nsImage: Self.menuBarIcon)
+                .frame(width: 16, height: 16)
                 .accessibilityLabel("FileNest")
                 .background(MainWindowPresentationBridge())
         }
@@ -281,7 +280,15 @@ struct FileNestApp: App {
                     Button("Resume Organization") { appState.resumeOrganization() }
                     Button("Stop Organization", role: .destructive) { appState.stopOrganization() }
                 } else {
-                    Button("Organize Now") { appState.organizeNow() }
+                    Menu("Organize Now") {
+                        Button("Organize New Files in Watched Folders") {
+                            appState.organizeNewFilesInWatchedDirectories()
+                        }
+                        .disabled(appState.settings.watchDirs.isEmpty)
+                        Button("Choose Folders to Organize…") {
+                            appState.chooseDirectoriesForOneTimeOrganization()
+                        }
+                    }
                         .keyboardShortcut("O", modifiers: [.command, .shift])
                         .disabled(appState.indexingState.isActive)
                 }
@@ -327,9 +334,20 @@ struct FileNestApp: App {
         }
         .defaultSize(width: 920, height: 700)
         .windowResizability(.contentSize)
+
+        Window("Duplicate Files", id: "duplicates") {
+            DuplicateFilesWindow()
+                .environmentObject(appState)
+                .fileNestEnvironment(appState.settings)
+                .fileNestOverlayScrollStyle()
+        }
+        .defaultSize(width: 760, height: 600)
+        .windowResizability(.contentMinSize)
     }
 
-    private func menuBarBaseIcon() -> NSImage {
+    private static let menuBarIcon = makeMenuBarIcon()
+
+    private static func makeMenuBarIcon() -> NSImage {
         let source = NSImage(named: NSImage.Name("MenuBarIconListening"))
             ?? NSImage(systemSymbolName: "archivebox", accessibilityDescription: "FileNest")
             ?? NSImage()
@@ -417,6 +435,50 @@ private struct ReindexConfirmationView: View {
             .padding(.horizontal, 12)
             .background(.secondary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
 
+            if appState.hasPendingMediaTranscriptionReindex {
+                selectionRow(
+                    title: "Only reindex audio and video affected by transcription changes",
+                    detail: "Reprocess supported audio and video files only. Existing document and image indexes stay unchanged.",
+                    icon: "waveform",
+                    isSelected: Binding(
+                        get: { appState.isAffectedMediaOnlyReindexSelected },
+                        set: { appState.setAffectedMediaOnlyReindexSelected($0) }
+                    )
+                )
+                .padding(12)
+                .background(FileNestTheme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Limit Reindex to File Types")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(appState.canLimitReindexFileTypes
+                    ? "Optional. Select one or more types; audio and video can be rebuilt independently. Leave every type unchecked to process all files."
+                    : "Turn off the global embedding model rebuild before limiting file types.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                LazyVGrid(
+                    columns: [GridItem(.flexible()), GridItem(.flexible())],
+                    alignment: .leading,
+                    spacing: 8
+                ) {
+                    ForEach(FileCategory.allCases) { category in
+                        Toggle(isOn: Binding(
+                            get: { appState.selectedReindexFileCategories.contains(category) },
+                            set: { appState.setReindexFileCategory(category, selected: $0) }
+                        )) {
+                            Label(LocalizedStringKey(category.label), systemImage: category.icon)
+                                .font(.system(size: 12))
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+                }
+            }
+            .padding(12)
+            .background(.secondary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+            .disabled(!appState.canLimitReindexFileTypes)
+
             selectionRow(
                 title: "Include new unindexed files",
                 detail: appState.unindexedFileCount > 0
@@ -470,11 +532,28 @@ private struct ReindexConfirmationView: View {
                         Image(systemName: "checkmark.circle.fill")
                     }
                 }
+                if appState.willReindexAffectedMediaOnly {
+                    Label("Only supported audio and video files will be reprocessed", systemImage: "waveform")
+                }
+                if !appState.selectedReindexFileCategories.isEmpty {
+                    Label {
+                        Text(appState.settings.localizedFormat(
+                            "Limit to: %@",
+                            appState.reindexFileTypeScopeDescription
+                        ))
+                    } icon: {
+                        Image(systemName: "line.3.horizontal.decrease.circle")
+                    }
+                }
             }
             .font(.system(size: 12))
             .foregroundStyle(FileNestTheme.accent)
 
-            if appState.selectedRAGReindexStages.contains(.parsingAndOCR)
+            if appState.willReindexAffectedMediaOnly {
+                Label("Only audio and video files affected by transcription changes will be reread. Other indexed files remain unchanged.", systemImage: "checkmark.shield")
+                    .font(.system(size: 11))
+                    .foregroundStyle(FileNestTheme.accent)
+            } else if appState.selectedRAGReindexStages.contains(.parsingAndOCR)
                 || appState.selectedRAGReindexStages.contains(.structuredChunking) {
                 Label("The selected stages reread every managed source file. OCR and Docling may make this significantly slower.", systemImage: "exclamationmark.triangle")
                     .font(.system(size: 11))
@@ -568,63 +647,6 @@ private struct ReindexConfirmationView: View {
             content()
         }
         .padding(.top, 4)
-    }
-}
-
-private struct MenuBarStatusIcon: View {
-    let baseImage: NSImage
-    let showsWatchingBadge: Bool
-    let showsIndexingSpinner: Bool
-    @State private var indexingRotationStep = 0
-
-    var body: some View {
-        Image(nsImage: baseImage)
-            .frame(width: 16, height: 16)
-            .overlay(alignment: .topTrailing) {
-                if showsWatchingBadge {
-                    Circle()
-                        .fill(Color(red: 0.12, green: 0.78, blue: 0.34))
-                        .frame(width: 4.5, height: 4.5)
-                        .overlay {
-                            Circle().stroke(.black.opacity(0.24), lineWidth: 0.5)
-                        }
-                        .offset(x: 0.5, y: -0.25)
-                }
-            }
-            .overlay(alignment: .bottomTrailing) {
-                if showsIndexingSpinner {
-                    Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90.circle.fill")
-                        .symbolRenderingMode(.hierarchical)
-                        .font(.system(size: 7.5, weight: .bold))
-                        .foregroundStyle(.primary)
-                        .rotationEffect(.degrees(Double(indexingRotationStep) * 45))
-                        .offset(x: 1, y: 0.5)
-                }
-            }
-            .frame(width: 16, height: 16)
-            .accessibilityValue(Text(LocalizedStringKey(accessibilityStatus)))
-            .task(id: showsIndexingSpinner) {
-                indexingRotationStep = 0
-                guard showsIndexingSpinner else { return }
-                while !Task.isCancelled {
-                    do {
-                        try await Task.sleep(nanoseconds: 550_000_000)
-                    } catch {
-                        return
-                    }
-                    guard !Task.isCancelled else { return }
-                    indexingRotationStep = (indexingRotationStep + 1) % 8
-                }
-            }
-    }
-
-    private var accessibilityStatus: String {
-        switch (showsWatchingBadge, showsIndexingSpinner) {
-        case (true, true): return "Watching and indexing"
-        case (true, false): return "Watching"
-        case (false, true): return "Indexing"
-        case (false, false): return "Paused"
-        }
     }
 }
 

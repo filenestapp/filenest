@@ -143,6 +143,12 @@ struct ChatExecutionPresentation: Equatable {
     var progress: ChatProgress?
 }
 
+private struct PendingOrganizationJob: Codable {
+    let directories: [String]?
+    let includePreservedEntries: Bool
+    let recursively: Bool
+}
+
 struct AutomaticFileProcessingItem: Identifiable, Equatable {
     let id: Int64
     var fileName: String
@@ -157,9 +163,15 @@ struct AutomaticFileProcessingItem: Identifiable, Equatable {
         }
     }
 
+    var isAnimating: Bool {
+        if case .duplicate = stage { return false }
+        return isActive
+    }
+
     var title: String {
         switch stage {
         case .queued: return "Queued for processing"
+        case .duplicate: return "Duplicate file needs review"
         case .indexing: return "Indexing file"
         case .waitingForOrganization: return "Waiting to organize"
         case .organizing: return "Organizing file"
@@ -170,6 +182,7 @@ struct AutomaticFileProcessingItem: Identifiable, Equatable {
 
     var subtitle: String {
         switch stage {
+        case let .duplicate(originalFileName): return originalFileName
         case let .indexing(indexingStage): return indexingStage.statusText
         case let .failed(message): return detail ?? message
         default: return detail ?? fileName
@@ -179,6 +192,7 @@ struct AutomaticFileProcessingItem: Identifiable, Equatable {
     var progress: Double? {
         switch stage {
         case .queued: return 0.04
+        case .duplicate: return nil
         case let .indexing(indexingStage):
             if case let .embedding(completed, total) = indexingStage, total > 0 {
                 return 0.2 + 0.55 * Double(completed) / Double(total)
@@ -211,6 +225,8 @@ final class AppState: ObservableObject {
     let reranker: RerankerServiceManager
     let docling: DoclingServiceManager
     let paddleOCR: PaddleOCRServiceManager
+    let ffmpeg: FFmpegServiceManager
+    let whisper: WhisperServiceManager
     let updates: AppUpdateService
 
     @Published var statusText = "Ready"
@@ -220,11 +236,13 @@ final class AppState: ObservableObject {
 
     // Data sources for the library, chat, and other UI.
     @Published var files: [FileRecord] = []
+    @Published private(set) var recentOrganizedFiles: [FileRecord] = []
     @Published private(set) var previewedFile: FileRecord?
     @Published var rules: [Rule] = []
     @Published var chatSessions: [ChatSession] = []
     @Published var selectedChatSessionID: Int64?
     @Published var chatMessages: [ChatMessage] = []
+    @Published private(set) var hasEarlierChatMessages = false
     @Published private(set) var runningChatSessionIDs = Set<Int64>()
     @Published private(set) var completedChatSessionIDs = Set<Int64>()
     @Published private(set) var chatExecutionPresentations = [Int64: ChatExecutionPresentation]()
@@ -232,6 +250,11 @@ final class AppState: ObservableObject {
     @Published private(set) var chatComposerInput = ""
     @Published private(set) var librarySearchRequest: LibrarySearchRequest?
     @Published private(set) var librarySearchHistory: [LibrarySearchHistoryEntry] = []
+    @Published private(set) var fileCreationDates = [String: Date]()
+    @Published private(set) var duplicateFileGroups: [DuplicateFileGroup] = []
+    @Published private(set) var duplicateScanProgress: DuplicateScanProgress?
+    @Published private(set) var duplicateTrashProgress: DuplicateTrashProgress?
+    @Published private(set) var duplicateScanError: String?
     @Published private(set) var quickSearchShortcutRegistrationError: String?
     @Published var statistics: AppStatistics = .empty
     @Published var selectedSettingsSection: SettingsSection = .general
@@ -249,6 +272,9 @@ final class AppState: ObservableObject {
     @Published private(set) var selectedAdvancedReindexCategories = Set<IndexContentChangeCategory>()
     @Published private(set) var isEmbeddingChangeReindexSelected = true
     @Published private(set) var isUnindexedFilesReindexSelected = true
+    /// Limits a configuration-driven transcription rebuild to files whose media transcript can change.
+    @Published private(set) var isAffectedMediaOnlyReindexSelected = false
+    @Published private(set) var selectedReindexFileCategories = Set<FileCategory>()
     @Published private(set) var reindexUnindexedFileCount = 0
     @Published private(set) var selectedRAGReindexStages = Set<RAGReindexStage>()
     @Published private(set) var isFullPipelineReindexSelected = false
@@ -263,7 +289,15 @@ final class AppState: ObservableObject {
     private var statisticsTask: Task<Void, Never>?
     private var activeStatisticsDays: Int?
     private var pendingStatisticsDays: Int?
+    private var pendingStatisticsForceModelRefresh = false
+    private var statisticsViewIsVisible = false
+    private var statisticsIsDirty = true
+    private var lastStatisticsRefreshAt: Date?
+    private var lastStatisticsDays: Int?
+    private var creationDateRefreshTask: Task<Void, Never>?
+    private var lastCreationDateRefreshAt: Date?
     private var modelServiceStatusRefreshTask: Task<Void, Never>?
+    private var servicePresentationRefreshTask: Task<Void, Never>?
     private var modelVersionCheckTask: Task<Void, Never>?
     private var reindexTask: Task<Void, Never>?
     private var organizationTask: Task<Void, Never>?
@@ -278,15 +312,20 @@ final class AppState: ObservableObject {
     private var lastRebuildVectorSpace = false
     private var lastOnlyUnindexedFiles = false
     private var lastIncludeUnindexedFiles = false
+    private var lastOnlyMediaFiles = false
+    private var lastReindexFileCategories = Set<FileCategory>()
     private var lastRetrievalIndexOnly = false
     private var lastForceSourceReprocessing = false
     private var lastIndexingKind: IndexingTaskKind = .fullReindex
     private var lastReindexContentCategories = Set<IndexContentChangeCategory>()
     private var isDraftChat = false
     private var chatComposerDrafts: [String: String] = [:]
+    private var libraryFilesByID = [Int64: FileRecord]()
+    private var libraryFilesByPath = [String: FileRecord]()
     private var activeChatComposerDraftKey = "new"
     private var fileChatReturnSessionID: Int64?
     private var fileChatReturnDestination: FileChatReturnDestination?
+    private var hasPreparedInitialMainView = false
     private let globalHotKeyService = GlobalHotKeyService()
     private var quickSearchPanelController: QuickSearchPanelController?
     private let systemNotificationsEnabled: Bool
@@ -295,6 +334,9 @@ final class AppState: ObservableObject {
     private let startsServicesAutomatically: Bool
     private static let appliedEmbeddingSignatureKey = "index.applied_embedding_space_signature.v1"
     private static let acknowledgedContentSignatureKey = "index.acknowledged_content_processing_signature.v1"
+    private static let mediaTranscriptionSignatureMigrationKey = "index.media_transcription_signature_migration.v1"
+    private static let pendingOrganizationJobKey = "organization.pending_manual_job.v1"
+    private static let chatHistoryPageSize = 40
 
     private static func appliedContentSignatureKey(_ category: IndexContentChangeCategory) -> String {
         "index.applied_content_category.\(category.rawValue).v1"
@@ -306,6 +348,9 @@ final class AppState: ObservableObject {
 
     var indexingProgress: VectorIndexRebuildProgress? { vectorIndexRebuildProgress }
     var reindexButtonsDisabled: Bool { indexingState.blocksReindexButtons }
+    var isScanningForDuplicates: Bool { duplicateScanProgress != nil }
+    var isRemovingDuplicates: Bool { duplicateTrashProgress != nil }
+    var duplicateConfirmationFileCount: Int { files.filter { $0.duplicateOfFileID != nil }.count }
 
     var activeAutomaticFileProcessingItems: [AutomaticFileProcessingItem] {
         automaticFileProcessingItems.filter(\.isActive)
@@ -461,6 +506,7 @@ final class AppState: ObservableObject {
     init(store: SQLiteStore = .shared,
          settings: AppSettings = .shared,
          organizeRoot: URL? = nil,
+         indexer providedIndexer: IndexerService? = nil,
          startAutomatically: Bool = !AppState.isRunningTests) {
         self.store = store
         self.settings = settings
@@ -470,12 +516,14 @@ final class AppState: ObservableObject {
         self.shouldSynchronizeManagedFiles = organizeRoot != nil || !AppState.isRunningTests
         self.shouldIndexManagedFiles = startAutomatically
         let organizer = OrganizerService(store: store, settings: settings, organizeRoot: organizeRoot)
-        let indexer = IndexerService(store: store, settings: settings)
+        let indexer = providedIndexer ?? IndexerService(store: store, settings: settings)
         let chat = ChatService(store: store, settings: settings, vectorStore: indexer.vectorStore)
         let ollama = OllamaServiceManager()
         let reranker = RerankerServiceManager()
         let docling = DoclingServiceManager()
         let paddleOCR = PaddleOCRServiceManager()
+        let ffmpeg = FFmpegServiceManager()
+        let whisper = WhisperServiceManager()
         // The watcher depends on the organizer and indexer, so create those first.
         let watcher = FileWatcherService(
             store: store,
@@ -490,6 +538,8 @@ final class AppState: ObservableObject {
         self.reranker = reranker
         self.docling = docling
         self.paddleOCR = paddleOCR
+        self.ffmpeg = ffmpeg
+        self.whisper = whisper
         self.watcher = watcher
         if startAutomatically {
             SystemNotificationService.shared.configure()
@@ -504,6 +554,9 @@ final class AppState: ObservableObject {
             Task { @MainActor [weak self] in
                 self?.applyAutomaticFileProcessing(event)
             }
+        }
+        watcher.onLibraryChange = { [weak self] in
+            Task { @MainActor [weak self] in self?.scheduleLibraryRefresh() }
         }
         organizer.onAutomaticOrganizationUpdate = { [weak self] fileID, stage, detail in
             Task { @MainActor [weak self] in
@@ -534,14 +587,14 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
         ollama.objectWillChange
-            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .sink { [weak self] _ in self?.scheduleServicePresentationRefresh() }
             .store(in: &cancellables)
         reranker.objectWillChange
-            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .sink { [weak self] _ in self?.scheduleServicePresentationRefresh() }
             .store(in: &cancellables)
         docling.objectWillChange
             .sink { [weak self] _ in
-                self?.objectWillChange.send()
+                self?.scheduleServicePresentationRefresh()
                 DispatchQueue.main.async { [weak self] in
                     self?.refreshIndexConfigurationState()
                 }
@@ -549,7 +602,18 @@ final class AppState: ObservableObject {
             .store(in: &cancellables)
         paddleOCR.objectWillChange
             .sink { [weak self] _ in
-                self?.objectWillChange.send()
+                self?.scheduleServicePresentationRefresh()
+                DispatchQueue.main.async { [weak self] in
+                    self?.refreshIndexConfigurationState()
+                }
+            }
+            .store(in: &cancellables)
+        ffmpeg.objectWillChange
+            .sink { [weak self] _ in self?.scheduleServicePresentationRefresh() }
+            .store(in: &cancellables)
+        whisper.objectWillChange
+            .sink { [weak self] _ in
+                self?.scheduleServicePresentationRefresh()
                 DispatchQueue.main.async { [weak self] in
                     self?.refreshIndexConfigurationState()
                 }
@@ -596,10 +660,13 @@ final class AppState: ObservableObject {
         // Insert default rules on first launch.
         try? store.seedDefaultRulesIfNeeded()
         // Queue missing indexes after warm-up to avoid processing the same file twice at startup.
-        refreshInBackground(allowManagedIndexing: false)
+        refreshInBackground(allowManagedIndexing: false, synchronizeManagedFiles: true)
+        let initialLibraryRefreshTask = backgroundRefreshTask
         Task { [weak self] in
             guard let self else { return }
-            await indexer.warmup()
+            async let vectorWarmup: Void = indexer.warmup()
+            await initialLibraryRefreshTask?.value
+            await vectorWarmup
             _ = await organizer.invalidateChangedManagedFileIndexes()
             if !self.refreshIndexConfigurationState() {
                 self.refreshInBackground()
@@ -610,6 +677,10 @@ final class AppState: ObservableObject {
         // Do not scan folders before initial setup completes; the user must first decide how to handle existing files.
         if settings.onboardingCompleted {
             startWatching()
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                self?.resumePendingOrganizationIfNeeded()
+            }
         }
         Task { [weak self] in
             await self?.refreshModelServiceStatus()
@@ -674,6 +745,16 @@ final class AppState: ObservableObject {
                 ),
                 identifier: "filenest.processing.failed.\(event.fileID)"
             )
+        case let .duplicate(originalFileName):
+            postSystemNotification(
+                titleKey: "Duplicate File Detected",
+                body: settings.localizedFormat(
+                    "%@ matches %@. Review duplicate files before deleting.",
+                    resolvedFileName ?? event.fileName,
+                    originalFileName
+                ),
+                identifier: "filenest.duplicate.detected.\(event.fileID)"
+            )
         case .queued, .indexing, .waitingForOrganization, .organizing:
             break
         }
@@ -712,7 +793,7 @@ final class AppState: ObservableObject {
         scheduledRefreshTask?.cancel()
         scheduledRefreshTask = Task { [weak self] in
             do {
-                try await Task.sleep(nanoseconds: 150_000_000)
+                try await Task.sleep(nanoseconds: 250_000_000)
             } catch {
                 return
             }
@@ -722,55 +803,110 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Service managers publish several changes during a single probe or model
+    /// download. Coalescing their presentation updates prevents those progress
+    /// changes from invalidating the entire application view tree repeatedly.
+    private func scheduleServicePresentationRefresh() {
+        guard servicePresentationRefreshTask == nil else { return }
+        servicePresentationRefreshTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.objectWillChange.send()
+            self.servicePresentationRefreshTask = nil
+        }
+    }
+
     func refresh(allowManagedIndexing: Bool = true) {
+        // Production refreshes can enumerate managed folders and decode the full
+        // library. Keep the synchronous path only for deterministic test setup.
+        guard !startsServicesAutomatically else {
+            refreshInBackground(allowManagedIndexing: allowManagedIndexing)
+            return
+        }
         refreshGeneration &+= 1
         _ = try? store.removeTransientFiles(preservingRoot: organizer.organizeRoot)
         let refreshedFiles: [FileRecord]
         if shouldSynchronizeManagedFiles {
             refreshedFiles = organizer.reconcileManagedFiles()
         } else {
-            refreshedFiles = ((try? store.allFiles()) ?? []).filter {
+            refreshedFiles = ((try? store.libraryFiles()) ?? []).filter {
                 FileManager.default.fileExists(atPath: $0.path)
             }
         }
         applyLibrarySnapshot(
             files: refreshedFiles,
             rules: (try? store.allRules()) ?? [],
+            recentFiles: (try? store.recentlyOrganizedFiles(
+                rootPath: organizer.organizeRoot.standardizedFileURL.path,
+                limit: 4
+            )) ?? [],
             allowManagedIndexing: allowManagedIndexing
         )
     }
 
-    func refreshInBackground(allowManagedIndexing: Bool = true) {
+    func refreshInBackground(
+        allowManagedIndexing: Bool = true,
+        synchronizeManagedFiles: Bool = false
+    ) {
         refreshGeneration &+= 1
         let generation = refreshGeneration
+        let startedAt = Date()
         backgroundRefreshTask?.cancel()
         let store = store
         let organizer = organizer
         let organizeRoot = organizer.organizeRoot
-        let shouldSynchronizeManagedFiles = shouldSynchronizeManagedFiles
+        let shouldSynchronizeManagedFiles = shouldSynchronizeManagedFiles && synchronizeManagedFiles
         backgroundRefreshTask = Task { [weak self] in
             let refreshedFiles: [FileRecord]
             if shouldSynchronizeManagedFiles {
                 refreshedFiles = await organizer.reconcileManagedFilesAsync()
             } else {
                 refreshedFiles = await Task.detached(priority: .utility) {
-                    _ = try? store.removeTransientFiles(preservingRoot: organizeRoot)
-                    return ((try? store.allFiles()) ?? []).filter {
-                        FileManager.default.fileExists(atPath: $0.path)
-                    }
+                    (try? store.libraryFiles()) ?? []
                 }.value
             }
-            let refreshedRules = await Task.detached(priority: .utility) {
+            let sortedFiles = await Task.detached(priority: .utility) {
+                FileRecord.sortedByNewestAdded(refreshedFiles)
+            }.value
+            async let refreshedRulesTask: [Rule] = Task.detached(priority: .utility) {
                 (try? store.allRules()) ?? []
             }.value
+            async let recentFilesTask: [FileRecord] = Task.detached(priority: .utility) {
+                (try? store.recentlyOrganizedFiles(
+                    rootPath: organizeRoot.standardizedFileURL.path,
+                    limit: 4
+                )) ?? []
+            }.value
+            let (refreshedRules, refreshedRecentFiles) = await (
+                refreshedRulesTask,
+                recentFilesTask
+            )
             guard let self,
                   !Task.isCancelled,
                   self.refreshGeneration == generation else { return }
             self.applyLibrarySnapshot(
-                files: refreshedFiles,
+                files: sortedFiles,
                 rules: refreshedRules,
-                allowManagedIndexing: allowManagedIndexing
+                recentFiles: refreshedRecentFiles,
+                allowManagedIndexing: allowManagedIndexing,
+                filesAreSorted: true
             )
+            let durationMilliseconds = Int(Date().timeIntervalSince(startedAt) * 1_000)
+            if durationMilliseconds >= 250 {
+                AppLogService.shared.write(
+                    "library snapshot refreshed",
+                    category: .performance,
+                    metadata: [
+                        "durationMs": "\(durationMilliseconds)",
+                        "files": "\(refreshedFiles.count)",
+                        "managed": "\(shouldSynchronizeManagedFiles)",
+                    ]
+                )
+            }
             self.backgroundRefreshTask = nil
         }
     }
@@ -778,22 +914,39 @@ final class AppState: ObservableObject {
     private func applyLibrarySnapshot(
         files refreshedFiles: [FileRecord],
         rules refreshedRules: [Rule],
-        allowManagedIndexing: Bool
+        recentFiles refreshedRecentFiles: [FileRecord],
+        allowManagedIndexing: Bool,
+        filesAreSorted: Bool = false
     ) {
-        files = FileRecord.sortedByNewestAdded(refreshedFiles)
+        let sortedFiles = filesAreSorted
+            ? refreshedFiles
+            : FileRecord.sortedByNewestAdded(refreshedFiles)
+        let libraryChanged = files != sortedFiles
+        if libraryChanged {
+            files = sortedFiles
+            libraryFilesByID = Dictionary(uniqueKeysWithValues: sortedFiles.compactMap { file in
+                file.id.map { ($0, file) }
+            })
+            libraryFilesByPath = Dictionary(uniqueKeysWithValues: sortedFiles.map { ($0.path, $0) })
+        }
         if let previewedFile {
-            let refreshedPreview = files.first { candidate in
-                if let id = previewedFile.id { return candidate.id == id }
-                return candidate.path == previewedFile.path
-            }
-            self.previewedFile = refreshedPreview ?? (
+            let refreshedPreview = previewedFile.id.flatMap { libraryFilesByID[$0] }
+                ?? libraryFilesByPath[previewedFile.path]
+            let resolvedPreview = refreshedPreview ?? (
                 FileManager.default.fileExists(atPath: previewedFile.path) ? previewedFile : nil
             )
+            if self.previewedFile != resolvedPreview {
+                self.previewedFile = resolvedPreview
+            }
         }
-        rules = refreshedRules
-        indexedCount = files.filter { $0.indexedAt != nil }.count
+        if rules != refreshedRules { rules = refreshedRules }
+        if recentOrganizedFiles != refreshedRecentFiles {
+            recentOrganizedFiles = refreshedRecentFiles
+        }
+        let refreshedIndexedCount = sortedFiles.filter { $0.indexedAt != nil }.count
+        if indexedCount != refreshedIndexedCount { indexedCount = refreshedIndexedCount }
         if shouldIndexManagedFiles && allowManagedIndexing { indexNewManagedFilesIfNeeded() }
-        refreshStatistics()
+        if libraryChanged { markStatisticsDirty() }
     }
 
     private func indexNewManagedFilesIfNeeded() {
@@ -803,13 +956,14 @@ final class AppState: ObservableObject {
               !indexingState.isActive else { return }
         let ids = files.compactMap { file -> Int64? in
             guard !FileEligibilityPolicy.shouldIgnoreFile(named: file.name),
+                  file.duplicateOfFileID == nil,
                   file.indexedAt == nil,
                   let id = file.id,
                   managedSyncIndexIDs.insert(id).inserted else { return nil }
             return id
         }
         guard !ids.isEmpty else { return }
-        // Backfill indexes serially to avoid starting many local-model tasks during a large initial sync.
+        // The indexer applies a conservative adaptive concurrency cap during large backfills.
         beginIndexing(kind: .automatic, total: ids.count)
         managedSyncIndexTask = Task { [weak self] in
             guard let self else { return }
@@ -871,6 +1025,7 @@ final class AppState: ObservableObject {
     /// Rebuilds automatically for model or provider changes; other processing changes present one user decision.
     @discardableResult
     func refreshIndexConfigurationState(allowAutomaticRebuild: Bool = true) -> Bool {
+        migrateMediaTranscriptionSignaturesIfNeeded()
         let appliedEmbeddingSignature = store.getSetting(Self.appliedEmbeddingSignatureKey)
         hasPendingAutomaticEmbeddingRebuild = appliedEmbeddingSignature != settings.embeddingSpaceSignature
 
@@ -912,6 +1067,27 @@ final class AppState: ObservableObject {
         Set(settings.indexContentCategorySignatures.compactMap { category, signature in
             store.getSetting(Self.appliedContentSignatureKey(category)) == signature ? nil : category
         })
+    }
+
+    /// Splits the new media-transcription signature from the old document and scope signatures
+    /// without turning an app upgrade into an accidental full-library source rebuild. If media
+    /// transcription is already enabled, leave its new signature unapplied so the confirmation
+    /// flow can offer the targeted media-only rebuild instead.
+    private func migrateMediaTranscriptionSignaturesIfNeeded() {
+        guard store.getSetting(Self.mediaTranscriptionSignatureMigrationKey) == nil else { return }
+        defer { store.setSetting(Self.mediaTranscriptionSignatureMigrationKey, "1") }
+        guard store.getSetting(Self.appliedContentSignatureKey(.documentParsing)) != nil else { return }
+        let signatures = settings.indexContentCategorySignatures
+        if let signature = signatures[.documentParsing] {
+            store.setSetting(Self.appliedContentSignatureKey(.documentParsing), signature)
+        }
+        if let signature = signatures[.indexingScope] {
+            store.setSetting(Self.appliedContentSignatureKey(.indexingScope), signature)
+        }
+        if !settings.mediaTranscriptionEnabled,
+           let signature = signatures[.mediaTranscription] {
+            store.setSetting(Self.appliedContentSignatureKey(.mediaTranscription), signature)
+        }
     }
 
     private func acknowledgeContentCategories(_ categories: Set<IndexContentChangeCategory>) {
@@ -970,13 +1146,22 @@ final class AppState: ObservableObject {
     }
 
     func presentFilePreview(_ file: FileRecord) {
-        guard file.supportsPreview else { return }
         previewedFile = file
+    }
+
+    /// Toggles the inspector for a file. Keeping this decision in shared state makes
+    /// every file entry point follow the same open/close behavior.
+    func toggleFilePreview(_ file: FileRecord) {
+        if isPreviewing(file) {
+            closeFilePreview()
+        } else {
+            presentFilePreview(file)
+        }
     }
 
     func presentAttachedFilePreview(path: String) {
         if let record = files.first(where: { $0.path == path }) ?? (try? store.file(path: path)) {
-            presentFilePreview(record)
+            toggleFilePreview(record)
             return
         }
 
@@ -997,11 +1182,29 @@ final class AppState: ObservableObject {
             title: nil,
             contentText: nil
         )
-        presentFilePreview(record)
+        toggleFilePreview(record)
     }
 
     func closeFilePreview() {
         previewedFile = nil
+    }
+
+    /// Prevents an inspector for one file from remaining visible in an unrelated chat.
+    func closeFilePreviewUnlessMatchingAttachment(_ attachmentPath: String?) {
+        guard let previewedFile else { return }
+        guard let attachmentPath,
+              previewedFile.path == attachmentPath else {
+            closeFilePreview()
+            return
+        }
+    }
+
+    private func isPreviewing(_ file: FileRecord) -> Bool {
+        guard let previewedFile else { return false }
+        if let fileID = file.id, let previewID = previewedFile.id {
+            return fileID == previewID
+        }
+        return previewedFile.path == file.path
     }
 
     func toggleQuickSearchPanel() {
@@ -1109,6 +1312,159 @@ final class AppState: ObservableObject {
         refresh(allowManagedIndexing: false)
     }
 
+    /// This intentionally does not hash files. It only restores groups that can
+    /// already be determined from the persisted SHA-256 values, allowing the
+    /// duplicate manager to open immediately without starting a new scan.
+    func loadKnownDuplicateFileGroups() {
+        guard !isScanningForDuplicates, !isRemovingDuplicates else { return }
+        duplicateFileGroups = DuplicateFileGroup.groups(from: files)
+        duplicateScanError = nil
+    }
+
+    /// Computes SHA-256 hashes from the current bytes on disk. Stored hashes are
+    /// updated as a cache, but every scan verifies the content again so a stale
+    /// index can never cause an incorrect duplicate recommendation.
+    func scanForDuplicateFiles() async {
+        let candidates = files.filter {
+            !$0.isDirectory && FileManager.default.fileExists(atPath: $0.path)
+        }
+        duplicateScanError = nil
+        duplicateFileGroups = []
+        duplicateScanProgress = DuplicateScanProgress(scannedCount: 0, totalCount: candidates.count)
+        guard !candidates.isEmpty else {
+            duplicateScanProgress = nil
+            return
+        }
+
+        var scannedFiles = [FileRecord]()
+        scannedFiles.reserveCapacity(candidates.count)
+
+        for (index, file) in candidates.enumerated() {
+            guard !Task.isCancelled else {
+                duplicateScanProgress = nil
+                return
+            }
+            let filePath = file.path
+            let hash = await Task.detached(priority: .utility) {
+                try? FileContentHasher.sha256(of: URL(fileURLWithPath: filePath))
+            }.value
+            if let hash {
+                var hashedFile = file
+                hashedFile.contentHash = hash
+                scannedFiles.append(hashedFile)
+                if let id = file.id { try? store.updateFileContentHash(id: id, contentHash: hash) }
+            }
+            duplicateScanProgress = DuplicateScanProgress(
+                scannedCount: index + 1,
+                totalCount: candidates.count
+            )
+        }
+
+        guard !Task.isCancelled else {
+            duplicateScanProgress = nil
+            return
+        }
+        let hashesByPath = Dictionary(uniqueKeysWithValues: scannedFiles.compactMap { file -> (String, String)? in
+            guard let hash = file.contentHash else { return nil }
+            return (file.path, hash)
+        })
+        files = files.map { file in
+            var updated = file
+            if let hash = hashesByPath[file.path] { updated.contentHash = hash }
+            return updated
+        }
+        duplicateFileGroups = DuplicateFileGroup.groups(from: scannedFiles)
+        duplicateScanProgress = nil
+        AppLogService.shared.write(
+            "duplicate file scan completed",
+            category: .appLifecycle,
+            metadata: [
+                "scanned": "\(scannedFiles.count)",
+                "groups": "\(duplicateFileGroups.count)",
+            ]
+        )
+    }
+
+    /// Moves only user-selected duplicate copies to the macOS Trash. The retained
+    /// original in each duplicate group is never included in this operation.
+    func moveDuplicateFilesToTrash(paths: Set<String>) async -> DuplicateTrashResult {
+        let duplicateEntries = duplicateFileGroups.flatMap { group in
+            group.duplicateFiles.map { (file: $0, expectedHash: group.contentHash) }
+        }
+        let duplicatesByPath = Dictionary(uniqueKeysWithValues: duplicateEntries.map {
+            ($0.file.path, $0)
+        })
+        let selectedFiles = paths.compactMap { duplicatesByPath[$0] }
+        var movedCount = 0
+        var failedFileNames = [String]()
+        var movedPaths = Set<String>()
+        duplicateTrashProgress = DuplicateTrashProgress(
+            completedCount: 0,
+            totalCount: selectedFiles.count,
+            currentFileName: selectedFiles.first?.file.name
+        )
+
+        for (index, entry) in selectedFiles.enumerated() {
+            duplicateTrashProgress = DuplicateTrashProgress(
+                completedCount: index,
+                totalCount: selectedFiles.count,
+                currentFileName: entry.file.name
+            )
+            let filePath = entry.file.path
+            let currentHash = await Task.detached(priority: .utility) {
+                try? FileContentHasher.sha256(of: URL(fileURLWithPath: filePath))
+            }.value
+            guard currentHash == entry.expectedHash else {
+                failedFileNames.append(entry.file.name)
+                applyAutomaticFileProcessing(AutomaticFileProcessingEvent(
+                    fileID: entry.file.id ?? -1,
+                    fileName: entry.file.name,
+                    stage: .failed("Duplicate file changed")
+                ))
+                duplicateTrashProgress = DuplicateTrashProgress(
+                    completedCount: index + 1,
+                    totalCount: selectedFiles.count,
+                    currentFileName: entry.file.name
+                )
+                continue
+            }
+            do {
+                try await moveFileToTrash(entry.file)
+                movedCount += 1
+                movedPaths.insert(entry.file.path)
+                applyAutomaticFileProcessing(AutomaticFileProcessingEvent(
+                    fileID: entry.file.id ?? -1,
+                    fileName: entry.file.name,
+                    stage: .completed
+                ))
+            } catch {
+                failedFileNames.append(entry.file.name)
+                applyAutomaticFileProcessing(AutomaticFileProcessingEvent(
+                    fileID: entry.file.id ?? -1,
+                    fileName: entry.file.name,
+                    stage: .failed("Could not move duplicate to Trash")
+                ))
+            }
+            duplicateTrashProgress = DuplicateTrashProgress(
+                completedCount: index + 1,
+                totalCount: selectedFiles.count,
+                currentFileName: entry.file.name
+            )
+        }
+        duplicateTrashProgress = nil
+        if !movedPaths.isEmpty {
+            // The just-scanned groups already contain the exact retained files and
+            // hashes. Remove only the files moved to Trash instead of starting a
+            // second full SHA-256 scan immediately after the delete queue finishes.
+            duplicateFileGroups = duplicateFileGroups.compactMap { group in
+                let remainingFiles = group.files.filter { !movedPaths.contains($0.path) }
+                guard remainingFiles.count > 1 else { return nil }
+                return DuplicateFileGroup(contentHash: group.contentHash, files: remainingFiles)
+            }
+        }
+        return DuplicateTrashResult(movedCount: movedCount, failedFileNames: failedFileNames)
+    }
+
     private func closePreviewIfNeeded(for file: FileRecord) {
         guard let previewedFile else { return }
         if let id = file.id, previewedFile.id == id {
@@ -1128,11 +1484,42 @@ final class AppState: ObservableObject {
         return FileSummaryService(settings: settings).streamSummary(file: file)
     }
 
-    func managedSearchResults(matching keyword: String) async -> [LibrarySearchResult] {
-        await chat.searchLibrary(
+    func managedSearchResults(
+        matching keyword: String,
+        categories: Set<FileCategory> = []
+    ) async -> [LibrarySearchResult] {
+        let startedAt = Date()
+        let results = await chat.searchLibrary(
             keyword,
-            managedRootPath: organizer.organizeRoot.standardizedFileURL.path
+            managedRootPath: organizer.organizeRoot.standardizedFileURL.path,
+            includeSemantic: true,
+            allowedCategories: categories
         )
+        logLibrarySearchPerformance(
+            mode: "semantic",
+            startedAt: startedAt,
+            resultCount: results.count
+        )
+        return results
+    }
+
+    func managedQuickSearchResults(
+        matching keyword: String,
+        categories: Set<FileCategory> = []
+    ) async -> [LibrarySearchResult] {
+        let startedAt = Date()
+        let results = await chat.searchLibrary(
+            keyword,
+            managedRootPath: organizer.organizeRoot.standardizedFileURL.path,
+            includeSemantic: false,
+            allowedCategories: categories
+        )
+        logLibrarySearchPerformance(
+            mode: "keyword",
+            startedAt: startedAt,
+            resultCount: results.count
+        )
+        return results
     }
 
     func cachedLibrarySearch(
@@ -1149,11 +1536,15 @@ final class AppState: ObservableObject {
             return nil
         }
 
-        let currentFiles = files.isEmpty ? ((try? store.allFiles()) ?? []) : files
-        let filesByID = Dictionary(uniqueKeysWithValues: currentFiles.compactMap { file in
-            file.id.map { ($0, file) }
-        })
-        let filesByPath = Dictionary(uniqueKeysWithValues: currentFiles.map { ($0.path, $0) })
+        if libraryFilesByPath.isEmpty {
+            let currentFiles = files.isEmpty ? ((try? store.libraryFiles()) ?? []) : files
+            libraryFilesByID = Dictionary(uniqueKeysWithValues: currentFiles.compactMap { file in
+                file.id.map { ($0, file) }
+            })
+            libraryFilesByPath = Dictionary(uniqueKeysWithValues: currentFiles.map { ($0.path, $0) })
+        }
+        let filesByID = libraryFilesByID
+        let filesByPath = libraryFilesByPath
         let hydratedResults = cached.results.compactMap { result -> LibrarySearchResult? in
             let currentFile = result.fileID.flatMap { filesByID[$0] } ?? filesByPath[result.path]
             guard let currentFile,
@@ -1225,64 +1616,163 @@ final class AppState: ObservableObject {
 
     func managedSmartSearchResults(
         matching query: String,
+        categories: Set<FileCategory> = [],
         onIntentUpdate: ((String) -> Void)? = nil
     ) async -> SmartLibrarySearchResponse {
+        let startedAt = Date()
         let response = await chat.smartSearchLibrary(
             query,
             managedRootPath: organizer.organizeRoot.standardizedFileURL.path,
+            allowedCategories: categories,
             onIntentUpdate: onIntentUpdate
         )
+        logLibrarySearchPerformance(
+            mode: "smart",
+            startedAt: startedAt,
+            resultCount: response.results.count
+        )
         return response
+    }
+
+    private func logLibrarySearchPerformance(
+        mode: String,
+        startedAt: Date,
+        resultCount: Int
+    ) {
+        AppLogService.shared.write(
+            "library search completed",
+            category: .performance,
+            metadata: [
+                "durationMs": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))",
+                "mode": mode,
+                "results": "\(resultCount)",
+            ]
+        )
     }
 
     func indexedChunks(fileID: Int64) -> [IndexedDocumentChunk] {
         (try? store.documentChunks(fileID: fileID)) ?? []
     }
 
-    func recentlyOrganizedFiles(limit: Int = 4) -> [FileRecord] {
-        let rootPath = organizer.organizeRoot.standardizedFileURL.path
-        return files
-            .filter { file in
-                let path = URL(fileURLWithPath: file.path).standardizedFileURL.path
-                return path.hasPrefix(rootPath + "/")
-            }
-            .sorted {
-                let lhs = $0.organizedAt ?? $0.indexedAt ?? $0.discoveredAt ?? $0.mtime
-                let rhs = $1.organizedAt ?? $1.indexedAt ?? $1.discoveredAt ?? $1.mtime
-                return lhs > rhs
-            }
-            .prefix(limit)
-            .map { $0 }
+    func indexedChunkCount(fileID: Int64) async -> Int {
+        let store = store
+        return await Task.detached(priority: .utility) {
+            (try? store.documentChunkCount(fileID: fileID)) ?? 0
+        }.value
     }
 
-    func refreshStatistics(days: Int = 14) {
+    func loadIndexedChunks(
+        fileID: Int64,
+        offset: Int = 0,
+        limit: Int? = nil
+    ) async -> [IndexedDocumentChunk] {
+        let store = store
+        return await Task.detached(priority: .utility) {
+            (try? store.documentChunks(fileID: fileID, limit: limit, offset: offset)) ?? []
+        }.value
+    }
+
+    func recentlyOrganizedFiles(limit: Int = 4) -> [FileRecord] {
+        Array(recentOrganizedFiles.prefix(max(0, limit)))
+    }
+
+    func setStatisticsViewVisible(_ isVisible: Bool) {
+        statisticsViewIsVisible = isVisible
+    }
+
+    func markStatisticsDirty() {
+        statisticsIsDirty = true
+        guard statisticsViewIsVisible else { return }
+        refreshStatistics(days: lastStatisticsDays ?? 14)
+    }
+
+    func refreshStatistics(
+        days: Int = 14,
+        force: Bool = false,
+        forceModelStorageRefresh: Bool = false
+    ) {
         let safeDays = max(1, days)
+        if !force,
+           !statisticsIsDirty,
+           lastStatisticsDays == safeDays,
+           let lastStatisticsRefreshAt,
+           Date().timeIntervalSince(lastStatisticsRefreshAt) < 5 * 60 {
+            return
+        }
         guard startsServicesAutomatically else {
-            statistics = (try? store.statistics(days: safeDays)) ?? .empty
+            let modelBytes = store.cachedLocalModelStorageBytes(forceRefresh: forceModelStorageRefresh)
+            statistics = (try? store.statistics(days: safeDays, localModelBytes: modelBytes)) ?? .empty
+            statisticsIsDirty = false
+            lastStatisticsDays = safeDays
+            lastStatisticsRefreshAt = Date()
             return
         }
         if statisticsTask != nil {
-            if activeStatisticsDays != safeDays { pendingStatisticsDays = safeDays }
+            if activeStatisticsDays != safeDays || force || forceModelStorageRefresh {
+                pendingStatisticsDays = safeDays
+            }
+            pendingStatisticsForceModelRefresh = pendingStatisticsForceModelRefresh || forceModelStorageRefresh
             return
         }
         pendingStatisticsDays = safeDays
+        pendingStatisticsForceModelRefresh = forceModelStorageRefresh
         startStatisticsRefreshIfNeeded()
     }
 
     private func startStatisticsRefreshIfNeeded() {
         guard statisticsTask == nil, let days = pendingStatisticsDays else { return }
         pendingStatisticsDays = nil
+        let forceModelStorageRefresh = pendingStatisticsForceModelRefresh
+        pendingStatisticsForceModelRefresh = false
         activeStatisticsDays = days
+        statisticsIsDirty = false
         let store = store
         statisticsTask = Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
-                (try? store.statistics(days: days)) ?? .empty
+                let modelBytes = store.cachedLocalModelStorageBytes(forceRefresh: forceModelStorageRefresh)
+                return (try? store.statistics(days: days, localModelBytes: modelBytes)) ?? .empty
             }.value
             guard let self else { return }
             self.statistics = result
+            self.lastStatisticsDays = days
+            self.lastStatisticsRefreshAt = Date()
             self.statisticsTask = nil
             self.activeStatisticsDays = nil
+            if self.statisticsIsDirty, self.statisticsViewIsVisible {
+                self.pendingStatisticsDays = self.pendingStatisticsDays ?? days
+            }
             self.startStatisticsRefreshIfNeeded()
+        }
+    }
+
+    /// Loads cached creation dates from SQLite and fills only one bounded filesystem batch.
+    /// Repeated Library navigation therefore never stats every file in the collection.
+    func refreshPersistedCreationDates(force: Bool = false, batchSize: Int = 256) {
+        guard creationDateRefreshTask == nil else { return }
+        if !force,
+           let lastCreationDateRefreshAt,
+           Date().timeIntervalSince(lastCreationDateRefreshAt) < 10 * 60 {
+            return
+        }
+        lastCreationDateRefreshAt = Date()
+        let store = store
+        creationDateRefreshTask = Task { [weak self] in
+            let dates = await Task.detached(priority: .utility) { () -> [String: Date] in
+                let candidates = (try? store.fileCreationDateBackfillCandidates(limit: batchSize)) ?? []
+                var resolvedByID = [Int64: Date]()
+                for candidate in candidates {
+                    guard !Task.isCancelled else { break }
+                    let url = URL(fileURLWithPath: candidate.path)
+                    let createdAt = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate)
+                        ?? candidate.fallback
+                    resolvedByID[candidate.fileID] = createdAt
+                }
+                try? store.saveFileCreationDates(resolvedByID)
+                return (try? store.fileCreationDates()) ?? [:]
+            }.value
+            guard let self else { return }
+            self.fileCreationDates = dates
+            self.creationDateRefreshTask = nil
         }
     }
 
@@ -1316,10 +1806,12 @@ final class AppState: ObservableObject {
 
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            async let ollamaRefresh: Void = ollama.refresh(host: settings.ollamaHost)
+            async let ollamaRefresh: Void = refreshAndStartConfiguredOllama()
             async let paddleRefresh: Void = paddleOCR.refresh()
             docling.refresh()
             async let rerankerRefresh: Void = reranker.refresh()
+            ffmpeg.refresh()
+            whisper.refresh()
             _ = await (ollamaRefresh, paddleRefresh, rerankerRefresh)
             if settings.rerankerSource == AppSettings.RerankerSource.local.rawValue,
                RerankerServiceManager.isModelInstalled,
@@ -1332,9 +1824,57 @@ final class AppState: ObservableObject {
         modelServiceStatusRefreshTask = nil
     }
 
+    private func refreshAndStartConfiguredOllama() async {
+        let host = settings.ollamaHost
+        await ollama.refresh(host: host)
+        guard settings.requiresOllamaService else {
+            AppLogService.shared.write(
+                "Ollama automatic startup skipped because no active provider requires it",
+                category: .appLifecycle,
+                level: .debug
+            )
+            return
+        }
+        guard OllamaServiceManager.isLocalServiceHost(host) else {
+            AppLogService.shared.write(
+                "Ollama automatic startup skipped for a remote service host",
+                category: .appLifecycle,
+                level: .notice,
+                metadata: ["host": host]
+            )
+            return
+        }
+        guard ollama.state != .running else { return }
+        guard ollama.executablePath != nil else {
+            AppLogService.shared.write(
+                "Ollama automatic startup could not find an installed executable",
+                category: .appLifecycle,
+                level: .warning
+            )
+            return
+        }
+
+        AppLogService.shared.write(
+            "Ollama automatic startup requested",
+            category: .appLifecycle,
+            level: .notice,
+            metadata: ["host": host]
+        )
+        await ollama.start(
+            host: host,
+            flashAttentionEnabled: settings.ollamaFlashAttentionEnabled
+        )
+    }
+
     /// Long-lived local runtimes are owned by FileNest and must not outlive it.
     /// Docling and PaddleOCR use short-lived job subprocesses, so they have no daemon to stop here.
     func shutdownManagedServices() async {
+        // Keep the persisted job descriptor so a manual organization can restart safely after
+        // the next launch. The worker will rescan source folders and skip files already moved.
+        if organizationState.isActive {
+            organizationTask?.cancel()
+            await organizationGate.stop()
+        }
         await reranker.shutdown()
         await ollama.stop(host: settings.ollamaHost)
     }
@@ -1344,6 +1884,7 @@ final class AppState: ObservableObject {
         if preferredID == nil, isDraftChat {
             selectedChatSessionID = nil
             chatMessages = []
+            hasEarlierChatMessages = false
             return
         }
         let candidate = preferredID ?? selectedChatSessionID
@@ -1354,10 +1895,14 @@ final class AppState: ObservableObject {
         }
         if let selectedChatSessionID {
             switchChatComposerDraft(to: chatComposerDraftKey(sessionID: selectedChatSessionID))
-            chatMessages = chat.loadHistory(sessionId: selectedChatSessionID)
+            let pageLimit = max(Self.chatHistoryPageSize, min(400, chatMessages.count))
+            let page = chat.loadHistoryPage(sessionId: selectedChatSessionID, limit: pageLimit)
+            chatMessages = page.messages
+            hasEarlierChatMessages = page.hasEarlier
         } else {
             switchChatComposerDraft(to: "new")
             chatMessages = []
+            hasEarlierChatMessages = false
         }
         isDraftChat = false
         draftChatAttachmentPath = nil
@@ -1441,6 +1986,16 @@ final class AppState: ObservableObject {
         refreshChatSessions(selecting: selectedChatSessionID)
     }
 
+    /// Starts each application run on an unpersisted blank chat while preserving navigation
+    /// and conversation state for subsequent main-window appearances in the same process.
+    @discardableResult
+    func prepareInitialMainViewChatIfNeeded() -> Bool {
+        guard !hasPreparedInitialMainView else { return false }
+        hasPreparedInitialMainView = true
+        newChat()
+        return true
+    }
+
     private func upsertPresentedMessage(_ message: ChatMessage, into messages: inout [ChatMessage]) {
         if let id = message.id,
            let index = messages.firstIndex(where: { $0.id == id }) {
@@ -1458,6 +2013,8 @@ final class AppState: ObservableObject {
         draftChatAttachmentPath = attachedFilePath
         selectedChatSessionID = nil
         chatMessages = []
+        hasEarlierChatMessages = false
+        closeFilePreviewUnlessMatchingAttachment(attachedFilePath)
     }
 
     func startFileChat(
@@ -1497,15 +2054,48 @@ final class AppState: ObservableObject {
         return id
     }
 
+    /// Saves and publishes the user message before the asynchronous answer pipeline starts.
+    func saveUserQuestionForImmediateDisplay(_ question: String, sessionID: Int64) -> ChatMessage? {
+        guard let message = chat.saveUserQuestion(question, sessionId: sessionID) else { return nil }
+        upsertPresentedMessage(message, into: &chatMessages)
+        chatSessions = chat.loadSessions()
+        return message
+    }
+
     func selectChat(_ id: Int64) {
         guard selectedChatSessionID != id else { return }
+        let attachmentPath = chatSessions.first { $0.id == id }?.attachedFilePath
         fileChatReturnSessionID = nil
         fileChatReturnDestination = nil
         switchChatComposerDraft(to: chatComposerDraftKey(sessionID: id))
         isDraftChat = false
         draftChatAttachmentPath = nil
         selectedChatSessionID = id
-        chatMessages = chat.loadHistory(sessionId: id)
+        let page = chat.loadHistoryPage(sessionId: id, limit: Self.chatHistoryPageSize)
+        chatMessages = page.messages
+        hasEarlierChatMessages = page.hasEarlier
+        closeFilePreviewUnlessMatchingAttachment(attachmentPath)
+    }
+
+    func loadEarlierChatMessages() async {
+        guard let sessionID = selectedChatSessionID,
+              let beforeID = chatMessages.compactMap(\.id).first else { return }
+        let chat = chat
+        let pageSize = Self.chatHistoryPageSize
+        let page = await Task.detached(priority: .userInitiated) {
+            chat.loadHistoryPage(
+                sessionId: sessionID,
+                beforeID: beforeID,
+                limit: pageSize
+            )
+        }.value
+        guard selectedChatSessionID == sessionID else { return }
+        let existingIDs = Set(chatMessages.compactMap(\.id))
+        chatMessages = page.messages.filter { message in
+            guard let id = message.id else { return true }
+            return !existingIDs.contains(id)
+        } + chatMessages
+        hasEarlierChatMessages = page.hasEarlier
     }
 
     func attachFileToSelectedChat(_ path: String?) {
@@ -1661,13 +2251,105 @@ final class AppState: ObservableObject {
     }
 
     func organizeNow() {
+        organizeNewFilesInWatchedDirectories()
+    }
+
+    /// Organizes only files that arrived after the watched-folder baseline was created.
+    /// Existing files intentionally remain untouched unless the user chooses the explicit
+    /// existing-files action in Settings.
+    func organizeNewFilesInWatchedDirectories() {
         organizeNow(in: nil, includePreservedEntries: false)
     }
 
-    private func organizeNow(in directories: [String]?, includePreservedEntries: Bool) {
+    /// Runs one organization pass for ad-hoc folders without changing watch settings.
+    func organizeDirectoriesOnce(_ directoryPaths: [String], recursively: Bool = false) {
+        let paths = normalizedOrganizationDirectoryPaths(directoryPaths)
+        guard !paths.isEmpty else { return }
+        organizeNow(in: paths, includePreservedEntries: true, recursively: recursively)
+    }
+
+    /// Presents a multi-folder picker for a one-time organization pass. Selected folders are
+    /// never persisted to the monitoring configuration.
+    func chooseDirectoriesForOneTimeOrganization() {
+        guard !organizationState.isActive, !indexingState.isActive else { return }
+
+        let panel = NSOpenPanel()
+        panel.title = settings.localized("Choose Folders to Organize")
+        panel.message = settings.localized("Selected folders are processed once and are not added to monitoring.")
+        panel.prompt = settings.localized("Choose")
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.begin { [weak self] response in
+            guard response == .OK, let self else { return }
+            Task { @MainActor in
+                self.confirmOneTimeOrganization(in: panel.urls.map(\.path))
+            }
+        }
+    }
+
+    private func confirmOneTimeOrganization(in directoryPaths: [String]) {
+        let paths = normalizedOrganizationDirectoryPaths(directoryPaths)
+        guard !paths.isEmpty,
+              !organizationState.isActive,
+              !indexingState.isActive else { return }
+
+        let alert = NSAlert()
+        alert.messageText = settings.localized("Organize Selected Folders?")
+        alert.informativeText = settings.localizedFormat(
+            "FileNest will process files in %d selected folders according to your rules. These folders will not be added to monitoring.",
+            paths.count
+        )
+        alert.addButton(withTitle: settings.localized("Organize"))
+        alert.addButton(withTitle: settings.localized("Cancel"))
+        let recursiveCheckbox = NSButton(
+            checkboxWithTitle: settings.localized("Include Subfolders"),
+            target: nil,
+            action: nil
+        )
+        recursiveCheckbox.toolTip = settings.localized(
+            "Process supported files in nested folders. Git, Mercurial, and Subversion repositories are skipped."
+        )
+        alert.accessoryView = recursiveCheckbox
+
+        let beginOrganization: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            let recursively = recursiveCheckbox.state == .on
+            Task { @MainActor in self?.organizeDirectoriesOnce(paths, recursively: recursively) }
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window, completionHandler: beginOrganization)
+        } else {
+            beginOrganization(alert.runModal())
+        }
+    }
+
+    private func normalizedOrganizationDirectoryPaths(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        return paths.compactMap { path in
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue,
+                  seen.insert(url.path).inserted else { return nil }
+            return url.path
+        }
+    }
+
+    private func organizeNow(
+        in directories: [String]?,
+        includePreservedEntries: Bool,
+        recursively: Bool = false
+    ) {
         guard !organizationState.isActive,
               !indexingState.isActive,
               organizationTask == nil else { return }
+        persistPendingOrganizationJob(
+            directories: directories,
+            includePreservedEntries: includePreservedEntries,
+            recursively: recursively
+        )
         let token = UUID()
         organizationJobToken = token
         organizationState = .running
@@ -1689,6 +2371,7 @@ final class AppState: ObservableObject {
             metadata: [
                 "directories": "\((directories ?? settings.watchDirs).count)",
                 "includePreservedEntries": "\(includePreservedEntries)",
+                "recursively": "\(recursively)",
             ]
         )
 
@@ -1698,6 +2381,7 @@ final class AppState: ObservableObject {
             let result = await self.watcher.organizePendingEntries(
                 in: directories,
                 includePreservedEntries: includePreservedEntries,
+                recursively: recursively,
                 checkpoint: { [organizationGate = self.organizationGate] in
                     await organizationGate.waitUntilRunnable()
                 }
@@ -1728,6 +2412,9 @@ final class AppState: ObservableObject {
             }
             self.organizationTask = nil
             self.organizationJobToken = nil
+            if !wasStopped {
+                self.clearPendingOrganizationJob()
+            }
             self.statusText = self.organizationStatusTitle
             self.refreshInBackground()
             AppLogService.shared.write(
@@ -1782,6 +2469,7 @@ final class AppState: ObservableObject {
 
     func stopOrganization() {
         guard organizationState == .running || organizationState == .paused else { return }
+        clearPendingOrganizationJob()
         organizationState = .stopping
         if var progress = organizationProgress {
             progress.phase = .stopping
@@ -1795,13 +2483,61 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func persistPendingOrganizationJob(
+        directories: [String]?,
+        includePreservedEntries: Bool,
+        recursively: Bool
+    ) {
+        let job = PendingOrganizationJob(
+            directories: directories,
+            includePreservedEntries: includePreservedEntries,
+            recursively: recursively
+        )
+        guard let data = try? JSONEncoder().encode(job) else { return }
+        UserDefaults.standard.set(data, forKey: Self.pendingOrganizationJobKey)
+    }
+
+    private func clearPendingOrganizationJob() {
+        UserDefaults.standard.removeObject(forKey: Self.pendingOrganizationJobKey)
+    }
+
+    private func resumePendingOrganizationIfNeeded() {
+        guard !organizationState.isActive,
+              !indexingState.isActive,
+              let data = UserDefaults.standard.data(forKey: Self.pendingOrganizationJobKey),
+              let job = try? JSONDecoder().decode(PendingOrganizationJob.self, from: data) else { return }
+
+        let directories = job.directories.map(normalizedOrganizationDirectoryPaths)
+        if let directories, directories.isEmpty {
+            clearPendingOrganizationJob()
+            return
+        }
+        AppLogService.shared.write(
+            "resuming interrupted manual organization job",
+            category: .organizeQueue,
+            level: .notice,
+            metadata: ["directories": "\((directories ?? settings.watchDirs).count)"]
+        )
+        organizeNow(
+            in: directories,
+            includePreservedEntries: job.includePreservedEntries,
+            recursively: job.recursively
+        )
+    }
+
     func reindexAll() {
         reindexUnindexedFileCount = (try? store.fileIndexCounts().unindexed) ?? 0
         pendingAdvancedReindexCategories = changedContentCategories()
-        selectedAdvancedReindexCategories = []
+        let hasMediaTranscriptionChange = pendingAdvancedReindexCategories.contains(.mediaTranscription)
+        selectedAdvancedReindexCategories = hasMediaTranscriptionChange ? [.mediaTranscription] : []
         isEmbeddingChangeReindexSelected = true
         isUnindexedFilesReindexSelected = true
+        isAffectedMediaOnlyReindexSelected = hasMediaTranscriptionChange
+        selectedReindexFileCategories = []
         selectedRAGReindexStages = hasEmbeddingConfigurationChange ? [.embeddings, .retrievalIndex] : []
+        if hasMediaTranscriptionChange {
+            selectedRAGReindexStages.formUnion(RAGReindexStage.parsingAndOCR.downstreamStages)
+        }
         isFullPipelineReindexSelected = false
         isReindexAdvancedExpanded = false
         isIndexConfigurationPromptPresented = false
@@ -1828,10 +2564,24 @@ final class AppState: ObservableObject {
             || (isUnindexedFilesReindexSelected && unindexedFileCount > 0)
             || !selectedAdvancedReindexCategories.isEmpty
             || !selectedRAGReindexStages.isEmpty
+            || !selectedReindexFileCategories.isEmpty
+    }
+
+    var canLimitReindexFileTypes: Bool {
+        !hasDefaultEmbeddingRebuildSelection
+    }
+
+    var reindexFileTypeScopeDescription: String {
+        guard !selectedReindexFileCategories.isEmpty else { return "All file types" }
+        return selectedReindexFileCategories
+            .sorted { $0.label < $1.label }
+            .map(\.label)
+            .joined(separator: ", ")
     }
 
     func setEmbeddingChangeReindexSelected(_ selected: Bool) {
         isEmbeddingChangeReindexSelected = selected
+        if selected { selectedReindexFileCategories = [] }
         if selected && hasEmbeddingConfigurationChange {
             selectedRAGReindexStages.formUnion(RAGReindexStage.embeddings.downstreamStages)
         } else if !selected {
@@ -1843,13 +2593,56 @@ final class AppState: ObservableObject {
         isUnindexedFilesReindexSelected = selected
     }
 
+    func setReindexFileCategory(_ category: FileCategory, selected: Bool) {
+        guard canLimitReindexFileTypes else { return }
+        if selected {
+            selectedReindexFileCategories.insert(category)
+        } else {
+            selectedReindexFileCategories.remove(category)
+        }
+        guard !selectedReindexFileCategories.isEmpty else { return }
+        // A file-type scope updates the selected files in the active vector store.
+        // A global embedding-space rebuild must always cover the full library.
+        selectedRAGReindexStages.formUnion([.parsingAndOCR, .structuredChunking])
+        isFullPipelineReindexSelected = false
+    }
+
+    var hasPendingMediaTranscriptionReindex: Bool {
+        pendingAdvancedReindexCategories.contains(.mediaTranscription)
+    }
+
+    var willReindexAffectedMediaOnly: Bool {
+        isAffectedMediaOnlyReindexSelected
+            && selectedAdvancedReindexCategories == [.mediaTranscription]
+    }
+
+    func setAffectedMediaOnlyReindexSelected(_ selected: Bool) {
+        guard hasPendingMediaTranscriptionReindex else {
+            isAffectedMediaOnlyReindexSelected = false
+            return
+        }
+        isAffectedMediaOnlyReindexSelected = selected
+        if selected {
+            // A transcript change requires source processing and every persisted downstream stage.
+            selectedAdvancedReindexCategories = [.mediaTranscription]
+            selectedRAGReindexStages.formUnion(RAGReindexStage.parsingAndOCR.downstreamStages)
+            isFullPipelineReindexSelected = false
+        }
+    }
+
     func setAdvancedReindexCategory(_ category: IndexContentChangeCategory, selected: Bool) {
         guard pendingAdvancedReindexCategories.contains(category) else { return }
         if selected {
+            if category != .mediaTranscription {
+                isAffectedMediaOnlyReindexSelected = false
+            }
             selectedAdvancedReindexCategories.insert(category)
             selectedRAGReindexStages.formUnion(reindexStage(for: category).downstreamStages)
         } else {
             selectedAdvancedReindexCategories.remove(category)
+            if category == .mediaTranscription {
+                isAffectedMediaOnlyReindexSelected = false
+            }
         }
     }
 
@@ -1869,6 +2662,8 @@ final class AppState: ObservableObject {
 
     func setFullPipelineReindexSelected(_ selected: Bool) {
         isFullPipelineReindexSelected = selected
+        if selected { selectedReindexFileCategories = [] }
+        if selected { isAffectedMediaOnlyReindexSelected = false }
         if selected {
             selectedRAGReindexStages = [
                 .parsingAndOCR, .structuredChunking, .embeddings, .retrievalIndex,
@@ -1891,7 +2686,7 @@ final class AppState: ObservableObject {
         switch stage {
         case .parsingAndOCR:
             return !pendingAdvancedReindexCategories.intersection([
-                .documentParsing, .ocr, .indexingScope,
+                .documentParsing, .ocr, .indexingScope, .mediaTranscription,
             ]).isEmpty
         case .structuredChunking:
             return pendingAdvancedReindexCategories.contains(.chunking)
@@ -1910,7 +2705,7 @@ final class AppState: ObservableObject {
 
     private func reindexStage(for category: IndexContentChangeCategory) -> RAGReindexStage {
         switch category {
-        case .documentParsing, .ocr, .indexingScope: return .parsingAndOCR
+        case .documentParsing, .ocr, .indexingScope, .mediaTranscription: return .parsingAndOCR
         case .chunking: return .structuredChunking
         case .serviceEndpoint: return .embeddings
         }
@@ -1939,17 +2734,25 @@ final class AppState: ObservableObject {
         selectedAdvancedReindexCategories = []
         selectedRAGReindexStages = []
         isFullPipelineReindexSelected = false
+        isAffectedMediaOnlyReindexSelected = false
+        selectedReindexFileCategories = []
     }
 
     func confirmReindex() {
         guard reindexConfirmationStep == .finalConfirmation else { return }
         let stages = selectedRAGReindexStages
-        let rebuildEmbedding = stages.contains(.embeddings)
+        let fileCategories = selectedReindexFileCategories
+        // A restricted source rebuild updates selected records in-place. Replacing
+        // the embedding space is intentionally reserved for a full-library run.
+        let rebuildEmbedding = stages.contains(.embeddings) && fileCategories.isEmpty
         let includeUnindexedFiles = isUnindexedFilesReindexSelected && unindexedFileCount > 0
         let forcesSourceReprocessing = stages.contains(.parsingAndOCR)
             || stages.contains(.structuredChunking)
+            || !fileCategories.isEmpty
         let contentCategories = selectedAdvancedReindexCategories
             .intersection(pendingAdvancedReindexCategories)
+        let onlyMediaFiles = isAffectedMediaOnlyReindexSelected
+            && contentCategories == [.mediaTranscription]
         let retrievalIndexOnly = stages.contains(.retrievalIndex)
             && !forcesSourceReprocessing
             && !rebuildEmbedding
@@ -1959,6 +2762,8 @@ final class AppState: ObservableObject {
         selectedAdvancedReindexCategories = []
         selectedRAGReindexStages = []
         isFullPipelineReindexSelected = false
+        isAffectedMediaOnlyReindexSelected = false
+        selectedReindexFileCategories = []
         isReindexAdvancedExpanded = false
         // Let SwiftUI commit the sheet dismissal before publishing indexing progress.
         // This avoids redrawing the sheet's first step during its close animation and
@@ -1981,7 +2786,9 @@ final class AppState: ObservableObject {
                 onlyUnindexedFiles: includeUnindexedFiles && !forcesSourceReprocessing && !rebuildEmbedding && !retrievalIndexOnly,
                 includeUnindexedFiles: includeUnindexedFiles && !forcesSourceReprocessing,
                 retrievalIndexOnly: retrievalIndexOnly,
-                forceSourceReprocessing: forcesSourceReprocessing
+                forceSourceReprocessing: forcesSourceReprocessing,
+                onlyMediaFiles: onlyMediaFiles,
+                fileCategories: fileCategories
             )
         }
     }
@@ -2051,7 +2858,9 @@ final class AppState: ObservableObject {
                 onlyUnindexedFiles: lastOnlyUnindexedFiles,
                 includeUnindexedFiles: lastIncludeUnindexedFiles,
                 retrievalIndexOnly: lastRetrievalIndexOnly,
-                forceSourceReprocessing: lastForceSourceReprocessing
+                forceSourceReprocessing: lastForceSourceReprocessing,
+                onlyMediaFiles: lastOnlyMediaFiles,
+                fileCategories: lastReindexFileCategories
             )
         }
     }
@@ -2064,7 +2873,9 @@ final class AppState: ObservableObject {
         onlyUnindexedFiles: Bool = false,
         includeUnindexedFiles: Bool = false,
         retrievalIndexOnly: Bool = false,
-        forceSourceReprocessing: Bool = false
+        forceSourceReprocessing: Bool = false,
+        onlyMediaFiles: Bool = false,
+        fileCategories: Set<FileCategory> = []
     ) -> Bool {
         guard !indexingState.blocksReindexButtons,
               managedSyncIndexTask == nil,
@@ -2073,6 +2884,8 @@ final class AppState: ObservableObject {
         lastRebuildVectorSpace = rebuildVectorSpace
         lastOnlyUnindexedFiles = onlyUnindexedFiles
         lastIncludeUnindexedFiles = includeUnindexedFiles
+        lastOnlyMediaFiles = onlyMediaFiles
+        lastReindexFileCategories = fileCategories
         lastRetrievalIndexOnly = retrievalIndexOnly
         lastForceSourceReprocessing = forceSourceReprocessing
         lastReindexContentCategories = contentCategoriesToAcknowledge
@@ -2082,9 +2895,15 @@ final class AppState: ObservableObject {
             indexed: files.filter { $0.indexedAt != nil }.count,
             unindexed: files.filter { $0.indexedAt == nil }.count
         )
+        let scopedFiles = ((try? store.libraryFiles()) ?? files).filter { file in
+            (!onlyMediaFiles || AppSettings.mediaTranscriptionExtensions.contains(file.ext.lowercased()))
+                && (fileCategories.isEmpty || fileCategories.contains(file.categoryEnum))
+        }
         let total: Int
         if retrievalIndexOnly {
             total = indexer.vectorStore.count + (includeUnindexedFiles ? counts.unindexed : 0)
+        } else if onlyMediaFiles || !fileCategories.isEmpty {
+            total = scopedFiles.count
         } else if forceSourceReprocessing {
             total = counts.total
         } else if rebuildVectorSpace {
@@ -2106,6 +2925,8 @@ final class AppState: ObservableObject {
                 "kind": kind.logName,
                 "includeUnindexedFiles": "\(includeUnindexedFiles)",
                 "onlyUnindexedFiles": "\(onlyUnindexedFiles)",
+                "onlyMediaFiles": "\(onlyMediaFiles)",
+                "fileCategories": fileCategories.map(\.rawValue).sorted().joined(separator: ","),
                 "rebuildVectorSpace": "\(rebuildVectorSpace)",
                 "retrievalIndexOnly": "\(retrievalIndexOnly)",
                 "forceSourceReprocessing": "\(forceSourceReprocessing)",
@@ -2144,6 +2965,8 @@ final class AppState: ObservableObject {
                     forceReprocessing: forceSourceReprocessing,
                     onlyUnindexedFiles: onlyUnindexedFiles,
                     includeUnindexedFiles: includeUnindexedFiles,
+                    onlyMediaFiles: onlyMediaFiles,
+                    fileCategories: fileCategories,
                     checkpoint: { [indexingGate = self.indexingGate] in
                         await indexingGate.waitUntilRunnable()
                     },
@@ -2252,7 +3075,7 @@ final class AppState: ObservableObject {
         let progress = vectorIndexRebuildProgress ?? VectorIndexRebuildProgress(
             phase: phase,
             completed: 0,
-            total: (try? store.allFiles().count) ?? 0,
+            total: (try? store.fileIndexCounts().total) ?? 0,
             currentFileName: nil,
             failed: 0
         )

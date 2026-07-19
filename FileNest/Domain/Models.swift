@@ -77,6 +77,9 @@ struct FileRecord: Identifiable, Codable, Equatable, Hashable {
     var organizationSubfolder: String? = nil // Secondary folder derived by AI or rules.
     var isDirectory: Bool = false // Index and organize a folder as a whole while preserving its internal hierarchy.
     var indexSignature: String? = nil // Vector-space signature; global confirmation state manages content-processing configuration.
+    /// The indexed original with identical bytes. Duplicate files deliberately do not own chunks or vectors.
+    var duplicateOfFileID: Int64? = nil
+    var duplicateDetectedAt: Date? = nil
 
     var categoryEnum: FileCategory { FileCategory(rawValue: category) ?? .other }
 
@@ -91,11 +94,98 @@ struct FileRecord: Identifiable, Codable, Equatable, Hashable {
         categoryEnum == .documents && !isDirectory
     }
 
+    /// Media becomes eligible for file-scoped chat only when local transcription is enabled.
+    func supportsFileChat(with settings: AppSettings) -> Bool {
+        supportsDocumentChat
+            || (!isDirectory
+                && [.videos, .audio].contains(categoryEnum)
+                && settings.shouldTranscribeMedia(extension: ext))
+    }
+
     static func sortedByNewestAdded(_ files: [FileRecord]) -> [FileRecord] {
         files.sorted {
             if $0.addedAt != $1.addedAt { return $0.addedAt > $1.addedAt }
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
+    }
+}
+
+/// A group of files with the same SHA-256 content hash. The first file is kept
+/// as the original; the remaining files are safe candidates for the Trash only
+/// after explicit user confirmation.
+struct DuplicateFileGroup: Identifiable, Equatable {
+    let contentHash: String
+    let files: [FileRecord]
+
+    var id: String { contentHash }
+
+    var retainedFile: FileRecord {
+        files[0]
+    }
+
+    var duplicateFiles: [FileRecord] {
+        Array(files.dropFirst())
+    }
+
+    var reclaimableBytes: Int64 {
+        duplicateFiles.reduce(0) { $0 + $1.size }
+    }
+
+    static func groups(from files: [FileRecord]) -> [DuplicateFileGroup] {
+        let groups = Dictionary(grouping: files.compactMap { file -> (String, FileRecord)? in
+            guard let hash = file.contentHash, !hash.isEmpty else { return nil }
+            return (hash, file)
+        }, by: \.0)
+
+        return groups.compactMap { hash, entries in
+            var ordered = entries.map(\.1).sorted { lhs, rhs in
+                if lhs.addedAt != rhs.addedAt { return lhs.addedAt < rhs.addedAt }
+                if lhs.mtime != rhs.mtime { return lhs.mtime < rhs.mtime }
+                return lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
+            }
+            let linkedOriginalIDs = Set(ordered.compactMap(\.duplicateOfFileID))
+            if let linkedOriginalIndex = ordered.firstIndex(where: { file in
+                guard let id = file.id else { return false }
+                return linkedOriginalIDs.contains(id)
+            }) {
+                let original = ordered.remove(at: linkedOriginalIndex)
+                ordered.insert(original, at: 0)
+            }
+            guard ordered.count > 1 else { return nil }
+            return DuplicateFileGroup(contentHash: hash, files: ordered)
+        }
+        .sorted { lhs, rhs in
+            if lhs.reclaimableBytes != rhs.reclaimableBytes {
+                return lhs.reclaimableBytes > rhs.reclaimableBytes
+            }
+            return lhs.retainedFile.name.localizedStandardCompare(rhs.retainedFile.name) == .orderedAscending
+        }
+    }
+}
+
+struct DuplicateScanProgress: Equatable {
+    let scannedCount: Int
+    let totalCount: Int
+
+    var fractionCompleted: Double {
+        guard totalCount > 0 else { return 1 }
+        return min(1, Double(scannedCount) / Double(totalCount))
+    }
+}
+
+struct DuplicateTrashResult: Equatable {
+    let movedCount: Int
+    let failedFileNames: [String]
+}
+
+struct DuplicateTrashProgress: Equatable {
+    let completedCount: Int
+    let totalCount: Int
+    let currentFileName: String?
+
+    var fractionCompleted: Double {
+        guard totalCount > 0 else { return 1 }
+        return min(1, Double(completedCount) / Double(totalCount))
     }
 }
 
@@ -131,6 +221,8 @@ extension FileRecord: FetchableRecord, MutablePersistableRecord {
         case organizationSubfolder = "organization_subfolder"
         case isDirectory = "is_directory"
         case indexSignature = "index_signature"
+        case duplicateOfFileID = "duplicate_of_file_id"
+        case duplicateDetectedAt = "duplicate_detected_at"
     }
 
     mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -259,6 +351,12 @@ extension ChatSession: FetchableRecord, MutablePersistableRecord {
     mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
 }
 
+/// Retrieval confidence persisted with an assistant response for historical chat results.
+struct ChatRelatedFileMatch: Codable, Equatable, Hashable {
+    let fileID: Int64
+    let confidence: Double
+}
+
 struct ChatMessage: Identifiable, Codable, Equatable {
     var id: Int64?
     var role: String
@@ -266,6 +364,8 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var ts: Date
     var relatedFileIds: String? // JSON-encoded [Int64].
     var relatedFiles: [FileRecord] = [] // Runtime-only relationship, not persisted.
+    var relatedFileMatchesJSON: String? = nil // JSON-encoded [ChatRelatedFileMatch].
+    var relatedFileMatches: [ChatRelatedFileMatch] = [] // Runtime-only relationship, not persisted.
     var sessionId: Int64? = nil
     var inputTokens: Int? = nil
     var outputTokens: Int? = nil
@@ -280,6 +380,7 @@ extension ChatMessage: FetchableRecord, MutablePersistableRecord {
     enum CodingKeys: String, CodingKey {
         case id, role, content, ts
         case relatedFileIds = "related_file_ids"
+        case relatedFileMatchesJSON = "related_file_matches"
         case sessionId = "session_id"
         case inputTokens = "input_tokens"
         case outputTokens = "output_tokens"

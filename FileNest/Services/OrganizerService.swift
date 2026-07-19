@@ -76,6 +76,9 @@ final class OrganizerService: @unchecked Sendable {
         label: "filenest.organizer.reconciliation",
         qos: .utility
     )
+    private let reconciliationStateLock = NSLock()
+    private var reconciliationWaiters = [CheckedContinuation<[FileRecord], Never>]()
+    private var reconciliationIsRunning = false
     private var pendingFileIDs = Set<Int64>()
     private var scheduledWorkItem: DispatchWorkItem?
     var onLibraryChange: (() -> Void)?
@@ -344,14 +347,30 @@ final class OrganizerService: @unchecked Sendable {
     /// Treats FileNestOrganized as the library source of truth: recursively imports new files and removes stale records.
     func reconcileManagedFilesAsync() async -> [FileRecord] {
         await withCheckedContinuation { continuation in
+            reconciliationStateLock.lock()
+            reconciliationWaiters.append(continuation)
+            guard !reconciliationIsRunning else {
+                reconciliationStateLock.unlock()
+                return
+            }
+            reconciliationIsRunning = true
+            reconciliationStateLock.unlock()
+
             reconciliationQueue.async {
-                continuation.resume(returning: self.reconcileManagedFiles())
+                let result = self.reconcileManagedFiles()
+                self.reconciliationStateLock.lock()
+                let waiters = self.reconciliationWaiters
+                self.reconciliationWaiters.removeAll(keepingCapacity: true)
+                self.reconciliationIsRunning = false
+                self.reconciliationStateLock.unlock()
+                waiters.forEach { $0.resume(returning: result) }
             }
         }
     }
 
     /// Treats FileNestOrganized as the library source of truth: recursively imports new files and removes stale records.
     func reconcileManagedFiles() -> [FileRecord] {
+        let startedAt = Date()
         let fm = FileManager.default
         try? fm.createDirectory(at: organizeRoot, withIntermediateDirectories: true)
         let rootPath = organizeRoot.standardizedFileURL.path
@@ -363,7 +382,7 @@ final class OrganizerService: @unchecked Sendable {
             includingPropertiesForKeys: keys,
             options: settings.excludeHidden ? [.skipsHiddenFiles] : []
         )
-        let storedBeforeReconciliation = (try? store.allFiles()) ?? []
+        let storedBeforeReconciliation = (try? store.libraryFiles(rootPath: rootPath)) ?? []
         let storedByCanonicalPath = Dictionary(
             storedBeforeReconciliation.map { (Self.canonicalPath($0.path), $0) },
             uniquingKeysWith: { first, _ in first }
@@ -442,29 +461,98 @@ final class OrganizerService: @unchecked Sendable {
             )
         }
 
-        let stored = (try? store.allFiles()) ?? []
-        for record in stored where Self.isInside(record.path, rootPath: rootPath) && !diskPaths.contains(record.path) {
-            if let id = record.id { try? store.deleteFile(id: id) }
+        let missingIDs = Set(storedBeforeReconciliation.compactMap { record -> Int64? in
+            guard Self.isInside(record.path, rootPath: rootPath),
+                  !diskPaths.contains(record.path) else { return nil }
+            return record.id
+        })
+        if !missingIDs.isEmpty {
+            do {
+                try store.deleteFiles(ids: missingIDs)
+            } catch {
+                AppLogService.shared.write(
+                    "managed library stale-row deletion failed: \(error)",
+                    category: .organizeQueue,
+                    level: .error,
+                    metadata: ["files": "\(missingIDs.count)"]
+                )
+            }
         }
-        return ((try? store.allFiles()) ?? []).filter {
-            Self.isInside($0.path, rootPath: rootPath) && fm.fileExists(atPath: $0.path)
+        let reconciledFiles = ((try? store.libraryFiles(rootPath: rootPath)) ?? []).filter {
+            Self.isInside($0.path, rootPath: rootPath) && diskPaths.contains($0.path)
         }
+        let durationMilliseconds = Int(Date().timeIntervalSince(startedAt) * 1_000)
+        if durationMilliseconds >= 100 || !pendingUpserts.isEmpty || !missingIDs.isEmpty {
+            AppLogService.shared.write(
+                "managed library reconciliation completed",
+                category: .performance,
+                level: .debug,
+                metadata: [
+                    "durationMs": "\(durationMilliseconds)",
+                    "diskFiles": "\(diskPaths.count)",
+                    "upserts": "\(pendingUpserts.count)",
+                    "deleted": "\(missingIDs.count)",
+                ]
+            )
+        }
+        return reconciledFiles
     }
 
     /// A low-priority startup audit catches tools that overwrite content while preserving
     /// both file size and modification time. Only RAG-eligible files and managed directories
     /// are hashed so large unrelated media does not slow launch.
-    func invalidateChangedManagedFileIndexes() async -> Int {
-        let rootPath = organizeRoot.standardizedFileURL.path
-        let candidates = ((try? store.allFiles()) ?? []).filter { record in
-            guard record.indexedAt != nil,
-                  record.contentHash != nil,
-                  Self.isInside(record.path, rootPath: rootPath),
-                  FileManager.default.fileExists(atPath: record.path) else { return false }
-            return record.isDirectory || AppSettings.defaultVectorizeExtensions.contains(record.ext.lowercased())
+    func invalidateChangedManagedFileIndexes(force: Bool = false, now: Date = Date()) async -> Int {
+        let auditTimestampKey = "managed_content_audit.last_completed_at.v1"
+        let auditCursorKey = "managed_content_audit.last_file_id.v1"
+        let auditInterval: TimeInterval = 24 * 60 * 60
+        if !force,
+           let rawTimestamp = store.getSetting(auditTimestampKey),
+           let timestamp = TimeInterval(rawTimestamp),
+           now.timeIntervalSince1970 - timestamp < auditInterval {
+            AppLogService.shared.write(
+                "startup content audit skipped within TTL",
+                category: .indexPipeline,
+                level: .debug
+            )
+            return 0
         }
+
+        let rootPath = organizeRoot.standardizedFileURL.path
+        let cursor = Int64(store.getSetting(auditCursorKey) ?? "") ?? 0
+        let fetchedCandidates: [FileRecord]
+        do {
+            fetchedCandidates = try store.managedContentAuditCandidates(
+                rootPath: rootPath,
+                fileExtensions: Set(AppSettings.defaultVectorizeExtensions),
+                afterID: cursor,
+                limit: 256
+            )
+        } catch {
+            AppLogService.shared.write(
+                "startup content audit candidate query failed: \(error)",
+                category: .indexPipeline,
+                level: .error
+            )
+            return 0
+        }
+
+        let maximumAuditBytes: Int64 = 256 * 1_024 * 1_024
+        var selectedCandidates = [FileRecord]()
+        var selectedBytes: Int64 = 0
+        for candidate in fetchedCandidates {
+            let candidateBytes = max(0, candidate.size)
+            if !selectedCandidates.isEmpty,
+               selectedBytes + candidateBytes > maximumAuditBytes {
+                break
+            }
+            selectedCandidates.append(candidate)
+            selectedBytes += candidateBytes
+        }
+
         let changedIDs = await Task.detached(priority: .utility) {
-            candidates.compactMap { record -> Int64? in
+            selectedCandidates.compactMap { record -> Int64? in
+                guard !Task.isCancelled,
+                      FileManager.default.fileExists(atPath: record.path) else { return nil }
                 guard let id = record.id, let expectedHash = record.contentHash else { return nil }
                 let currentHash: String?
                 if record.isDirectory {
@@ -476,15 +564,34 @@ final class OrganizerService: @unchecked Sendable {
                 return id
             }
         }.value
-        for id in changedIDs {
-            try? store.markFileIndexStale(id: id)
+        guard !Task.isCancelled else { return 0 }
+        if !changedIDs.isEmpty {
+            try? store.applyManagedFileChanges(upserts: [], staleFileIDs: Set(changedIDs))
         }
+        if let lastID = selectedCandidates.last?.id {
+            store.setSetting(auditCursorKey, String(lastID))
+        }
+        store.setSetting(auditTimestampKey, String(now.timeIntervalSince1970))
         if !changedIDs.isEmpty {
             AppLogService.shared.write(
                 "startup content audit invalidated managed indexes",
                 category: .indexPipeline,
                 level: .notice,
-                metadata: ["files": "\(changedIDs.count)"]
+                metadata: [
+                    "audited": "\(selectedCandidates.count)",
+                    "bytes": "\(selectedBytes)",
+                    "files": "\(changedIDs.count)",
+                ]
+            )
+        } else {
+            AppLogService.shared.write(
+                "startup content audit completed",
+                category: .indexPipeline,
+                level: .debug,
+                metadata: [
+                    "audited": "\(selectedCandidates.count)",
+                    "bytes": "\(selectedBytes)",
+                ]
             )
         }
         return changedIDs.count

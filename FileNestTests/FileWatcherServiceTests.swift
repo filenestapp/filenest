@@ -256,7 +256,7 @@ final class FileWatcherServiceTests: XCTestCase {
     }
 
     func testRestartReindexesOfflineOverwriteWithPreservedSizeAndModificationDate() async throws {
-        let file = try createFile(named: "offline-overwrite.txt")
+        let file = try createFile(named: "offline-overwrite.txt", content: "hello world")
         let embedder = CountingEmbedder(result: [1, 0])
         settings.setAutoOrganize(false)
         let watcher = makeWatcher(embedder: embedder)
@@ -695,9 +695,13 @@ final class FileWatcherServiceTests: XCTestCase {
         )
     }
 
-    private func createFile(named name: String, in directory: URL? = nil) throws -> URL {
+    private func createFile(
+        named name: String,
+        in directory: URL? = nil,
+        content: String? = nil
+    ) throws -> URL {
         let url = (directory ?? sourceDirectory).appendingPathComponent(name)
-        try Data("hello world".utf8).write(to: url)
+        try Data((content ?? name).utf8).write(to: url)
         return url
     }
 

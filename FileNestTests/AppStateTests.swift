@@ -3,6 +3,50 @@ import Combine
 @testable import FileNest
 
 final class AppStateTests: XCTestCase {
+    private struct ImmediateEmbeddingProvider: EmbeddingProvider {
+        let name = "immediate-test-embedding"
+        let dimension = 2
+
+        func embed(_ text: String) async throws -> [Float] {
+            [1, 0]
+        }
+    }
+
+    @MainActor
+    func testFileDetailsCanOpenForAFileWithoutInlinePreviewSupport() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: temporaryDirectory.appendingPathComponent("organized"),
+            startAutomatically: false
+        )
+        let file = FileRecord(
+            id: nil,
+            path: temporaryDirectory.appendingPathComponent("archive.bin").path,
+            name: "archive.bin",
+            ext: "bin",
+            size: 64,
+            mtime: Date(),
+            category: FileCategory.other.rawValue,
+            sourceDir: temporaryDirectory.path,
+            indexedAt: nil,
+            contentHash: nil,
+            title: nil,
+            contentText: nil
+        )
+
+        XCTAssertFalse(file.supportsPreview)
+        state.presentFilePreview(file)
+        XCTAssertEqual(state.previewedFile, file)
+    }
+
     @MainActor
     func testChatActivityTracksRunningCompletionAndSeenStates() throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
@@ -276,12 +320,52 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.selectedChatSessionID, sessionID)
         XCTAssertEqual(try store.allChatSessions().map(\.id), [sessionID])
 
+        let visibleMessage = try XCTUnwrap(state.saveUserQuestionForImmediateDisplay(
+            "Summarize this file",
+            sessionID: sessionID
+        ))
+        XCTAssertEqual(state.chatMessages.map(\.id), [visibleMessage.id])
+        XCTAssertEqual(state.chatMessages.map(\.content), ["Summarize this file"])
+        XCTAssertEqual(try store.chatMessages(sessionId: sessionID).map(\.content), ["Summarize this file"])
+
         state.newChat()
         state.refreshChatSessions()
 
         XCTAssertNil(state.selectedChatSessionID)
         XCTAssertTrue(state.chatMessages.isEmpty)
         XCTAssertEqual(try store.allChatSessions().map(\.id), [sessionID])
+    }
+
+    @MainActor
+    func testInitialMainViewStartsWithAnUnpersistedBlankChatOnlyOnce() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        let previousIndexer = AppStateIndexerProxy.shared.indexer
+        defer { AppStateIndexerProxy.shared.indexer = previousIndexer }
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: temporaryDirectory.appendingPathComponent("organized"),
+            startAutomatically: false
+        )
+
+        let existingSessionID = try XCTUnwrap(state.persistChatForQuestion())
+        state.refreshChatSessions(selecting: existingSessionID)
+        XCTAssertEqual(state.selectedChatSessionID, existingSessionID)
+
+        XCTAssertTrue(state.prepareInitialMainViewChatIfNeeded())
+        XCTAssertNil(state.selectedChatSessionID)
+        XCTAssertTrue(state.chatMessages.isEmpty)
+        XCTAssertEqual(try store.allChatSessions().map(\.id), [existingSessionID])
+
+        state.selectChat(existingSessionID)
+        XCTAssertFalse(state.prepareInitialMainViewChatIfNeeded())
+        XCTAssertEqual(state.selectedChatSessionID, existingSessionID)
     }
 
     @MainActor
@@ -496,12 +580,18 @@ final class AppStateTests: XCTestCase {
         try FileManager.default.createDirectory(at: organizedDirectory, withIntermediateDirectories: true)
         let fileID = try store.upsertFile(makeFile(in: organizedDirectory, name: "archive.bin"))
         let file = try XCTUnwrap(store.file(id: fileID))
+        let indexer = IndexerService(
+            store: store,
+            settings: settings,
+            embedder: ImmediateEmbeddingProvider()
+        )
         let previousIndexer = AppStateIndexerProxy.shared.indexer
         defer { AppStateIndexerProxy.shared.indexer = previousIndexer }
         let state = AppState(
             store: store,
             settings: settings,
             organizeRoot: organizedDirectory,
+            indexer: indexer,
             startAutomatically: false
         )
 

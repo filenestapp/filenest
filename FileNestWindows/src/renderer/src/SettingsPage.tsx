@@ -341,6 +341,7 @@ function IndexSettings({
 }: ChildProps): React.JSX.Element {
   const s = snapshot.settings;
   const [reindexMode, setReindexMode] = useState<ReindexMode>("all");
+  const [mediaBusy, setMediaBusy] = useState(false);
   const update = async (patch: Partial<Settings>): Promise<void> => {
     await window.fileNest.updateSettings(patch);
     await onRefresh();
@@ -348,6 +349,17 @@ function IndexSettings({
   const chooseOrganizedRoot = async (): Promise<void> => {
     const path = await window.fileNest.chooseOrganizedRoot();
     if (path) await update({ organizedRoot: path });
+  };
+  const runMediaAction = async (action: () => Promise<void>): Promise<void> => {
+    setMediaBusy(true);
+    try {
+      await action();
+      await onRefresh();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMediaBusy(false);
+    }
   };
   return (
     <div className="settings-sections">
@@ -509,13 +521,19 @@ function IndexSettings({
             </SettingRow>
           </>
         )}
-        <SettingRow label="Chunk tokens">
+        <SettingRow label="Parent chunk maximum" hint="Complete answer-time section target, from 600 to 1,000 tokens">
           <NumberField
             value={s.vectorChunkWords}
             onCommit={(value) => update({ vectorChunkWords: value })}
           />
         </SettingRow>
-        <SettingRow label="Overlap">
+        <SettingRow label="Retrieval chunk target" hint="Smaller searchable children, from 120 tokens up to the parent maximum">
+          <NumberField
+            value={s.vectorRetrievalChunkTokens}
+            onCommit={(value) => update({ vectorRetrievalChunkTokens: value })}
+          />
+        </SettingRow>
+        <SettingRow label="Semantic overlap" hint="Maximum complete-unit overlap between retrieval children">
           <NumberField
             value={s.vectorChunkOverlap}
             onCommit={(value) => update({ vectorChunkOverlap: value })}
@@ -684,6 +702,46 @@ function IndexSettings({
             </SettingRow>
           </>
         )}
+      </SettingsSection>
+      <SettingsSection title="Audio & Video Transcription" subtitle="FFmpeg decoding and OpenAI Whisper transcription run locally on this PC">
+        <SettingRow label="Transcribe audio and video for search and chat" hint="Creates time-coded transcript chunks and sends only the resulting text through the configured embedding pipeline">
+          <label className="switch">
+            <input type="checkbox" checked={s.mediaTranscriptionEnabled} onChange={(event) => void update({ mediaTranscriptionEnabled: event.target.checked })} />
+            <span />
+          </label>
+        </SettingRow>
+        <SettingRow label="FFmpeg" hint="Required to decode audio tracks before local transcription">
+          <div className="button-row">
+            <span className={snapshot.ffmpeg.state === "ready" ? "success-text" : snapshot.ffmpeg.state === "failed" ? "warning-text" : ""}>{t(snapshot.ffmpeg.message)}</span>
+            {snapshot.ffmpeg.state !== "ready" && <button className="secondary-button" disabled={mediaBusy || snapshot.ffmpeg.installing} onClick={() => void runMediaAction(() => window.fileNest.installFfmpeg())}><Download size={16} />{t("Install FFmpeg")}</button>}
+          </div>
+        </SettingRow>
+        <SettingRow label="Whisper Runtime" hint="Installed in an isolated FileNest Python environment">
+          <div className="button-row">
+            <span className={snapshot.whisper.state === "ready" ? "success-text" : snapshot.whisper.state === "failed" ? "warning-text" : ""}>{t(snapshot.whisper.message)}</span>
+            {snapshot.whisper.version == null && <button className="secondary-button" disabled={mediaBusy || snapshot.whisper.installing} onClick={() => void runMediaAction(() => window.fileNest.installWhisper())}><Download size={16} />{t("Install Whisper")}</button>}
+          </div>
+        </SettingRow>
+        {(snapshot.ffmpeg.installing || snapshot.whisper.installing) && <progress value={snapshot.ffmpeg.progress ?? snapshot.whisper.progress ?? undefined} max={1} />}
+        {(snapshot.ffmpeg.error || snapshot.whisper.error) && <p className="settings-note warning-text">{snapshot.ffmpeg.error ?? snapshot.whisper.error}</p>}
+        <SettingRow label="Whisper Model">
+          <select value={s.whisperModel} onChange={(event) => void update({ whisperModel: event.target.value })}>
+            {[
+              ["tiny", "Fastest; suitable for clear speech"],
+              ["base", "Recommended multilingual default"],
+              ["small", "Higher accuracy on 16 GB or more"],
+              ["medium", "High accuracy; slower locally"],
+              ["turbo", "Fast large-model transcription"],
+            ].map(([model, detail]) => <option key={model} value={model}>{model} · {t(detail)}</option>)}
+          </select>
+        </SettingRow>
+        <div className="button-row">
+          {snapshot.whisper.installedModels.includes(s.whisperModel)
+            ? <button className="secondary-button danger" disabled={mediaBusy} onClick={() => { if (confirm(t("Delete Whisper Model?"))) void runMediaAction(() => window.fileNest.deleteWhisperModel(s.whisperModel)); }}><Trash2 size={15} />{t("Delete")}</button>
+            : <button className="primary-button" disabled={mediaBusy || snapshot.whisper.version == null} onClick={() => void runMediaAction(() => window.fileNest.downloadWhisperModel(s.whisperModel))}><Download size={16} />{t("Download Model")}</button>}
+          <button className="secondary-button" disabled={snapshot.indexing || !s.mediaTranscriptionEnabled} onClick={() => void window.fileNest.reindexAll("media").then(onRefresh)}><RotateCw size={16} />{t("Reindex Audio & Video")}</button>
+        </div>
+        <p className="settings-note">{t("Media decoding and transcription run locally. Only the resulting text chunks follow your configured Embedding provider.")}</p>
       </SettingsSection>
     </div>
   );
@@ -896,6 +954,53 @@ function AiSettings({ snapshot, t, onRefresh }: ChildProps): React.JSX.Element {
           </SettingRow>
         </SettingsSection>
       )}
+      <SettingsSection title="Retrieval Reranker" subtitle="Optional query-time reranking; fused local retrieval remains available if the service fails">
+        <SettingRow label="Source">
+          <select value={s.rerankerSource} onChange={(event) => void update({ rerankerSource: event.target.value as Settings["rerankerSource"] })}>
+            <option value="disabled">{t("Disabled")}</option>
+            <option value="local">{t("Managed Local Qwen")}</option>
+            <option value="cloud">{t("Cloud API")}</option>
+          </select>
+        </SettingRow>
+        {s.rerankerSource !== "disabled" && (
+          <>
+            {s.rerankerSource === "cloud" && (
+              <SettingRow label="Reuse Chat API Credentials">
+                <label className="switch"><input type="checkbox" checked={s.rerankerReuseChatCredentials} onChange={(event) => void update({ rerankerReuseChatCredentials: event.target.checked })} /><span /></label>
+              </SettingRow>
+            )}
+            {(s.rerankerSource === "local" || !s.rerankerReuseChatCredentials) && (
+              <>
+                <SettingRow label="Reranker Base URL" hint={s.rerankerSource === "local" ? "Default managed-compatible endpoint: 127.0.0.1:11435" : undefined}>
+                  <input className="wide-input" value={s.rerankerBaseUrl} onChange={(event) => void update({ rerankerBaseUrl: event.target.value })} />
+                </SettingRow>
+                {s.rerankerSource === "cloud" && <SettingRow label="Reranker API Key"><input className="wide-input" type="password" value={s.rerankerApiKey} onChange={(event) => void update({ rerankerApiKey: event.target.value })} /></SettingRow>}
+              </>
+            )}
+            {s.rerankerSource === "local" && (
+              <>
+                <SettingRow label="Local Status" hint={`Qwen3-Reranker-0.6B · ${snapshot.reranker.modelDiskBytes ? `${(snapshot.reranker.modelDiskBytes / 1_000_000_000).toFixed(2)} GB` : "about 1.25 GB download"}`}>
+                  <span className={snapshot.reranker.state === "running" ? "success-text" : snapshot.reranker.state === "failed" ? "warning-text" : ""}>{t(snapshot.reranker.message)}</span>
+                </SettingRow>
+                {snapshot.reranker.installing && <progress value={snapshot.reranker.progress ?? undefined} max={1} />}
+                {snapshot.reranker.error && <p className="settings-note warning-text">{snapshot.reranker.error}</p>}
+                <div className="button-row">
+                  {snapshot.reranker.state === "unavailable" || snapshot.reranker.state === "failed" && snapshot.reranker.modelDiskBytes === 0
+                    ? <button className="primary-button" disabled={snapshot.reranker.installing} onClick={() => void run(() => window.fileNest.installReranker())}><Download size={16} />{t("Download Reranker")}</button>
+                    : snapshot.reranker.state === "running"
+                      ? <button className="secondary-button" onClick={() => void run(() => window.fileNest.stopReranker())}>{t("Stop Service")}</button>
+                      : <button className="secondary-button" onClick={() => void run(() => window.fileNest.startReranker())}>{t("Start Service")}</button>}
+                  {snapshot.reranker.modelDiskBytes > 0 && <button className="secondary-button danger" onClick={() => { if (confirm(t("Delete the local reranker model?"))) void run(() => window.fileNest.deleteReranker()) }}><Trash2 size={15} />{t("Delete")}</button>}
+                </div>
+              </>
+            )}
+            <SettingRow label="Reranker Model">
+              <input className="wide-input" value={s.rerankerModel} onChange={(event) => void update({ rerankerModel: event.target.value })} />
+            </SettingRow>
+            <p className="settings-note">{t("The service must implement the OpenAI/Jina-compatible rerank contract. Only the strongest retrieval candidates are sent.")}</p>
+          </>
+        )}
+      </SettingsSection>
     </div>
   );
 }

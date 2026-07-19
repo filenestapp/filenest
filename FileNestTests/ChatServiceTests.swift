@@ -921,7 +921,7 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertTrue(results.first?.snippet?.contains("Remittance") == true)
     }
 
-    func testLibrarySearchConfidenceRanksContentBeforeNoteAndTitle() async throws {
+    func testLibrarySearchConfidenceRanksContentAndNoteAheadOfTitle() async throws {
         let contentID = try insertFile(
             named: "content-source.pdf",
             title: "Project archive",
@@ -944,7 +944,7 @@ final class ChatServiceTests: XCTestCase {
 
         XCTAssertEqual(results.map(\.file.id), [contentID, noteID, titleID])
         XCTAssertEqual(results.map(\.matchKind), [.content, .note, .title])
-        XCTAssertGreaterThan(results[0].confidence, results[1].confidence)
+        XCTAssertEqual(results[0].confidence, results[1].confidence)
         XCTAssertGreaterThan(results[1].confidence, results[2].confidence)
         XCTAssertTrue(results.allSatisfy { (0...1).contains($0.confidence) })
     }
@@ -984,9 +984,10 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertEqual(results.map(\.file.id), [exactID, contentID, noteID, metadataID, titleID])
         XCTAssertEqual(results.map(\.matchKind), [.fileName, .content, .note, .path, .title])
         XCTAssertEqual(results.first?.confidence, 1)
-        for pair in zip(results, results.dropFirst()) {
-            XCTAssertGreaterThan(pair.0.confidence, pair.1.confidence)
-        }
+        XCTAssertGreaterThan(results[0].confidence, results[1].confidence)
+        XCTAssertEqual(results[1].confidence, results[2].confidence)
+        XCTAssertGreaterThan(results[2].confidence, results[3].confidence)
+        XCTAssertGreaterThan(results[3].confidence, results[4].confidence)
     }
 
     func testLoadingSessionsDoesNotCreateOrKeepAnEmptyDraft() throws {
@@ -1506,6 +1507,28 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertEqual(accepted.map(\.fileId), [1, 2])
     }
 
+    func testDisplayConfidencePolicyHidesWeakResultsWhenThreeConfidentMatchesExist() {
+        let visible = LibrarySearchResult.applyingDisplayConfidencePolicy(to: [
+            makeSearchResult(name: "first.pdf", confidence: 0.94),
+            makeSearchResult(name: "second.pdf", confidence: 0.76),
+            makeSearchResult(name: "third.pdf", confidence: 0.50),
+            makeSearchResult(name: "weak.pdf", confidence: 0.49),
+        ])
+
+        XCTAssertEqual(visible.map(\.file.name), ["first.pdf", "second.pdf", "third.pdf"])
+    }
+
+    func testDisplayConfidencePolicyUsesWeakResultsOnlyToReachThreeMatches() {
+        let visible = LibrarySearchResult.applyingDisplayConfidencePolicy(to: [
+            makeSearchResult(name: "first.pdf", confidence: 0.92),
+            makeSearchResult(name: "second.pdf", confidence: 0.71),
+            makeSearchResult(name: "fallback.pdf", confidence: 0.49),
+            makeSearchResult(name: "weak.pdf", confidence: 0.21),
+        ])
+
+        XCTAssertEqual(visible.map(\.file.name), ["first.pdf", "second.pdf", "fallback.pdf"])
+    }
+
     private func makeChatService(settings: AppSettings? = nil,
                                  embedder: EmbeddingProvider = FailingEmbedder(),
                                  vectorStore: VectorStore? = nil,
@@ -1566,6 +1589,33 @@ final class ChatServiceTests: XCTestCase {
             organizationSubfolder: organizationSubfolder,
             isDirectory: isDirectory
         ))
+    }
+
+    private func makeSearchResult(name: String, confidence: Double) -> LibrarySearchResult {
+        let file = FileRecord(
+            id: nil,
+            path: temporaryDirectory.appendingPathComponent(name).path,
+            name: name,
+            ext: "pdf",
+            size: 1,
+            mtime: Date(),
+            category: FileCategory.documents.rawValue,
+            sourceDir: temporaryDirectory.path,
+            indexedAt: Date(),
+            contentHash: nil,
+            title: nil,
+            contentText: nil
+        )
+        return LibrarySearchResult(
+            file: file,
+            score: confidence,
+            confidence: confidence,
+            matchKind: .semantic,
+            snippet: nil,
+            sectionPath: [],
+            pageStart: nil,
+            pageEnd: nil
+        )
     }
 
     private func decodeRelatedIds(_ message: ChatMessage) throws -> [Int64] {

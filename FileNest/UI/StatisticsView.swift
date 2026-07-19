@@ -185,7 +185,11 @@ struct StatisticsView: View {
             }
         }
         .background(FileNestTheme.surface)
-        .onAppear { appState.refreshStatistics(days: selectedDays) }
+        .onAppear {
+            appState.setStatisticsViewVisible(true)
+            appState.refreshStatistics(days: selectedDays)
+        }
+        .onDisappear { appState.setStatisticsViewVisible(false) }
     }
 
     private var statisticsHeader: some View {
@@ -214,7 +218,7 @@ struct StatisticsView: View {
                 ForEach([7, 14, 30], id: \.self) { days in
                     Button {
                         selectedDays = days
-                        appState.refreshStatistics(days: days)
+                        appState.refreshStatistics(days: days, force: true)
                     } label: {
                         if selectedDays == days {
                             Label(appState.settings.localizedFormat("Last %d Days", days), systemImage: "checkmark")
@@ -230,7 +234,11 @@ struct StatisticsView: View {
             .fixedSize()
 
             Button {
-                appState.refreshStatistics(days: selectedDays)
+                appState.refreshStatistics(
+                    days: selectedDays,
+                    force: true,
+                    forceModelStorageRefresh: true
+                )
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }

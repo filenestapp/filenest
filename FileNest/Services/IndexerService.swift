@@ -4,6 +4,7 @@ import NaturalLanguage
 
 enum IndexingStage: Equatable, Sendable {
     case hashing
+    case transcribing
     case ocr
     case docling
     case extracting
@@ -14,6 +15,7 @@ enum IndexingStage: Equatable, Sendable {
     var statusText: String {
         switch self {
         case .hashing: return "Checking file"
+        case .transcribing: return "Transcribing audio or video"
         case .ocr: return "Recognizing image text"
         case .docling: return "Parsing document"
         case .extracting: return "Extracting content"
@@ -205,6 +207,190 @@ private enum EmbeddingBatchError: LocalizedError {
     }
 }
 
+struct MediaTranscriptionResult: Sendable {
+    let extracted: ContentExtractor.Extracted
+    let chunks: [StructuredDocumentChunk]
+}
+
+private struct WhisperTranscriptionPayload: Decodable, Sendable {
+    struct Segment: Decodable, Sendable {
+        let start: Double
+        let end: Double
+        let text: String
+    }
+
+    let text: String
+    let language: String?
+    let segments: [Segment]
+}
+
+private actor MediaTranscriptionProcessor {
+    func process(url: URL, model: String, maxTokens: Int) async -> MediaTranscriptionResult? {
+        let model = WhisperModelCatalog.normalizedModel(model)
+        guard let ffmpeg = FFmpegServiceManager.resolveExecutable() else {
+            Self.log("Media transcription skipped because FFmpeg is unavailable", url: url, model: model)
+            return nil
+        }
+        guard WhisperServiceManager.isRuntimeAndModelAvailable(model) else {
+            Self.log("Media transcription skipped because the selected Whisper model is unavailable",
+                     url: url, model: model)
+            return nil
+        }
+
+        do {
+            let payload = try await Task.detached(priority: .userInitiated) {
+                try Self.transcribe(url: url, model: model, ffmpeg: ffmpeg)
+            }.value
+            let chunks = Self.makeChunks(
+                from: payload.segments,
+                fileName: url.lastPathComponent,
+                language: payload.language,
+                maxTokens: maxTokens
+            )
+            let transcript = payload.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !transcript.isEmpty, !chunks.isEmpty else {
+                Self.log("Whisper completed without recognized speech", url: url, model: model)
+                return nil
+            }
+            AppLogService.shared.write(
+                "Media transcription completed",
+                category: .indexExtraction,
+                metadata: [
+                    "file": url.lastPathComponent,
+                    "model": model,
+                    "language": payload.language ?? "unknown",
+                    "segments": "\(payload.segments.count)",
+                    "chunks": "\(chunks.count)",
+                ]
+            )
+            return MediaTranscriptionResult(
+                extracted: ContentExtractor.Extracted(
+                    title: url.deletingPathExtension().lastPathComponent,
+                    text: String(transcript.prefix(ContentExtractor.maxChars))
+                ),
+                chunks: chunks
+            )
+        } catch {
+            AppLogService.shared.write(
+                "Media transcription failed: \(error.localizedDescription)",
+                category: .indexExtraction,
+                level: .error,
+                metadata: ["file": url.lastPathComponent, "model": model]
+            )
+            return nil
+        }
+    }
+
+    nonisolated private static func transcribe(
+        url: URL,
+        model: String,
+        ffmpeg: URL
+    ) throws -> WhisperTranscriptionPayload {
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("filenest-whisper-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: output) }
+        let script = """
+        import json, sys, whisper
+        model = whisper.load_model(sys.argv[1], download_root=sys.argv[2])
+        result = model.transcribe(sys.argv[3], verbose=False, fp16=False, task="transcribe")
+        payload = {
+            "text": result.get("text", ""),
+            "language": result.get("language"),
+            "segments": [
+                {"start": s.get("start", 0), "end": s.get("end", 0), "text": s.get("text", "")}
+                for s in result.get("segments", [])
+            ],
+        }
+        with open(sys.argv[4], "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False)
+        """
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "\(ffmpeg.deletingLastPathComponent().path):\(environment["PATH"] ?? "")"
+        let process = Process()
+        process.executableURL = WhisperServiceManager.pythonExecutable
+        process.arguments = [
+            "-c", script, model, WhisperServiceManager.modelRoot.path, url.path, output.path,
+        ]
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw MediaTranscriptionError.commandFailed }
+        return try JSONDecoder().decode(WhisperTranscriptionPayload.self, from: Data(contentsOf: output))
+    }
+
+    nonisolated private static func makeChunks(
+        from segments: [WhisperTranscriptionPayload.Segment],
+        fileName: String,
+        language: String?,
+        maxTokens: Int
+    ) -> [StructuredDocumentChunk] {
+        let normalized = segments.compactMap { segment -> WhisperTranscriptionPayload.Segment? in
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return .init(start: max(0, segment.start), end: max(segment.start, segment.end), text: text)
+        }
+        guard !normalized.isEmpty else { return [] }
+
+        var groups = [[WhisperTranscriptionPayload.Segment]]()
+        var current = [WhisperTranscriptionPayload.Segment]()
+        for segment in normalized {
+            let candidate = (current + [segment]).map(\.text).joined(separator: " ")
+            if !current.isEmpty, TokenCounter.estimate(candidate).count > maxTokens {
+                groups.append(current)
+                current = [segment]
+            } else {
+                current.append(segment)
+            }
+        }
+        if !current.isEmpty { groups.append(current) }
+
+        return groups.compactMap { group in
+            guard let first = group.first, let last = group.last else { return nil }
+            let range = "\(timestamp(first.start))–\(timestamp(last.end))"
+            let body = group.map(\.text).joined(separator: " ")
+            let context = [
+                "Transcript: \(fileName)",
+                language.map { "Language: \($0)" },
+                "Time range: \(range)",
+                body,
+            ].compactMap { $0 }.joined(separator: "\n")
+            return StructuredDocumentChunk(
+                text: "[\(range)]\n\(body)",
+                contextualText: context,
+                sectionPath: ["Transcript", range],
+                kind: .transcript
+            )
+        }
+    }
+
+    nonisolated private static func timestamp(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded(.down)))
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let remainder = total % 60
+        return hours > 0
+            ? String(format: "%02d:%02d:%02d", hours, minutes, remainder)
+            : String(format: "%02d:%02d", minutes, remainder)
+    }
+
+    nonisolated private static func log(_ message: String, url: URL, model: String) {
+        AppLogService.shared.write(
+            message,
+            category: .indexExtraction,
+            level: .notice,
+            metadata: ["file": url.lastPathComponent, "model": model]
+        )
+    }
+}
+
+private enum MediaTranscriptionError: LocalizedError {
+    case commandFailed
+
+    var errorDescription: String? { "OpenAI Whisper transcription failed" }
+}
+
 /// Indexing service: extracts one file, splits it into chunks, creates embeddings, and stores the result.
 /// Owns the EmbeddingProvider and VectorStore instances.
 final class IndexerService {
@@ -213,6 +399,7 @@ final class IndexerService {
     private let providedEmbedder: EmbeddingProvider?
     private let providedOCRProvider: OCRProvider?
     private let doclingProcessor = DoclingDocumentProcessor()
+    private let mediaTranscriptionProcessor = MediaTranscriptionProcessor()
     private let taskCoordinator = IndexTaskCoordinator()
     private let embedderLock = NSLock()
     private var cachedEmbedder: (signature: String, provider: EmbeddingProvider)?
@@ -236,6 +423,37 @@ final class IndexerService {
     func warmup() async {
         // AppState starts an atomic rebuild for incompatible models; warm-up retains old chunks and vectors as a fallback.
         await vectorStore.loadAll()
+    }
+
+    /// Chooses a small file-level concurrency cap so foreground interaction and
+    /// local model inference remain responsive during large backfills.
+    static func recommendedFileConcurrency(
+        physicalMemory: UInt64,
+        usesLocalEmbedding: Bool,
+        usesDocling: Bool,
+        usesLocalOCR: Bool
+    ) -> Int {
+        let gibibyte = UInt64(1_024 * 1_024 * 1_024)
+        guard physicalMemory >= 16 * gibibyte else { return 1 }
+
+        // Docling and local OCR have their own serialized execution lanes. Keep
+        // two file pipelines in flight so one can make progress while the other
+        // waits on disk or a service, without multiplying peak memory pressure.
+        if usesDocling || usesLocalOCR { return 2 }
+
+        // A third pipeline is useful only on high-memory systems when the batch
+        // is lightweight enough not to compete with a local embedding model.
+        if physicalMemory >= 32 * gibibyte, !usesLocalEmbedding { return 3 }
+        return 2
+    }
+
+    private var fileConcurrency: Int {
+        Self.recommendedFileConcurrency(
+            physicalMemory: ProcessInfo.processInfo.physicalMemory,
+            usesLocalEmbedding: settings.embeddingSource == AppSettings.EmbeddingSource.ollama.rawValue,
+            usesDocling: settings.doclingEnabled,
+            usesLocalOCR: settings.ocrSource == AppSettings.OCRSource.local.rawValue
+        )
     }
 
     /// Builds or rebuilds the index for one file.
@@ -392,8 +610,34 @@ final class IndexerService {
             )
             return true
         }
+        // A changed former duplicate becomes an independent file again before its
+        // content and vectors are rebuilt.
+        try? store.clearFileDuplicateLink(id: id)
 
         let shouldProcessContent = forceVectorization || settings.shouldVectorize(extension: file.ext)
+        let shouldTranscribeMedia = shouldProcessContent
+            && settings.shouldTranscribeMedia(extension: file.ext)
+        let transcription: MediaTranscriptionResult?
+        if shouldTranscribeMedia {
+            guard await canContinue(checkpoint) else { return false }
+            await stageProgress?(.transcribing)
+            transcription = await mediaTranscriptionProcessor.process(
+                url: url,
+                model: settings.whisperModel,
+                maxTokens: settings.chunkTokenLimit
+            )
+        } else {
+            transcription = nil
+        }
+        if shouldTranscribeMedia, transcription == nil {
+            Self.log(
+                "media indexing stopped because transcription did not produce searchable text",
+                category: .indexExtraction,
+                level: .error,
+                metadata: ["file": file.name, "model": settings.whisperModel]
+            )
+            return false
+        }
         guard await canContinue(checkpoint) else { return false }
         await stageProgress?(.ocr)
         let pdfAnalysis = file.ext.lowercased() == "pdf"
@@ -405,6 +649,7 @@ final class IndexerService {
         // Raster images use the dedicated OCR pipeline. Sending them through Docling first
         // duplicated work and can hit native OpenCV resize crashes in the Docling environment.
         let docling = settings.doclingEnabled && shouldProcessContent && !isRasterImage
+            && !shouldTranscribeMedia
             ? await doclingProcessor.process(
                 url: url,
                 ext: file.ext,
@@ -414,9 +659,11 @@ final class IndexerService {
             )
             : nil
         // Docling handles structure parsing; pages that need OCR go to the configured primary OCR provider.
-        let shouldRunConfiguredOCR = docling == nil || OCRDocumentProcessor.requiresRecognition(
-            ext: file.ext,
-            pdfAnalysis: pdfAnalysis
+        let shouldRunConfiguredOCR = !shouldTranscribeMedia && (
+            docling == nil || OCRDocumentProcessor.requiresRecognition(
+                ext: file.ext,
+                pdfAnalysis: pdfAnalysis
+            )
         )
         let ocrText = shouldRunConfiguredOCR
             ? await OCRDocumentProcessor.recognizeIfNeeded(
@@ -428,7 +675,9 @@ final class IndexerService {
             : nil
         guard await canContinue(checkpoint) else { return false }
         await stageProgress?(.extracting)
-        var extracted = docling?.extracted ?? ContentExtractor.extract(url: url, ext: file.ext)
+        var extracted = transcription?.extracted
+            ?? docling?.extracted
+            ?? ContentExtractor.extract(url: url, ext: file.ext)
         var appendedOCRText: String?
         if let ocrText,
            Self.shouldAppendOCRText(ocrText, to: extracted.text) {
@@ -442,6 +691,8 @@ final class IndexerService {
         updated.title = extracted.title
         updated.contentText = extracted.text
         updated.contentHash = contentHash
+        updated.duplicateOfFileID = nil
+        updated.duplicateDetectedAt = nil
         updated.indexedAt = nil
         updated.indexSignature = nil
         if writeTarget == .active {
@@ -526,13 +777,13 @@ final class IndexerService {
         }
         guard await canContinue(checkpoint) else { return false }
         await stageProgress?(.chunking)
-        var chunks = Self.contentChunks(
+        var chunks = transcription?.chunks ?? Self.contentChunks(
             doclingChunks: docling?.chunks,
             extractedText: extracted.text,
             appendedOCRText: appendedOCRText,
             maxTokens: settings.chunkTokenLimit
         )
-        if docling != nil, !extractedTitle.isEmpty, !chunks.isEmpty {
+        if (docling != nil || transcription != nil), !extractedTitle.isEmpty, !chunks.isEmpty {
             chunks = chunks.map {
                 Self.addDocumentTitleContext(extractedTitle, to: $0, maxTokens: settings.chunkTokenLimit)
             }
@@ -1255,16 +1506,27 @@ final class IndexerService {
         forceReprocessing: Bool = false,
         onlyUnindexedFiles: Bool = false,
         includeUnindexedFiles: Bool = false,
+        onlyMediaFiles: Bool = false,
+        fileCategories: Set<FileCategory> = [],
         checkpoint: (@Sendable () async -> Bool)? = nil,
         progress: (@MainActor (VectorIndexRebuildProgress) -> Void)? = nil
     ) async -> Bool {
-        let allFiles = ((try? store.allFiles()) ?? []).filter { $0.id != nil }
+        // Duplicate copies intentionally reuse their retained original's index.
+        // They must never be reintroduced by a bulk reindex merely because they
+        // have no independent indexedAt timestamp.
+        let allFiles = ((try? store.allFiles()) ?? []).filter {
+            $0.id != nil && $0.duplicateOfFileID == nil
+        }
+        let scopedFiles = allFiles.filter { file in
+            (!onlyMediaFiles || AppSettings.mediaTranscriptionExtensions.contains(file.ext.lowercased()))
+                && (fileCategories.isEmpty || fileCategories.contains(file.categoryEnum))
+        }
         let files = onlyUnindexedFiles
-            ? allFiles.filter { $0.indexedAt == nil }
-            : allFiles
+            ? scopedFiles.filter { $0.indexedAt == nil }
+            : scopedFiles
         let total = rebuildVectorSpace && !forceReprocessing
-            ? allFiles.filter { $0.indexedAt != nil }.count
-                + (includeUnindexedFiles ? allFiles.filter { $0.indexedAt == nil }.count : 0)
+            ? scopedFiles.filter { $0.indexedAt != nil }.count
+                + (includeUnindexedFiles ? scopedFiles.filter { $0.indexedAt == nil }.count : 0)
             : files.count
         await progress?(VectorIndexRebuildProgress(
             phase: .preparing, completed: 0, total: total, currentFileName: nil, failed: 0
@@ -1278,7 +1540,7 @@ final class IndexerService {
         if rebuildVectorSpace && !forceReprocessing {
             return await rebuildEmbeddingsOnly(
                 files: files.filter { $0.indexedAt != nil },
-                newFiles: includeUnindexedFiles ? allFiles.filter { $0.indexedAt == nil } : [],
+                newFiles: includeUnindexedFiles ? scopedFiles.filter { $0.indexedAt == nil } : [],
                 checkpoint: checkpoint,
                 progress: progress
             )
@@ -1506,7 +1768,7 @@ final class IndexerService {
         return true
     }
 
-    /// Two files in parallel are enough to hide disk and network waits; OCR and Docling remain single-task within their own execution lanes.
+    /// The cap adapts to available memory and enabled local processing services.
     func indexFiles(
         _ files: [FileRecord],
         force: Bool = false,
@@ -1542,7 +1804,8 @@ final class IndexerService {
                 }
             }
 
-            while nextIndex < min(2, candidates.count) {
+            let concurrency = min(fileConcurrency, candidates.count)
+            while nextIndex < concurrency {
                 enqueue(candidates[nextIndex])
                 nextIndex += 1
             }

@@ -3,9 +3,54 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum FileNestTheme {
-    static let accent = Color(red: 0.34, green: 0.31, blue: 0.96)
-    static let accentBlue = Color(red: 0.24, green: 0.48, blue: 0.98)
-    static let selection = Color(red: 0.45, green: 0.43, blue: 0.94).opacity(0.13)
+    /// Foreground accents are deliberately brighter in Dark Mode so links,
+    /// icons, and focus indicators keep strong contrast on deep surfaces.
+    static let accent = adaptiveColor(
+        light: NSColor(srgbRed: 0.34, green: 0.31, blue: 0.96, alpha: 1),
+        dark: NSColor(srgbRed: 0.68, green: 0.64, blue: 1.0, alpha: 1)
+    )
+    static let accentBlue = adaptiveColor(
+        light: NSColor(srgbRed: 0.24, green: 0.48, blue: 0.98, alpha: 1),
+        dark: NSColor(srgbRed: 0.46, green: 0.68, blue: 1.0, alpha: 1)
+    )
+    /// Prominent fills remain darker than foreground accents so white button
+    /// labels retain accessible contrast in both appearances.
+    static let accentFill = Color(red: 0.34, green: 0.31, blue: 0.96)
+    static let accentFillBlue = Color(red: 0.22, green: 0.42, blue: 0.88)
+    static let selection = adaptiveColor(
+        light: NSColor(srgbRed: 0.929, green: 0.926, blue: 0.992, alpha: 1),
+        dark: NSColor(srgbRed: 0.18, green: 0.17, blue: 0.28, alpha: 1)
+    )
+    /// Neutral content selection keeps dense rows calm in Dark Mode. Brand color
+    /// remains on controls and icons instead of tinting a large reading surface.
+    static let contentSelection = adaptiveColor(
+        light: NSColor(srgbRed: 0.945, green: 0.945, blue: 0.970, alpha: 1),
+        dark: NSColor(srgbRed: 0.150, green: 0.150, blue: 0.165, alpha: 1)
+    )
+    static let contentHover = adaptiveColor(
+        light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.975, alpha: 1),
+        dark: NSColor(srgbRed: 0.125, green: 0.125, blue: 0.135, alpha: 1)
+    )
+    static let inspectorSurface = adaptiveColor(
+        light: NSColor(srgbRed: 0.975, green: 0.975, blue: 0.980, alpha: 1),
+        dark: NSColor(srgbRed: 0.115, green: 0.115, blue: 0.125, alpha: 1)
+    )
+    static let sidebarSurface = adaptiveColor(
+        light: NSColor(srgbRed: 0.965, green: 0.969, blue: 0.978, alpha: 1),
+        dark: NSColor(srgbRed: 0.094, green: 0.106, blue: 0.133, alpha: 1)
+    )
+    static let sidebarSelection = adaptiveColor(
+        light: NSColor(srgbRed: 0.925, green: 0.925, blue: 1.0, alpha: 1),
+        dark: NSColor(srgbRed: 0.157, green: 0.176, blue: 0.227, alpha: 1)
+    )
+    static let sidebarSelectedText = adaptiveColor(
+        light: NSColor(srgbRed: 0.275, green: 0.251, blue: 0.82, alpha: 1),
+        dark: NSColor(srgbRed: 0.949, green: 0.957, blue: 1.0, alpha: 1)
+    )
+    static let sidebarSelectedIcon = adaptiveColor(
+        light: NSColor(srgbRed: 0.34, green: 0.31, blue: 0.96, alpha: 1),
+        dark: NSColor(srgbRed: 0.557, green: 0.627, blue: 1.0, alpha: 1)
+    )
     static let success = Color(red: 0.10, green: 0.67, blue: 0.29)
     static let warning = Color(red: 0.83, green: 0.55, blue: 0.08)
     static let warningSurface = Color.yellow.opacity(0.12)
@@ -15,65 +60,116 @@ enum FileNestTheme {
     static let border = Color.primary.opacity(0.10)
     static let strongBorder = Color.primary.opacity(0.16)
     static let primaryGradient = LinearGradient(
-        colors: [accentBlue, accent],
+        colors: [accentFillBlue, accentFill],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
+
+    private static func adaptiveColor(light: NSColor, dark: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        })
+    }
 }
 
 /// SwiftUI does not expose AppKit's overlay scroller controls. This bridge applies
 /// a compact, low-contrast overlay style to every scroller in its containing window.
-private struct FileNestOverlayScrollerConfigurator: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        configureEnclosingScrollView(from: view)
-        return view
-    }
+@MainActor
+final class FileNestScrollerStyleCoordinator {
+    static let shared = FileNestScrollerStyleCoordinator()
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        configureEnclosingScrollView(from: nsView)
-    }
+    private var observerTokens = [NSObjectProtocol]()
+    private var pendingWindowIDs = Set<ObjectIdentifier>()
 
-    private func configureEnclosingScrollView(from view: NSView) {
-        let applyStyle = { [weak view] in
-            guard let view else { return }
-            if let contentView = view.window?.contentView {
-                configureScrollViews(in: contentView)
-                return
-            }
+    private init() {}
 
-            var ancestor = view.superview
-            while let current = ancestor {
-                if let scrollView = current as? NSScrollView {
-                    configure(scrollView)
-                    return
+    func start() {
+        guard observerTokens.isEmpty else { return }
+        let center = NotificationCenter.default
+        let notifications: [Notification.Name] = [
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didResizeNotification,
+        ]
+        observerTokens = notifications.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                guard let window = notification.object as? NSWindow else { return }
+                Task { @MainActor [weak self, weak window] in
+                    self?.schedule(window: window)
                 }
-                ancestor = current.superview
             }
         }
-
-        // SwiftUI often creates an NSScrollView after its surrounding view hierarchy.
-        // Reapplying after layout covers lazy panels such as the file preview inspector.
-        DispatchQueue.main.async(execute: applyStyle)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: applyStyle)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: applyStyle)
+        NSApp.windows.forEach(scheduleInitialConfiguration(for:))
     }
 
-    private func configureScrollViews(in view: NSView) {
+    func scheduleInitialConfiguration(for window: NSWindow?) {
+        guard let window else { return }
+        schedule(window: window)
+        for delay in [0.15, 0.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.apply(to: window)
+            }
+        }
+    }
+
+    func schedule(window: NSWindow?) {
+        guard let window else { return }
+        let identifier = ObjectIdentifier(window)
+        guard pendingWindowIDs.insert(identifier).inserted else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self, weak window] in
+            guard let self else { return }
+            self.pendingWindowIDs.remove(identifier)
+            guard let window else { return }
+            self.apply(to: window)
+        }
+    }
+
+    func apply(to window: NSWindow) {
+        guard let contentView = window.contentView else { return }
+        applyRecursively(to: contentView)
+    }
+
+    func applyRecursively(to view: NSView) {
         if let scrollView = view as? NSScrollView {
             configure(scrollView)
         }
-        view.subviews.forEach(configureScrollViews(in:))
+        view.subviews.forEach(applyRecursively(to:))
     }
 
     private func configure(_ scrollView: NSScrollView) {
+        let needsLayout = scrollView.scrollerStyle != .overlay
+            || scrollView.verticalScroller?.controlSize != .mini
+            || scrollView.horizontalScroller?.controlSize != .mini
         scrollView.scrollerStyle = .overlay
         scrollView.autohidesScrollers = true
         scrollView.verticalScroller?.controlSize = .mini
         scrollView.horizontalScroller?.controlSize = .mini
-        // The reduced alpha prevents the overlay thumb from competing with content.
-        scrollView.verticalScroller?.alphaValue = 0.42
-        scrollView.horizontalScroller?.alphaValue = 0.42
+        scrollView.verticalScroller?.alphaValue = 0.30
+        scrollView.horizontalScroller?.alphaValue = 0.30
+        if needsLayout {
+            scrollView.needsLayout = true
+        }
+    }
+}
+
+private final class FileNestScrollerStyleAnchorView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        FileNestScrollerStyleCoordinator.shared.scheduleInitialConfiguration(for: window)
+    }
+}
+
+private struct FileNestOverlayScrollerConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = FileNestScrollerStyleAnchorView(frame: .zero)
+        DispatchQueue.main.async { [weak view] in
+            FileNestScrollerStyleCoordinator.shared.scheduleInitialConfiguration(for: view?.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        FileNestScrollerStyleCoordinator.shared.scheduleInitialConfiguration(for: nsView.window)
     }
 }
 
@@ -128,10 +224,16 @@ extension AppSettings {
             "Ollama installation failed: %@",
             "PaddleOCR update failed: %@",
             "PaddleOCR installation failed: %@",
+            "FFmpeg installation failed: %@",
+            "Whisper installation failed: %@",
+            "Whisper model download failed: %@",
             "Could not start Ollama: %@",
             "The service started, but FileNest could not connect to %@.",
             "Model download failed: %@",
             "Could not delete model: %@",
+            "Downloading the Whisper %@ model…",
+            "FFmpeg %@ is ready",
+            "OpenAI Whisper %@ is ready",
         ]
         for template in templates {
             let parts = template.components(separatedBy: "%@")
@@ -144,6 +246,37 @@ extension AppSettings {
             return localizedFormat(template, localizedRuntimeMessage(detail))
         }
         return message
+    }
+}
+
+/// A shared entry point for the two manual organization scopes.
+/// The picker action is deliberately one-time and never mutates watched folders.
+struct OrganizeNowMenu<MenuLabel: View>: View {
+    @EnvironmentObject private var appState: AppState
+    @ViewBuilder private let label: () -> MenuLabel
+
+    init(@ViewBuilder label: @escaping () -> MenuLabel) {
+        self.label = label
+    }
+
+    var body: some View {
+        Menu {
+            Button {
+                appState.organizeNewFilesInWatchedDirectories()
+            } label: {
+                Label("Organize New Files in Watched Folders", systemImage: "dot.radiowaves.left.and.right")
+            }
+            .disabled(appState.settings.watchDirs.isEmpty)
+
+            Button {
+                appState.chooseDirectoriesForOneTimeOrganization()
+            } label: {
+                Label("Choose Folders to Organize…", systemImage: "folder.badge.plus")
+            }
+        } label: {
+            label()
+        }
+        .disabled(appState.indexingState.isActive || appState.organizationState.isActive)
     }
 }
 
@@ -298,8 +431,10 @@ struct IndexingActivitySymbol: View {
     var weight: Font.Weight = .medium
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.1, paused: !isAnimating)) { timeline in
-            Image(systemName: systemName)
+        // Service progress does not need a 10 FPS redraw. A modest cadence keeps
+        // the indicator responsive without continuously invalidating its host UI.
+        TimelineView(.animation(minimumInterval: 0.5, paused: !isAnimating)) { timeline in
+            Image(systemName: isAnimating ? "arrow.triangle.2.circlepath" : systemName)
                 .font(.system(size: size, weight: weight))
                 .rotationEffect(.degrees(rotation(at: timeline.date)))
         }
@@ -352,7 +487,7 @@ struct IndexingStatusProgressView: View {
     var showsControls = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        return VStack(alignment: .leading, spacing: 9) {
             if showsHeader {
                 HStack(spacing: 9) {
                     IndexingActivitySymbol(
@@ -421,6 +556,8 @@ struct IndexingStatusProgressView: View {
 struct AutomaticProcessingQueueView: View {
     @ObservedObject var appState: AppState
     var maximumItems = 3
+    var showsHeader = true
+    var onDismiss: (() -> Void)?
 
     private var items: [AutomaticFileProcessingItem] {
         Array(appState.automaticFileProcessingItems.prefix(maximumItems))
@@ -430,9 +567,8 @@ struct AutomaticProcessingQueueView: View {
         guard !items.isEmpty else { return AnyView(EmptyView()) }
         return AnyView(
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 7) {
-                    Image(systemName: appState.hasActiveAutomaticFileProcessing ? "tray.full.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(appState.hasActiveAutomaticFileProcessing ? FileNestTheme.accentBlue : FileNestTheme.success)
+                if showsHeader {
+                    HStack(spacing: 7) {
                     Text(verbatim: appState.settings.localized(
                         appState.hasActiveAutomaticFileProcessing
                             ? appState.automaticProcessingStatusTitle
@@ -445,18 +581,24 @@ struct AutomaticProcessingQueueView: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
+                    if let onDismiss {
+                        Button(action: onDismiss) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 20, height: 20)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(LocalizedStringKey("Dismiss Processing Status"))
+                        .accessibilityLabel(LocalizedStringKey("Dismiss Processing Status"))
+                    }
+                    }
                 }
 
                 ForEach(items) { item in
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
-                            IndexingActivitySymbol(
-                                systemName: symbol(for: item.stage),
-                                isAnimating: item.isActive,
-                                size: 11,
-                                weight: .medium
-                            )
-                            .foregroundStyle(color(for: item.stage))
                             Text(item.fileName)
                                 .font(.system(size: 10, weight: .medium))
                                 .lineLimit(1)
@@ -467,7 +609,7 @@ struct AutomaticProcessingQueueView: View {
                             .font(.system(size: 9))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                        if let progress = item.progress, item.isActive {
+                        if let progress = item.progress, item.isAnimating {
                             ProgressView(value: progress)
                                 .tint(color(for: item.stage))
                                 .controlSize(.small)
@@ -480,6 +622,8 @@ struct AutomaticProcessingQueueView: View {
 
     private func localizedStatus(for item: AutomaticFileProcessingItem) -> String {
         switch item.stage {
+        case let .duplicate(originalFileName):
+            return appState.settings.localizedFormat("Duplicate of %@", originalFileName)
         case let .indexing(.embedding(completed, total)):
             return appState.settings.localizedFormat(
                 "Generating vectors %d/%d",
@@ -495,23 +639,175 @@ struct AutomaticProcessingQueueView: View {
         }
     }
 
-    private func symbol(for stage: AutomaticFileProcessingStage) -> String {
-        switch stage {
-        case .queued: return "clock"
-        case .indexing: return "doc.text.magnifyingglass"
-        case .waitingForOrganization: return "tray.and.arrow.down"
-        case .organizing: return "folder.badge.gearshape"
-        case .completed: return "checkmark.circle.fill"
-        case .failed: return "exclamationmark.triangle.fill"
-        }
-    }
-
     private func color(for stage: AutomaticFileProcessingStage) -> Color {
         switch stage {
         case .completed: return FileNestTheme.success
         case .failed: return FileNestTheme.warning
+        case .duplicate: return FileNestTheme.warning
         case .queued, .waitingForOrganization: return .secondary
         case .indexing, .organizing: return FileNestTheme.accentBlue
+        }
+    }
+}
+
+/// Compact progress and queue preview for a user-initiated organization job.
+/// It deliberately keeps the Library usable while a long-running batch is active.
+struct ManualOrganizationQueueView: View {
+    @ObservedObject var appState: AppState
+    var maximumItems = 10
+    var showsControls = true
+    var showsActivitySymbol = true
+    @State private var isUpcomingExpanded = false
+
+    private var progress: OrganizationJobProgress? { appState.organizationProgress }
+    private var upcomingFiles: [String] {
+        Array((progress?.upcomingFileNames ?? []).prefix(maximumItems))
+    }
+
+    private var pendingFilesToggleHint: String {
+        appState.settings.localized(
+            isUpcomingExpanded ? "Hide Pending Files" : "Show 10 Pending Files"
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if showsActivitySymbol {
+                        IndexingActivitySymbol(
+                            systemName: phaseIcon,
+                            isAnimating: appState.organizationState.isAnimating,
+                            size: 14,
+                            weight: .semibold
+                        )
+                        .foregroundStyle(phaseColor)
+                    }
+                    Text(LocalizedStringKey(appState.organizationStatusTitle))
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                    Spacer(minLength: 0)
+                    if let progress {
+                        Text("\(progress.completed)/\(progress.total)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    if showsControls { controls }
+                }
+                Text(appState.organizationStatusSubtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            if let progress {
+                HStack(spacing: 8) {
+                    ProgressView(value: progress.fractionCompleted)
+                        .tint(phaseColor)
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            isUpcomingExpanded.toggle()
+                        }
+                    } label: {
+                        Image(systemName: isUpcomingExpanded ? "chevron.up" : "chevron.down")
+                            .accessibilityLabel(Text(verbatim: pendingFilesToggleHint))
+                    }
+                    .buttonStyle(InlineActionButtonStyle())
+                    .fixedSize()
+                    .help(pendingFilesToggleHint)
+                }
+            }
+
+            if isUpcomingExpanded {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Up Next")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    if upcomingFiles.isEmpty {
+                        Text("No pending files")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(upcomingFiles.enumerated()), id: \.offset) { _, fileName in
+                            Label(fileName, systemImage: "doc")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Organization Queue")
+    }
+
+    @ViewBuilder
+    private var controls: some View {
+        switch appState.organizationState {
+        case .running:
+            HStack(spacing: 5) {
+                Button(action: appState.pauseOrganization) {
+                    Image(systemName: "pause.fill")
+                        .frame(width: 12, height: 12)
+                }
+                .buttonStyle(.bordered)
+                .help("Pause Organization")
+                Button(role: .destructive, action: appState.stopOrganization) {
+                    Image(systemName: "stop.fill")
+                        .frame(width: 12, height: 12)
+                }
+                .buttonStyle(.bordered)
+                .help("Stop Organization")
+            }
+            .controlSize(.small)
+        case .paused:
+            HStack(spacing: 5) {
+                Button(action: appState.resumeOrganization) {
+                    Image(systemName: "play.fill")
+                        .frame(width: 12, height: 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(FileNestTheme.accentFill)
+                .help("Resume Organization")
+                Button(role: .destructive, action: appState.stopOrganization) {
+                    Image(systemName: "stop.fill")
+                        .frame(width: 12, height: 12)
+                }
+                .buttonStyle(.bordered)
+                .help("Stop Organization")
+            }
+            .controlSize(.small)
+        default:
+            EmptyView()
+        }
+    }
+
+    private var phaseIcon: String {
+        switch progress?.phase {
+        case .waitingForStability: return "clock.arrow.circlepath"
+        case .indexing: return "doc.text.magnifyingglass"
+        case .organizing: return "tray.and.arrow.down"
+        case .paused: return "pause.circle.fill"
+        case .stopping, .stopped: return "stop.circle"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .completed: return "checkmark.circle.fill"
+        default: return "arrow.triangle.2.circlepath"
+        }
+    }
+
+    private var phaseColor: Color {
+        switch appState.organizationState {
+        case .failed: return FileNestTheme.warning
+        case .completed: return FileNestTheme.success
+        case .paused, .stopped: return .secondary
+        default: return FileNestTheme.accentBlue
         }
     }
 }
@@ -567,7 +863,7 @@ struct GradientButtonStyle: ButtonStyle {
             .frame(height: compact ? 34 : 38)
             .background(FileNestTheme.primaryGradient.opacity(configuration.isPressed ? 0.82 : 1))
             .clipShape(RoundedRectangle(cornerRadius: compact ? 8 : 10, style: .continuous))
-            .shadow(color: FileNestTheme.accent.opacity(configuration.isPressed ? 0.08 : 0.18), radius: 8, y: 3)
+            .shadow(color: FileNestTheme.accentFill.opacity(configuration.isPressed ? 0.08 : 0.18), radius: 8, y: 3)
     }
 }
 
@@ -590,16 +886,54 @@ struct QuietButtonStyle: ButtonStyle {
     }
 }
 
+struct InlineActionButtonStyle: ButtonStyle {
+    var tint = FileNestTheme.accent
+    var fillsWidth = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        InlineActionButtonStyleBody(
+            configuration: configuration,
+            tint: tint,
+            fillsWidth: fillsWidth
+        )
+    }
+}
+
+private struct InlineActionButtonStyleBody: View {
+    let configuration: ButtonStyle.Configuration
+    let tint: Color
+    let fillsWidth: Bool
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    var body: some View {
+        configuration.label
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(isEnabled ? tint : Color.secondary.opacity(0.46))
+            .padding(.horizontal, 6)
+            .frame(height: 24)
+            .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
+            .background(
+                isHovered && isEnabled ? FileNestTheme.selection : Color.clear,
+                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+            )
+            .contentShape(Rectangle())
+            .opacity(configuration.isPressed ? 0.68 : 1)
+            .onHover { hovering in
+                isHovered = hovering
+                (hovering && isEnabled ? NSCursor.pointingHand : NSCursor.arrow).set()
+            }
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+    }
+}
+
 struct FileIconView: View {
     let file: FileRecord
     var size: CGFloat = 38
 
     private var image: NSImage {
-        if FileManager.default.fileExists(atPath: file.path) {
-            return NSWorkspace.shared.icon(forFile: file.path)
-        }
-        let contentType = UTType(filenameExtension: file.ext.isEmpty ? "txt" : file.ext) ?? .data
-        return NSWorkspace.shared.icon(for: contentType)
+        FileIconCache.shared.image(for: file)
     }
 
     var body: some View {
@@ -609,6 +943,28 @@ struct FileIconView: View {
             .scaledToFit()
             .frame(width: size, height: size)
             .accessibilityHidden(true)
+    }
+}
+
+/// Finder icon lookup crosses into AppKit and may touch the file system. List rows
+/// are rebuilt often while filtering or selecting, so cache the immutable icon per
+/// path/type rather than performing that work in every `body` evaluation.
+private final class FileIconCache {
+    static let shared = FileIconCache()
+    private let cache = NSCache<NSString, NSImage>()
+
+    func image(for file: FileRecord) -> NSImage {
+        let key = "\(file.path)|\(file.ext)" as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        let image: NSImage
+        if FileManager.default.fileExists(atPath: file.path) {
+            image = NSWorkspace.shared.icon(forFile: file.path)
+        } else {
+            let contentType = UTType(filenameExtension: file.ext.isEmpty ? "txt" : file.ext) ?? .data
+            image = NSWorkspace.shared.icon(for: contentType)
+        }
+        cache.setObject(image, forKey: key)
+        return image
     }
 }
 

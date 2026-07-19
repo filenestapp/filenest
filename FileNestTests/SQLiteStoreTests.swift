@@ -30,6 +30,67 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(try store.file(id: firstId)?.title, "Updated")
     }
 
+    func testContentHashUpdatePreservesExistingFileMetadata() throws {
+        let id = try store.upsertFile(makeFile(path: filePath("report.pdf"), title: "Quarterly report"))
+
+        try store.updateFileContentHash(id: id, contentHash: "verified-hash")
+
+        let file = try XCTUnwrap(store.file(id: id))
+        XCTAssertEqual(file.contentHash, "verified-hash")
+        XCTAssertEqual(file.title, "Quarterly report")
+        XCTAssertNil(file.indexedAt)
+    }
+
+    func testDuplicateGroupsRetainOldestFileAndCountReclaimableBytes() {
+        var retained = makeFile(path: filePath("original.pdf"), title: "Original")
+        retained.id = 1
+        retained.size = 20
+        retained.contentHash = "same"
+        retained.discoveredAt = Date(timeIntervalSince1970: 100)
+        var duplicate = makeFile(path: filePath("copy.pdf"), title: "Copy")
+        duplicate.id = 2
+        duplicate.size = 20
+        duplicate.contentHash = "same"
+        duplicate.discoveredAt = Date(timeIntervalSince1970: 200)
+        var unique = makeFile(path: filePath("unique.pdf"), title: "Unique")
+        unique.contentHash = "different"
+
+        let groups = DuplicateFileGroup.groups(from: [duplicate, unique, retained])
+
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups[0].retainedFile.path, retained.path)
+        XCTAssertEqual(groups[0].duplicateFiles.map(\.path), [duplicate.path])
+        XCTAssertEqual(groups[0].reclaimableBytes, duplicate.size)
+    }
+
+    func testDuplicateLinkUsesAnIndexedOriginalAndKeepsDuplicateUnindexed() throws {
+        var original = makeFile(path: filePath("original.pdf"), title: "Original")
+        original.contentHash = "same-content"
+        original.indexedAt = Date()
+        let originalID = try store.upsertFile(original)
+        var duplicate = makeFile(path: filePath("duplicate.pdf"), title: "Duplicate")
+        duplicate.contentHash = "same-content"
+        let duplicateID = try store.upsertFile(duplicate)
+
+        let resolvedOriginal = try store.indexedOriginal(
+            matchingContentHash: "same-content",
+            excludingFileID: duplicateID
+        )
+        XCTAssertEqual(resolvedOriginal?.id, originalID)
+
+        try store.markFileAsDuplicate(
+            id: duplicateID,
+            originalFileID: originalID,
+            contentHash: "same-content"
+        )
+
+        let linkedDuplicate = try XCTUnwrap(store.file(id: duplicateID))
+        XCTAssertEqual(linkedDuplicate.duplicateOfFileID, originalID)
+        XCTAssertNotNil(linkedDuplicate.duplicateDetectedAt)
+        XCTAssertNil(linkedDuplicate.indexedAt)
+        XCTAssertEqual(linkedDuplicate.contentHash, "same-content")
+    }
+
     func testStoreStartupRemovesUnreferencedParentRows() throws {
         let databasePath = temporaryDirectory.appendingPathComponent("test.sqlite").path
         let fileID = try store.upsertFile(makeFile(path: filePath("parents.txt"), title: "Parents"))
@@ -49,6 +110,10 @@ final class SQLiteStoreTests: XCTestCase {
                     ) VALUES (?, 0, 'child', 'child', 0)
                     """,
                 arguments: [fileID]
+            )
+            try db.execute(
+                sql: "DELETE FROM schema_migrations WHERE name = ?",
+                arguments: ["document_parents.orphan_cleanup.v1"]
             )
         }
 
@@ -72,6 +137,18 @@ final class SQLiteStoreTests: XCTestCase {
         let recordsByPath = try store.files(atPaths: [requestedPath])
 
         XCTAssertEqual(recordsByPath[requestedPath]?.id, id)
+        XCTAssertEqual(try store.file(path: requestedPath)?.id, id)
+    }
+
+    func testSourceDirectoryLookupHandlesMacOSTemporaryPathAliases() throws {
+        let storedDirectory = "/private/var/folders/example/source"
+        var file = makeFile(path: "\(storedDirectory)/report.txt", title: "Report")
+        file.sourceDir = storedDirectory
+        let id = try store.upsertFile(file)
+
+        let records = try store.libraryFiles(inSourceDirectory: "/var/folders/example/source")
+
+        XCTAssertEqual(records.map(\.id), [id])
     }
 
     func testFileUpsertPreservesOrganizedTimestamp() throws {
@@ -132,6 +209,43 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(file.note, "Polaris release plan")
         XCTAssertNil(file.indexedAt)
         XCTAssertEqual(try store.files(matching: "Polaris").map(\.id), [id])
+    }
+
+    func testShortNoteTokenUsesMetadataIndex() throws {
+        let id = try store.upsertFile(makeFile(path: filePath("brief.pdf"), title: "Brief"))
+        try store.updateFileNote(id: id, note: "AI roadmap")
+
+        XCTAssertEqual(try store.files(matching: "AI").map(\.id), [id])
+    }
+
+    func testCreationDateBackfillIsBoundedAndPersistent() throws {
+        let firstID = try store.upsertFile(makeFile(path: filePath("first.txt"), title: "First"))
+        _ = try store.upsertFile(makeFile(path: filePath("second.txt"), title: "Second"))
+        _ = try store.upsertFile(makeFile(path: filePath("third.txt"), title: "Third"))
+
+        let candidates = try store.fileCreationDateBackfillCandidates(limit: 2)
+        XCTAssertEqual(candidates.count, 2)
+        XCTAssertFalse(candidates.contains(where: { $0.fileID == firstID }))
+
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+        try store.saveFileCreationDates([try XCTUnwrap(candidates.first?.fileID): timestamp])
+        XCTAssertEqual(try store.fileCreationDates()[candidates[0].path], timestamp)
+        XCTAssertFalse(try store.fileCreationDateBackfillCandidates(limit: 3).contains {
+            $0.fileID == candidates[0].fileID
+        })
+    }
+
+    func testStructuredLibraryFilterHonorsCandidateLimit() throws {
+        for index in 0..<5 {
+            _ = try store.upsertFile(makeFile(
+                path: filePath("candidate-\(index).pdf"),
+                title: "Candidate \(index)"
+            ))
+        }
+
+        var filter = LibraryFileMetadataFilter()
+        filter.fileExtensions = ["pdf"]
+        XCTAssertEqual(try store.libraryFiles(matching: filter, limit: 2).count, 2)
     }
 
     func testEditingNoteDoesNotInvalidateExistingDocumentIndex() throws {
@@ -209,6 +323,44 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(try store.files(matching: "Aurora").map(\.id), [id])
     }
 
+    func testCombinedFileSearchPreservesShortTermRecallAlongsideFTSMatches() throws {
+        var invoice = makeFile(path: filePath("invoice.txt"), title: "Invoice")
+        invoice.contentText = "Quarterly invoice reconciliation"
+        let invoiceID = try store.upsertFile(invoice)
+        let quarterID = try store.upsertFile(makeFile(
+            path: filePath("q4-summary.txt"),
+            title: "Q4 summary"
+        ))
+
+        let matches = try store.files(matchingAny: ["invoice", "Q4"], limit: 20)
+
+        XCTAssertEqual(Set(matches.compactMap(\.id)), Set([invoiceID, quarterID]))
+    }
+
+    func testRecentlyOrganizedFilesUsesRootLimitAndMetadataProjection() throws {
+        let managedRoot = temporaryDirectory.appendingPathComponent("managed", isDirectory: true)
+        var older = makeFile(
+            path: managedRoot.appendingPathComponent("older.txt").path,
+            title: "Older"
+        )
+        older.organizedAt = Date(timeIntervalSince1970: 100)
+        var newer = makeFile(
+            path: managedRoot.appendingPathComponent("newer.txt").path,
+            title: "Newer"
+        )
+        newer.organizedAt = Date(timeIntervalSince1970: 200)
+        var outside = makeFile(path: filePath("outside.txt"), title: "Outside")
+        outside.organizedAt = Date(timeIntervalSince1970: 300)
+        _ = try store.upsertFile(older)
+        _ = try store.upsertFile(newer)
+        _ = try store.upsertFile(outside)
+
+        let recent = try store.recentlyOrganizedFiles(rootPath: managedRoot.path, limit: 1)
+
+        XCTAssertEqual(recent.map(\.name), ["newer.txt"])
+        XCTAssertNil(recent.first?.contentText)
+    }
+
     func testDocumentChunksRoundTripPreservesStructureAndOrder() throws {
         let fileID = try store.upsertFile(makeFile(path: filePath("manual.pdf"), title: "Manual"))
         try store.dbPool.write { db in
@@ -236,6 +388,10 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(chunks.last?.pageStart, 8)
         XCTAssertEqual(chunks.last?.pageEnd, 9)
         XCTAssertEqual(chunks.last?.contextualText, "Manual › Results\nA result table")
+
+        let secondPage = try store.documentChunks(fileID: fileID, limit: 1, offset: 1)
+        XCTAssertEqual(secondPage.map(\.index), [2])
+        XCTAssertEqual(secondPage.first?.text, "A result table")
     }
 
     func testUpsertPreservesExistingNoteAndOrganizationSubfolder() throws {
@@ -450,6 +606,59 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(stored.totalResponseDuration), 1.75, accuracy: 0.001)
         XCTAssertEqual(stored.responseProvider, "ollama")
         XCTAssertEqual(stored.responseModel, "qwen3.5:9b")
+    }
+
+    func testChatHistoryPagesLoadNewestMessagesFirstWithoutReadingWholeSession() throws {
+        let session = try store.createChatSession()
+        let sessionID = try XCTUnwrap(session.id)
+        for index in 0..<95 {
+            _ = try store.addChatMessage(ChatMessage(
+                id: nil,
+                role: ChatRole.user.rawValue,
+                content: "Message \(index)",
+                ts: Date(timeIntervalSince1970: TimeInterval(index)),
+                relatedFileIds: nil,
+                sessionId: sessionID
+            ))
+        }
+
+        let latest = try store.chatMessagePage(sessionId: sessionID, limit: 40)
+        XCTAssertEqual(latest.messages.first?.content, "Message 55")
+        XCTAssertEqual(latest.messages.last?.content, "Message 94")
+        XCTAssertTrue(latest.hasEarlier)
+
+        let earlier = try store.chatMessagePage(
+            sessionId: sessionID,
+            beforeID: try XCTUnwrap(latest.messages.first?.id),
+            limit: 40
+        )
+        XCTAssertEqual(earlier.messages.first?.content, "Message 15")
+        XCTAssertEqual(earlier.messages.last?.content, "Message 54")
+        XCTAssertTrue(earlier.hasEarlier)
+    }
+
+    func testOneTimeDataMigrationsDoNotRescanOnEveryStoreOpen() throws {
+        let databasePath = temporaryDirectory.appendingPathComponent("test.sqlite").path
+        try store.dbPool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO files(
+                        path, name, ext, size, mtime, category, source_dir, discovered_at
+                    ) VALUES (?, 'late.txt', 'txt', 1, ?, 'Documents', ?, NULL)
+                    """,
+                arguments: [filePath("late.txt"), Date(), temporaryDirectory.path]
+            )
+        }
+
+        store = SQLiteStore(path: databasePath)
+
+        let discoveredAt = try store.dbPool.read { db in
+            try Date.fetchOne(db, sql: "SELECT discovered_at FROM files WHERE name = 'late.txt'")
+        }
+        XCTAssertNil(discoveredAt)
+        XCTAssertEqual(try store.dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM schema_migrations WHERE name = 'files.discovered_at.v1'")
+        }, 1)
     }
 
     func testLegacyDatabaseLocationMigrationCheckpointsValidatesAndMovesDatabase() throws {

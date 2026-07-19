@@ -8,6 +8,7 @@ enum IndexContentChangeCategory: String, CaseIterable, Identifiable, Sendable {
     case documentParsing
     case ocr
     case indexingScope
+    case mediaTranscription
     case serviceEndpoint
 
     var id: String { rawValue }
@@ -18,6 +19,7 @@ enum IndexContentChangeCategory: String, CaseIterable, Identifiable, Sendable {
         case .documentParsing: return "Document Parsing"
         case .ocr: return "OCR engine"
         case .indexingScope: return "Indexing Scope"
+        case .mediaTranscription: return "Media transcription"
         case .serviceEndpoint: return "Service Endpoints"
         }
     }
@@ -28,6 +30,7 @@ enum IndexContentChangeCategory: String, CaseIterable, Identifiable, Sendable {
         case .documentParsing: return "The Docling setting or parser version changed"
         case .ocr: return "The OCR engine, source, format, or model changed"
         case .indexingScope: return "Automatic vectorization or indexed file types changed"
+        case .mediaTranscription: return "Audio or video transcription settings, model, or runtime changed"
         case .serviceEndpoint: return "An Embedding or OCR service endpoint changed"
         }
     }
@@ -38,6 +41,7 @@ enum IndexContentChangeCategory: String, CaseIterable, Identifiable, Sendable {
         case .documentParsing: return "doc.text.magnifyingglass"
         case .ocr: return "text.viewfinder"
         case .indexingScope: return "line.3.horizontal.decrease.circle"
+        case .mediaTranscription: return "waveform"
         case .serviceEndpoint: return "network"
         }
     }
@@ -92,6 +96,8 @@ final class AppSettings: ObservableObject {
     @Published var rerankerModel: String = "Qwen/Qwen3-Reranker-0.6B"
     @Published var rerankerReuseChatCredentials: Bool = true
     @Published var doclingEnabled: Bool = true
+    @Published var mediaTranscriptionEnabled: Bool = false
+    @Published var whisperModel: String = WhisperModelCatalog.defaultModel
     @Published var embeddingSource: String = EmbeddingSource.ollama.rawValue
     @Published var ollamaEmbeddingModel: String = OllamaModelRecommendation.defaultEmbeddingModel
     @Published var cloudEmbeddingBaseURL: String = "https://api.openai.com/v1"
@@ -285,6 +291,8 @@ final class AppSettings: ObservableObject {
         rerankerModel = load(.rerankerModel) ?? "Qwen/Qwen3-Reranker-0.6B"
         rerankerReuseChatCredentials = load(.rerankerReuseChatCredentials) != "0"
         doclingEnabled = load(.doclingEnabled) != "0"
+        mediaTranscriptionEnabled = load(.mediaTranscriptionEnabled) == "1"
+        whisperModel = WhisperModelCatalog.normalizedModel(load(.whisperModel))
         embeddingSource = EmbeddingSource(rawValue: load(.embeddingSource) ?? "")?.rawValue
             ?? EmbeddingSource.ollama.rawValue
         ollamaEmbeddingModel = load(.ollamaEmbeddingModel)
@@ -489,6 +497,20 @@ final class AppSettings: ObservableObject {
         doclingEnabled = value
         save(.doclingEnabled, value ? "1" : "0")
     }
+    func setMediaTranscriptionEnabled(_ value: Bool) {
+        mediaTranscriptionEnabled = value
+        save(.mediaTranscriptionEnabled, value ? "1" : "0")
+        if value {
+            setEnabledExtensions(Self.normalizedExtensions(
+                enabledExtensions + Self.mediaTranscriptionExtensions.sorted()
+            ))
+        }
+    }
+    func setWhisperModel(_ value: String) {
+        let normalized = WhisperModelCatalog.normalizedModel(value)
+        whisperModel = normalized
+        save(.whisperModel, normalized)
+    }
     func setEmbeddingSource(_ value: String) {
         let normalized = EmbeddingSource(rawValue: value)?.rawValue ?? EmbeddingSource.ollama.rawValue
         embeddingSource = normalized
@@ -546,7 +568,15 @@ final class AppSettings: ObservableObject {
     }
 
     func shouldVectorize(extension fileExtension: String) -> Bool {
-        autoVectorize && vectorizeExtensions.contains(fileExtension.lowercased())
+        guard autoVectorize else { return false }
+        let normalized = fileExtension.lowercased()
+        return vectorizeExtensions.contains(normalized)
+            || (mediaTranscriptionEnabled && Self.mediaTranscriptionExtensions.contains(normalized))
+    }
+
+    func shouldTranscribeMedia(extension fileExtension: String) -> Bool {
+        mediaTranscriptionEnabled
+            && Self.mediaTranscriptionExtensions.contains(fileExtension.lowercased())
     }
     func setAppLanguage(_ v: String) {
         let normalized = AppLanguage(rawValue: v)?.rawValue ?? AppLanguage.system.rawValue
@@ -627,6 +657,8 @@ final class AppSettings: ObservableObject {
         case rerankerReuseChatCredentials = "reranker_reuse_chat_credentials"
         case chunkDefaults600Migration = "chunk_defaults_600_80_migration_v1"
         case doclingEnabled = "docling_enabled"
+        case mediaTranscriptionEnabled = "media_transcription_enabled"
+        case whisperModel = "whisper_model"
         case embeddingSource = "embedding_source"
         case ollamaEmbeddingModel = "ollama_embedding_model"
         case cloudEmbeddingBaseURL = "cloud_embedding_base_url"
@@ -709,7 +741,8 @@ final class AppSettings: ObservableObject {
 
     private let defaultExts = ["pdf","doc","docx","docm","txt","md","rtf","xls","xlsx","xlsm","ppt","pptx","ppsx","csv","epub","odt","ods","odp","pages","numbers","key",
                                "png","jpg","jpeg","gif","heic","tiff","svg","psd","sketch","webp",
-                               "mp4","mov","mkv","avi","m4v","mp3","wav","aac","flac","m4a",
+                               "mp4","mov","mkv","avi","m4v","webm","mpeg","mpg",
+                               "mp3","wav","aac","flac","m4a","ogg","opus","aiff","aif","wma",
                                "swift","py","js","ts","tsx","jsx","java","kt","go","rs","c","cpp","h",
                                "json","yaml","yml","html","css","sql","zip","rar","7z","tar","gz","dmg"]
 
@@ -722,6 +755,17 @@ final class AppSettings: ObservableObject {
     static let defaultVectorizeExtensions = documentVectorizeExtensions + [
         "png", "jpg", "jpeg", "heic", "tiff", "gif", "webp"
     ]
+
+    static let audioTranscriptionExtensions: Set<String> = [
+        "mp3", "wav", "aac", "flac", "m4a", "ogg", "opus", "aiff", "aif", "wma"
+    ]
+
+    static let videoTranscriptionExtensions: Set<String> = [
+        "mp4", "mov", "mkv", "avi", "m4v", "webm", "mpeg", "mpg"
+    ]
+
+    static let mediaTranscriptionExtensions = audioTranscriptionExtensions
+        .union(videoTranscriptionExtensions)
 
     static func defaultWatchDirectories(fileManager: FileManager = .default) -> [String] {
         let home = fileManager.homeDirectoryForCurrentUser
@@ -823,6 +867,13 @@ final class AppSettings: ObservableObject {
         cloudOCRReuseChatCredentials ? cloudAPIKey : cloudOCRAPIKey
     }
 
+    /// Ollama is required when either generation or embedding is configured to use it.
+    /// Local OCR does not force Ollama to run because PaddleOCR is the primary local engine.
+    var requiresOllamaService: Bool {
+        llmChoice == LLMChoice.ollama.rawValue
+            || embeddingSource == EmbeddingSource.ollama.rawValue
+    }
+
     var embeddingConfigurationSignature: String {
         [embeddingSource, ollamaHost, ollamaEmbeddingModel, effectiveCloudEmbeddingBaseURL,
          cloudEmbeddingModel, effectiveCloudEmbeddingAPIKey].joined(separator: "|")
@@ -879,6 +930,9 @@ final class AppSettings: ObservableObject {
         let doclingConfiguration = doclingEnabled
             ? "docling:\(doclingVersion)"
             : "disabled"
+        let mediaTranscriptionConfiguration = mediaTranscriptionEnabled
+            ? "whisper:\(WhisperServiceManager.installedPackageVersion ?? WhisperServiceManager.pinnedVersion):\(whisperModel)"
+            : "disabled"
         let embeddingEndpointConfiguration: String
         switch EmbeddingSource(rawValue: embeddingSource) ?? .ollama {
         case .ollama:
@@ -917,7 +971,7 @@ final class AppSettings: ObservableObject {
                 String(vectorRetrievalChunkTokens), String(vectorChunkOverlap),
             ]),
             .documentParsing: Self.signatureDigest([
-                "document-parsing-v1", doclingConfiguration,
+                "document-parsing-v3", doclingConfiguration,
             ]),
             .ocr: Self.signatureDigest([
                 // v3: large and panoramic raster images use lossless overlapping tiles with
@@ -925,9 +979,12 @@ final class AppSettings: ObservableObject {
                 "ocr-v3-tiled", ocrSource, ocrProviderConfiguration.joined(separator: ":"),
             ]),
             .indexingScope: Self.signatureDigest([
-                "indexing-scope-v1",
+                "indexing-scope-v2",
                 autoVectorize ? "1" : "0",
                 vectorizeExtensions.sorted().joined(separator: ","),
+            ]),
+            .mediaTranscription: Self.signatureDigest([
+                "media-transcription-v1", mediaTranscriptionConfiguration,
             ]),
             .serviceEndpoint: Self.signatureDigest([
                 "service-endpoint-v1",

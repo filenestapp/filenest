@@ -8,6 +8,7 @@ struct OnboardingView: View {
         case localRuntime
         case localModels
         case cloudAPI
+        case mediaRuntime
         case finish
 
         var title: String {
@@ -17,6 +18,7 @@ struct OnboardingView: View {
             case .localRuntime: return "Local Components"
             case .localModels: return "Model Downloads"
             case .cloudAPI: return "Cloud API"
+            case .mediaRuntime: return "Audio & Video"
             case .finish: return "Get Started"
             }
         }
@@ -28,6 +30,7 @@ struct OnboardingView: View {
             case .localRuntime: return "shippingbox"
             case .localModels: return "square.stack.3d.up"
             case .cloudAPI: return "cloud"
+            case .mediaRuntime: return "waveform"
             case .finish: return "checkmark.circle"
             }
         }
@@ -66,9 +69,12 @@ struct OnboardingView: View {
     }
 
     private var steps: [Step] {
-        usesCloud
-            ? [.welcome, .basics, .cloudAPI, .finish]
-            : [.welcome, .basics, .localRuntime, .localModels, .finish]
+        var result: [Step] = usesCloud
+            ? [.welcome, .basics, .cloudAPI]
+            : [.welcome, .basics, .localRuntime, .localModels]
+        if appState.settings.mediaTranscriptionEnabled { result.append(.mediaRuntime) }
+        result.append(.finish)
+        return result
     }
 
     private var currentIndex: Int {
@@ -113,6 +119,8 @@ struct OnboardingView: View {
             async let ollamaRefresh: Void = appState.ollama.refresh(host: appState.settings.ollamaHost)
             async let paddleRefresh: Void = appState.paddleOCR.refresh()
             appState.docling.refresh()
+            appState.ffmpeg.refresh()
+            appState.whisper.refresh()
             _ = await (ollamaRefresh, paddleRefresh)
         }
         .onChange(of: appState.settings.watchDirs) { _ in
@@ -224,6 +232,7 @@ struct OnboardingView: View {
                 case .localRuntime: localRuntimeStep
                 case .localModels: localModelsStep
                 case .cloudAPI: cloudAPIStep
+                case .mediaRuntime: mediaRuntimeStep
                 case .finish: finishStep
                 }
             }
@@ -329,6 +338,33 @@ struct OnboardingView: View {
                 .padding(12)
             }
 
+            OnboardingSection(title: "Audio & Video") {
+                HStack(spacing: 12) {
+                    Image(systemName: "waveform.badge.mic")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(FileNestTheme.accent)
+                        .frame(width: 38, height: 38)
+                        .background(FileNestTheme.accent.opacity(0.1),
+                                    in: RoundedRectangle(cornerRadius: 9))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Transcribe audio and video for search and chat")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Adds an FFmpeg and OpenAI Whisper setup step, then indexes time-coded transcripts for RAG.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { appState.settings.mediaTranscriptionEnabled },
+                        set: { appState.settings.setMediaTranscriptionEnabled($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.checkbox)
+                }
+                .padding(.horizontal, 14)
+                .frame(minHeight: 62)
+            }
+
             OnboardingSection(title: "Watched Folders") {
                 VStack(spacing: 0) {
                     if appState.settings.watchDirs.isEmpty {
@@ -363,14 +399,12 @@ struct OnboardingView: View {
                         } label: {
                             Label("Add Folder…", systemImage: "plus")
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(FileNestTheme.accent)
+                        .buttonStyle(InlineActionButtonStyle())
 
                         Spacer()
 
                         Button("Restore Default Folders") { restoreDefaultWatchDirectories() }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
+                            .buttonStyle(InlineActionButtonStyle(tint: .secondary))
                     }
                     .font(.system(size: 11, weight: .medium))
                     .padding(.horizontal, 14)
@@ -425,6 +459,81 @@ struct OnboardingView: View {
             OnboardingNotice(
                 icon: "lock.shield",
                 text: "Components are installed in an isolated FileNest user environment without changing system Python or requiring administrator access.",
+                color: FileNestTheme.success
+            )
+        }
+    }
+
+    private var mediaRuntimeStep: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            OnboardingStepHeader(
+                title: "Set Up Audio & Video Transcription",
+                subtitle: "Install the local decoder and OpenAI Whisper model used to turn media into searchable transcripts.",
+                icon: "waveform"
+            )
+
+            SystemResourceStrip(
+                memory: SystemProfile.memoryLabel,
+                disk: SystemProfile.availableDiskLabel,
+                architecture: SystemProfile.architectureLabel
+            )
+
+            OnboardingSection(title: "Local Components") {
+                VStack(spacing: 0) {
+                    DependencyRow(
+                        title: "FFmpeg",
+                        detail: ffmpegDetail,
+                        icon: "film.stack",
+                        ready: appState.ffmpeg.executablePath != nil,
+                        busy: appState.ffmpeg.isInstalling,
+                        progress: appState.ffmpeg.installProgress,
+                        buttonTitle: "Install FFmpeg"
+                    ) { Task { await appState.ffmpeg.install() } }
+                    Divider().padding(.leading, 70)
+                    DependencyRow(
+                        title: "OpenAI Whisper",
+                        detail: whisperRuntimeDetail,
+                        icon: "waveform.badge.mic",
+                        ready: appState.whisper.installedVersion != nil,
+                        busy: appState.whisper.isInstalling && appState.whisper.installingModel == nil,
+                        progress: appState.whisper.installProgress,
+                        buttonTitle: "Install Whisper"
+                    ) { Task { await appState.whisper.installRuntime() } }
+                }
+            }
+
+            OnboardingSection(title: "Transcription Model") {
+                VStack(spacing: 0) {
+                    OnboardingFormRow(label: "Model") {
+                        Picker("", selection: Binding(
+                            get: { appState.settings.whisperModel },
+                            set: { appState.settings.setWhisperModel($0) }
+                        )) {
+                            ForEach(WhisperModelCatalog.models) { model in
+                                Text("\(model.id) · \(model.parameters) · \(model.approximateSize)")
+                                    .tag(model.id)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 310)
+                    }
+                    Divider().padding(.leading, 132)
+                    let selected = WhisperModelCatalog.option(appState.settings.whisperModel)
+                    DependencyRow(
+                        title: "Whisper Model",
+                        detail: "\(selected.id) · \(selected.parameters) · \(selected.approximateSize) · \(appState.settings.localized(selected.detail))",
+                        icon: "arrow.down.circle",
+                        ready: appState.whisper.isModelInstalled(selected.id),
+                        busy: appState.whisper.installingModel == selected.id,
+                        progress: appState.whisper.installProgress,
+                        buttonTitle: "Download Model"
+                    ) { Task { await appState.whisper.downloadModel(selected.id) } }
+                }
+            }
+
+            OnboardingNotice(
+                icon: "lock.shield",
+                text: "Media decoding and transcription run locally. Only the resulting text chunks follow your configured Embedding provider.",
                 color: FileNestTheme.success
             )
         }
@@ -750,8 +859,7 @@ struct OnboardingView: View {
     private var navigation: some View {
         HStack {
             Button("Set Up Later") { finishOnboarding(organizeExisting: false) }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .buttonStyle(InlineActionButtonStyle(tint: .secondary))
             Spacer()
             if currentIndex > 0 {
                 Button("Back") { navigate(to: steps[currentIndex - 1]) }
@@ -910,6 +1018,20 @@ struct OnboardingView: View {
         case .unavailable: return "Primary local OCR engine; GLM-OCR is used automatically when unavailable"
         case .failed(let message): return message
         }
+    }
+
+    private var ffmpegDetail: String {
+        if appState.ffmpeg.isInstalling { return appState.ffmpeg.installStatus }
+        if let version = appState.ffmpeg.version { return "FFmpeg \(version) is ready" }
+        return "Required to decode audio tracks before local transcription"
+    }
+
+    private var whisperRuntimeDetail: String {
+        if appState.whisper.isInstalling, appState.whisper.installingModel == nil {
+            return appState.whisper.installStatus
+        }
+        if let version = appState.whisper.installedVersion { return "OpenAI Whisper \(version) is ready" }
+        return "Installed in an isolated FileNest Python environment"
     }
 
     private func applySelectedModels() {
@@ -1363,6 +1485,7 @@ private struct WatchDirectoryRow: View {
 }
 
 private struct DependencyRow: View {
+    @EnvironmentObject private var appState: AppState
     let title: String
     let detail: String
     let icon: String
@@ -1390,7 +1513,7 @@ private struct DependencyRow: View {
                             .foregroundStyle(FileNestTheme.success)
                     }
                 }
-                Text(LocalizedStringKey(detail))
+                Text(verbatim: appState.settings.localizedRuntimeMessage(detail))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)

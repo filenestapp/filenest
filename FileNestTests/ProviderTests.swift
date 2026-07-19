@@ -616,6 +616,10 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(body["model"] as? String, "embed-model")
         XCTAssertEqual(body["input"] as? [String], ["document text"])
         XCTAssertEqual(body["truncate"] as? Bool, true)
+        XCTAssertEqual(
+            (body["options"] as? [String: Any])?["num_ctx"] as? Int,
+            OllamaEmbeddingProvider.defaultContextLength
+        )
     }
 
     func testOllamaEmbeddingSendsMultipleChunksInOneRequest() async throws {

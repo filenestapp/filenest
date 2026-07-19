@@ -4,12 +4,12 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import type { AppStatistics, ChatMessage, ChatSession, DocumentChunk, FileCategory, FileRecord, Rule, Settings } from '../shared/types'
+import type { AppStatistics, ChatMessage, ChatRelatedFileMatch, ChatSession, DocumentChunk, FileCategory, FileRecord, Rule, Settings } from '../shared/types'
 import { CANONICAL_TOKENIZER_PROFILE, CANONICAL_TOKENIZER_VERSION, estimateCanonicalTokens, GENERATION_FALLBACK_PROFILE } from './token-counter'
 import { CATEGORY_FOLDERS, createDefaultSettings } from './defaults'
 
 type SqlValue = string | number | Uint8Array | null
-const SECRET_SETTING_KEYS = new Set<keyof Settings>(['cloudApiKey', 'cloudEmbeddingApiKey', 'cloudOcrApiKey'])
+const SECRET_SETTING_KEYS = new Set<keyof Settings>(['cloudApiKey', 'cloudEmbeddingApiKey', 'cloudOcrApiKey', 'rerankerApiKey'])
 const SECRET_PREFIX = 'filenest-secure:v1:'
 
 export interface EmbeddingRow {
@@ -18,6 +18,19 @@ export interface EmbeddingRow {
   vector: Float32Array
   model: string
   chunkText: string
+}
+
+export interface RAGSearchTrace {
+  query: string
+  semanticQuery: string
+  lexicalCandidates: number
+  semanticCandidates: number
+  entityCandidates: number
+  fusedCandidates: number
+  returnedResults: number
+  semanticThreshold: number | null
+  reranker: string | null
+  durationMs: number
 }
 
 export class FileNestDatabase {
@@ -46,7 +59,8 @@ export class FileNestDatabase {
         ext TEXT NOT NULL, size INTEGER NOT NULL, mtime TEXT NOT NULL, category TEXT NOT NULL,
         source_dir TEXT NOT NULL, indexed_at TEXT, content_hash TEXT, title TEXT, content_text TEXT,
         discovered_at TEXT NOT NULL, organized_at TEXT, note TEXT, organization_subfolder TEXT,
-        is_directory INTEGER NOT NULL DEFAULT 0, index_signature TEXT
+        is_directory INTEGER NOT NULL DEFAULT 0, index_signature TEXT, creation_date TEXT,
+        duplicate_of_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL, duplicate_detected_at TEXT
       );
       CREATE TABLE IF NOT EXISTS embeddings (
         id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -57,10 +71,27 @@ export class FileNestDatabase {
         id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
         chunk_index INTEGER NOT NULL, text TEXT NOT NULL, contextual_text TEXT NOT NULL,
         section_path TEXT NOT NULL DEFAULT '[]', page_start INTEGER, page_end INTEGER,
-        kind TEXT NOT NULL DEFAULT 'text', token_count INTEGER NOT NULL DEFAULT 0,
+        kind TEXT NOT NULL DEFAULT 'text', parent_index INTEGER, entity_terms TEXT NOT NULL DEFAULT '[]',
+        token_count INTEGER NOT NULL DEFAULT 0,
         tokenizer_profile TEXT NOT NULL DEFAULT '${CANONICAL_TOKENIZER_PROFILE}',
         tokenizer_version TEXT NOT NULL DEFAULT '${CANONICAL_TOKENIZER_VERSION}',
         token_count_accuracy TEXT NOT NULL DEFAULT 'estimated', UNIQUE(file_id, chunk_index)
+      );
+      CREATE TABLE IF NOT EXISTS document_parents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        parent_index INTEGER NOT NULL, text TEXT NOT NULL, contextual_text TEXT NOT NULL,
+        section_path TEXT NOT NULL DEFAULT '[]', page_start INTEGER, page_end INTEGER,
+        kind TEXT NOT NULL DEFAULT 'text', token_count INTEGER NOT NULL DEFAULT 0,
+        tokenizer_profile TEXT NOT NULL DEFAULT '${CANONICAL_TOKENIZER_PROFILE}',
+        tokenizer_version TEXT NOT NULL DEFAULT '${CANONICAL_TOKENIZER_VERSION}',
+        token_count_accuracy TEXT NOT NULL DEFAULT 'estimated', UNIQUE(file_id, parent_index)
+      );
+      CREATE TABLE IF NOT EXISTS rag_search_traces (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, query TEXT NOT NULL,
+        semantic_query TEXT NOT NULL, lexical_candidates INTEGER NOT NULL,
+        semantic_candidates INTEGER NOT NULL, entity_candidates INTEGER NOT NULL,
+        fused_candidates INTEGER NOT NULL, returned_results INTEGER NOT NULL,
+        semantic_threshold REAL, reranker TEXT, duration_ms REAL NOT NULL
       );
       CREATE TABLE IF NOT EXISTS rules (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, pattern TEXT NOT NULL,
@@ -74,7 +105,7 @@ export class FileNestDatabase {
         id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
         role TEXT NOT NULL, content TEXT NOT NULL, ts TEXT NOT NULL, related_file_ids TEXT NOT NULL DEFAULT '[]',
         input_tokens INTEGER, output_tokens INTEGER, first_response_duration REAL, total_response_duration REAL,
-        response_provider TEXT, response_model TEXT
+        response_provider TEXT, response_model TEXT, related_file_matches TEXT NOT NULL DEFAULT '[]'
       );
       CREATE TABLE IF NOT EXISTS token_usage (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
@@ -83,6 +114,7 @@ export class FileNestDatabase {
         token_count_accuracy TEXT NOT NULL DEFAULT 'estimated'
       );
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS watch_directory_baseline_entries (
         directory_path TEXT NOT NULL, entry_path TEXT NOT NULL,
         PRIMARY KEY(directory_path, entry_path)
@@ -90,6 +122,7 @@ export class FileNestDatabase {
       CREATE INDEX IF NOT EXISTS idx_files_added ON files(discovered_at DESC);
       CREATE INDEX IF NOT EXISTS idx_embeddings_file ON embeddings(file_id);
       CREATE INDEX IF NOT EXISTS idx_chunks_file ON document_chunks(file_id, chunk_index);
+      CREATE INDEX IF NOT EXISTS idx_parents_file ON document_parents(file_id, parent_index);
       CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, ts);
     `)
     const embeddingColumns = this.rows('PRAGMA table_info(embeddings)').map((row) => String(row.name))
@@ -99,34 +132,51 @@ export class FileNestDatabase {
     if (!chunkColumns.includes('tokenizer_profile')) this.db.run(`ALTER TABLE document_chunks ADD COLUMN tokenizer_profile TEXT NOT NULL DEFAULT '${CANONICAL_TOKENIZER_PROFILE}'`)
     if (!chunkColumns.includes('tokenizer_version')) this.db.run(`ALTER TABLE document_chunks ADD COLUMN tokenizer_version TEXT NOT NULL DEFAULT '${CANONICAL_TOKENIZER_VERSION}'`)
     if (!chunkColumns.includes('token_count_accuracy')) this.db.run("ALTER TABLE document_chunks ADD COLUMN token_count_accuracy TEXT NOT NULL DEFAULT 'estimated'")
+    if (!chunkColumns.includes('parent_index')) this.db.run('ALTER TABLE document_chunks ADD COLUMN parent_index INTEGER')
+    if (!chunkColumns.includes('entity_terms')) this.db.run("ALTER TABLE document_chunks ADD COLUMN entity_terms TEXT NOT NULL DEFAULT '[]'")
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_chunks_parent ON document_chunks(file_id, parent_index)')
     const usageColumns = this.rows('PRAGMA table_info(token_usage)').map((row) => String(row.name))
     if (!usageColumns.includes('tokenizer_profile')) this.db.run(`ALTER TABLE token_usage ADD COLUMN tokenizer_profile TEXT NOT NULL DEFAULT '${GENERATION_FALLBACK_PROFILE}'`)
     if (!usageColumns.includes('token_count_accuracy')) this.db.run("ALTER TABLE token_usage ADD COLUMN token_count_accuracy TEXT NOT NULL DEFAULT 'estimated'")
 
-    for (const row of this.rows(
-      "SELECT id,contextual_text FROM document_chunks WHERE token_count=0 OR (token_count_accuracy='estimated' AND tokenizer_version!=?)",
-      [CANONICAL_TOKENIZER_VERSION]
-    )) {
-      const measurement = estimateCanonicalTokens(String(row.contextual_text ?? ''))
-      this.db.run(
-        'UPDATE document_chunks SET token_count=?,tokenizer_profile=?,tokenizer_version=?,token_count_accuracy=? WHERE id=?',
-        [measurement.count, measurement.tokenizerProfile, measurement.tokenizerVersion, measurement.accuracy, Number(row.id)]
-      )
-    }
     const messageColumns = this.rows('PRAGMA table_info(chat_messages)').map((row) => String(row.name))
     const messageMigrations: Array<[string, string]> = [
       ['input_tokens', 'INTEGER'], ['output_tokens', 'INTEGER'],
       ['first_response_duration', 'REAL'], ['total_response_duration', 'REAL'],
-      ['response_provider', 'TEXT'], ['response_model', 'TEXT']
+      ['response_provider', 'TEXT'], ['response_model', 'TEXT'],
+      ['related_file_matches', "TEXT NOT NULL DEFAULT '[]'"]
     ]
     for (const [name, type] of messageMigrations) {
       if (!messageColumns.includes(name)) this.db.run(`ALTER TABLE chat_messages ADD COLUMN ${name} ${type}`)
     }
-    this.db.run(`
-      INSERT OR IGNORE INTO document_chunks(file_id,chunk_index,text,contextual_text,section_path,kind)
-      SELECT file_id,chunk_index,chunk_text,chunk_text,'[]','text' FROM embeddings
-      WHERE COALESCE(chunk_text,'') <> ''
-    `)
+    const fileColumns = this.rows('PRAGMA table_info(files)').map((row) => String(row.name))
+    const fileMigrations: Array<[string, string]> = [
+      ['creation_date', 'TEXT'], ['duplicate_of_file_id', 'INTEGER'], ['duplicate_detected_at', 'TEXT']
+    ]
+    for (const [name, type] of fileMigrations) {
+      if (!fileColumns.includes(name)) this.db.run(`ALTER TABLE files ADD COLUMN ${name} ${type}`)
+    }
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_files_content_hash ON files(content_hash)')
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_files_duplicate_original ON files(duplicate_of_file_id)')
+    this.runMigrationOnce('structured_chunk_backfill_v1', () => {
+      for (const row of this.rows(
+        "SELECT id,contextual_text FROM document_chunks WHERE token_count=0 OR (token_count_accuracy='estimated' AND tokenizer_version!=?)",
+        [CANONICAL_TOKENIZER_VERSION]
+      )) {
+        const measurement = estimateCanonicalTokens(String(row.contextual_text ?? ''))
+        this.db.run(
+          'UPDATE document_chunks SET token_count=?,tokenizer_profile=?,tokenizer_version=?,token_count_accuracy=? WHERE id=?',
+          [measurement.count, measurement.tokenizerProfile, measurement.tokenizerVersion, measurement.accuracy, Number(row.id)]
+        )
+      }
+      this.db.run(`INSERT OR IGNORE INTO document_chunks(file_id,chunk_index,text,contextual_text,section_path,kind)
+        SELECT file_id,chunk_index,chunk_text,chunk_text,'[]','text' FROM embeddings WHERE COALESCE(chunk_text,'') <> ''`)
+      this.db.run('UPDATE document_chunks SET parent_index=chunk_index WHERE parent_index IS NULL')
+      this.db.run(`INSERT OR IGNORE INTO document_parents(file_id,parent_index,text,contextual_text,section_path,page_start,page_end,kind,token_count,tokenizer_profile,tokenizer_version,token_count_accuracy)
+        SELECT file_id,chunk_index,text,contextual_text,section_path,page_start,page_end,kind,token_count,tokenizer_profile,tokenizer_version,token_count_accuracy FROM document_chunks`)
+      this.db.run(`DELETE FROM document_parents WHERE NOT EXISTS (SELECT 1 FROM document_chunks
+        WHERE document_chunks.file_id=document_parents.file_id AND document_chunks.parent_index=document_parents.parent_index)`)
+    })
     this.db.run("UPDATE rules SET target_folder='Documents' WHERE name='PDF Documents' AND pattern='*.pdf' AND target_folder='Documents/PDF'")
     this.db.run("UPDATE rules SET target_folder='Documents' WHERE name='Office Documents' AND pattern='*.doc;*.docx;*.docm;*.xls;*.xlsx;*.ppt;*.pptx' AND target_folder='Documents/Office'")
   }
@@ -143,6 +193,19 @@ export class FileNestDatabase {
     ]
     for (const [name, pattern, target, priority] of seeds) {
       this.db.run('INSERT INTO rules(name,type,pattern,target_folder,priority,enabled,action) VALUES(?,?,?,?,?,1,\'organize\')', [name, 'rule', pattern, target, priority] as SqlValue[])
+    }
+  }
+
+  private runMigrationOnce(name: string, action: () => void): void {
+    if (this.scalar('SELECT 1 FROM schema_migrations WHERE name=?', [name])) return
+    this.db.run('BEGIN')
+    try {
+      action()
+      this.db.run('INSERT INTO schema_migrations(name,applied_at) VALUES(?,?)', [name, new Date().toISOString()])
+      this.db.run('COMMIT')
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
     }
   }
 
@@ -193,6 +256,22 @@ export class FileNestDatabase {
     return this.getSettings()
   }
 
+  getInternalSetting(key: string): string | null {
+    const row = this.rows('SELECT value FROM settings WHERE key=?', [key])[0]
+    if (!row) return null
+    try {
+      const value = JSON.parse(String(row.value)) as unknown
+      return typeof value === 'string' ? value : String(value)
+    } catch {
+      return String(row.value)
+    }
+  }
+
+  async setInternalSetting(key: string, value: string): Promise<void> {
+    this.db.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [key, JSON.stringify(value)])
+    await this.flush()
+  }
+
   listFiles(): FileRecord[] {
     return this.rows('SELECT * FROM files ORDER BY discovered_at DESC').map(mapFile)
   }
@@ -218,20 +297,20 @@ export class FileNestDatabase {
 
   async upsertFile(input: Omit<FileRecord, 'id'>): Promise<FileRecord> {
     const existing = this.getFileByPath(input.path)
-    const values: SqlValue[] = [input.path, input.name, input.ext, input.size, input.mtime, input.category, input.sourceDir, input.indexedAt, input.contentHash, input.title, input.contentText, input.discoveredAt, input.organizedAt, input.note, input.organizationSubfolder, input.isDirectory ? 1 : 0, input.indexSignature]
+    const values: SqlValue[] = [input.path, input.name, input.ext, input.size, input.mtime, input.category, input.sourceDir, input.indexedAt, input.contentHash, input.title, input.contentText, input.discoveredAt, input.organizedAt, input.note, input.organizationSubfolder, input.isDirectory ? 1 : 0, input.indexSignature, input.creationDate ?? existing?.creationDate ?? null, input.duplicateOfFileId ?? existing?.duplicateOfFileId ?? null, input.duplicateDetectedAt ?? existing?.duplicateDetectedAt ?? null]
     if (existing) {
-      this.db.run(`UPDATE files SET path=?,name=?,ext=?,size=?,mtime=?,category=?,source_dir=?,indexed_at=?,content_hash=?,title=?,content_text=?,discovered_at=?,organized_at=?,note=?,organization_subfolder=?,is_directory=?,index_signature=? WHERE id=?`, [...values, existing.id])
+      this.db.run(`UPDATE files SET path=?,name=?,ext=?,size=?,mtime=?,category=?,source_dir=?,indexed_at=?,content_hash=?,title=?,content_text=?,discovered_at=?,organized_at=?,note=?,organization_subfolder=?,is_directory=?,index_signature=?,creation_date=?,duplicate_of_file_id=?,duplicate_detected_at=? WHERE id=?`, [...values, existing.id])
       await this.flush()
       return this.getFile(existing.id)!
     }
-    this.db.run(`INSERT INTO files(path,name,ext,size,mtime,category,source_dir,indexed_at,content_hash,title,content_text,discovered_at,organized_at,note,organization_subfolder,is_directory,index_signature) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, values)
+    this.db.run(`INSERT INTO files(path,name,ext,size,mtime,category,source_dir,indexed_at,content_hash,title,content_text,discovered_at,organized_at,note,organization_subfolder,is_directory,index_signature,creation_date,duplicate_of_file_id,duplicate_detected_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, values)
     const id = Number(this.scalar('SELECT last_insert_rowid()'))
     await this.flush()
     return this.getFile(id)!
   }
 
   async updateFile(id: number, patch: Partial<FileRecord>): Promise<void> {
-    const allowed: Record<string, string> = { path: 'path', name: 'name', size: 'size', mtime: 'mtime', category: 'category', sourceDir: 'source_dir', indexedAt: 'indexed_at', contentHash: 'content_hash', title: 'title', contentText: 'content_text', organizedAt: 'organized_at', note: 'note', organizationSubfolder: 'organization_subfolder', indexSignature: 'index_signature' }
+    const allowed: Record<string, string> = { path: 'path', name: 'name', size: 'size', mtime: 'mtime', category: 'category', sourceDir: 'source_dir', indexedAt: 'indexed_at', contentHash: 'content_hash', title: 'title', contentText: 'content_text', organizedAt: 'organized_at', note: 'note', organizationSubfolder: 'organization_subfolder', indexSignature: 'index_signature', creationDate: 'creation_date', duplicateOfFileId: 'duplicate_of_file_id', duplicateDetectedAt: 'duplicate_detected_at' }
     const entries = Object.entries(patch).filter(([key]) => key in allowed)
     if (!entries.length) return
     this.db.run(`UPDATE files SET ${entries.map(([key]) => `${allowed[key]}=?`).join(',')} WHERE id=?`, [...entries.map(([, value]) => value as SqlValue), id])
@@ -240,6 +319,92 @@ export class FileNestDatabase {
 
   async deleteFile(id: number): Promise<void> {
     this.db.run('DELETE FROM files WHERE id=?', [id])
+    await this.flush()
+  }
+
+  filesMissingCreationDate(limit = 256): FileRecord[] {
+    return this.rows('SELECT * FROM files WHERE creation_date IS NULL ORDER BY id LIMIT ?', [Math.max(1, Math.min(2_000, Math.floor(limit)))]).map(mapFile)
+  }
+
+  async updateCreationDates(values: Array<{ id: number; creationDate: string }>): Promise<void> {
+    if (!values.length) return
+    this.db.run('BEGIN')
+    try {
+      for (const value of values) this.db.run('UPDATE files SET creation_date=? WHERE id=?', [value.creationDate, value.id])
+      this.db.run('COMMIT')
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
+    }
+    await this.flush()
+  }
+
+  async updateFileInventories(values: Array<{ id: number; contentHash: string; creationDate: string }>): Promise<void> {
+    if (!values.length) return
+    this.db.run('BEGIN')
+    try {
+      for (const value of values) this.db.run('UPDATE files SET content_hash=?,creation_date=? WHERE id=?', [value.contentHash, value.creationDate, value.id])
+      this.db.run('COMMIT')
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
+    }
+    await this.flush()
+  }
+
+  managedContentAuditCandidates(rootPath: string, extensions: string[], afterId: number, limit = 256): FileRecord[] {
+    const normalizedRoot = rootPath.replace(/[\\/]+$/, '')
+    const pathPattern = `${normalizedRoot.replace(/[\\%_]/g, '\\$&')}%`
+    const normalizedExtensions = [...new Set(extensions.map((value) => value.replace(/^\./, '').toLocaleLowerCase()))]
+    if (!normalizedExtensions.length) return []
+    const placeholders = normalizedExtensions.map(() => '?').join(',')
+    return this.rows(`SELECT * FROM files WHERE id>? AND path LIKE ? ESCAPE '\\' AND indexed_at IS NOT NULL
+      AND content_hash IS NOT NULL AND (is_directory=1 OR LOWER(ext) IN (${placeholders})) ORDER BY id LIMIT ?`,
+    [afterId, pathPattern, ...normalizedExtensions, Math.max(1, Math.min(2_000, Math.floor(limit)))]).map(mapFile)
+  }
+
+  async invalidateFileIndexes(ids: number[]): Promise<void> {
+    const unique = [...new Set(ids)]
+    if (!unique.length) return
+    this.db.run('BEGIN')
+    try {
+      for (const id of unique) {
+        this.db.run('DELETE FROM embeddings WHERE file_id=?', [id])
+        this.db.run('DELETE FROM document_chunks WHERE file_id=?', [id])
+        this.db.run('DELETE FROM document_parents WHERE file_id=?', [id])
+        this.db.run('UPDATE files SET indexed_at=NULL,index_signature=NULL,content_hash=NULL,duplicate_of_file_id=NULL,duplicate_detected_at=NULL WHERE id=?', [id])
+      }
+      this.db.run('COMMIT')
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
+    }
+    await this.flush()
+  }
+
+  filesMissingContentHash(): FileRecord[] {
+    return this.rows('SELECT * FROM files WHERE is_directory=0 AND content_hash IS NULL ORDER BY id').map(mapFile)
+  }
+
+  indexedOriginal(contentHash: string, excludingFileId: number): FileRecord | null {
+    const row = this.rows(`SELECT * FROM files WHERE content_hash=? AND id<>? AND indexed_at IS NOT NULL
+      AND duplicate_of_file_id IS NULL ORDER BY COALESCE(discovered_at,organized_at,indexed_at,mtime),id LIMIT 1`, [contentHash, excludingFileId])[0]
+    return row ? mapFile(row) : null
+  }
+
+  async markFileAsDuplicate(id: number, originalFileId: number, contentHash: string): Promise<void> {
+    this.db.run('BEGIN')
+    try {
+      this.db.run('DELETE FROM embeddings WHERE file_id=?', [id])
+      this.db.run('DELETE FROM document_chunks WHERE file_id=?', [id])
+      this.db.run('DELETE FROM document_parents WHERE file_id=?', [id])
+      this.db.run(`UPDATE files SET content_hash=?,duplicate_of_file_id=?,duplicate_detected_at=?,
+        indexed_at=NULL,index_signature=NULL WHERE id=?`, [contentHash, originalFileId, new Date().toISOString(), id])
+      this.db.run('COMMIT')
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
+    }
     await this.flush()
   }
 
@@ -270,6 +435,17 @@ export class FileNestDatabase {
     try {
       this.db.run('DELETE FROM embeddings WHERE file_id=?', [fileId])
       this.db.run('DELETE FROM document_chunks WHERE file_id=?', [fileId])
+      this.db.run('DELETE FROM document_parents WHERE file_id=?', [fileId])
+      const parents = new Map<number, DocumentChunk>()
+      for (const { chunk } of chunks) if (!parents.has(chunk.parentIndex)) parents.set(chunk.parentIndex, chunk)
+      for (const [parentIndex, chunk] of parents) {
+        const measurement = estimateCanonicalTokens(chunk.parentText)
+        this.db.run(
+          'INSERT INTO document_parents(file_id,parent_index,text,contextual_text,section_path,page_start,page_end,kind,token_count,tokenizer_profile,tokenizer_version,token_count_accuracy) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+          [fileId, parentIndex, chunk.parentText, chunk.parentText, JSON.stringify(chunk.sectionPath), chunk.pageStart, chunk.pageEnd,
+            chunk.kind, measurement.count, measurement.tokenizerProfile, measurement.tokenizerVersion, measurement.accuracy]
+        )
+      }
       for (const { chunk, vector } of chunks) {
         const bytes = new Uint8Array(vector.buffer.slice(vector.byteOffset, vector.byteOffset + vector.byteLength))
         const encoded = Buffer.from(bytes).toString('base64')
@@ -278,8 +454,9 @@ export class FileNestDatabase {
           [fileId, chunk.index, new Uint8Array([0]), encoded, vector.length, model, chunk.contextualText]
         )
         this.db.run(
-          'INSERT INTO document_chunks(file_id,chunk_index,text,contextual_text,section_path,page_start,page_end,kind,token_count,tokenizer_profile,tokenizer_version,token_count_accuracy) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+          'INSERT INTO document_chunks(file_id,chunk_index,text,contextual_text,section_path,page_start,page_end,kind,parent_index,entity_terms,token_count,tokenizer_profile,tokenizer_version,token_count_accuracy) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
           [fileId, chunk.index, chunk.text, chunk.contextualText, JSON.stringify(chunk.sectionPath), chunk.pageStart, chunk.pageEnd, chunk.kind,
+            chunk.parentIndex, JSON.stringify(chunk.entityTerms),
             chunk.tokenCount ?? estimateCanonicalTokens(chunk.contextualText).count,
             chunk.tokenizerProfile ?? CANONICAL_TOKENIZER_PROFILE,
             chunk.tokenizerVersion ?? CANONICAL_TOKENIZER_VERSION,
@@ -287,7 +464,7 @@ export class FileNestDatabase {
         )
       }
       this.db.run(
-        'UPDATE files SET title=?,content_text=?,content_hash=?,indexed_at=?,index_signature=? WHERE id=?',
+        'UPDATE files SET title=?,content_text=?,content_hash=?,indexed_at=?,index_signature=?,duplicate_of_file_id=NULL,duplicate_detected_at=NULL WHERE id=?',
         [patch.title, patch.contentText, patch.contentHash, patch.indexedAt, patch.indexSignature, fileId]
       )
       this.db.run('COMMIT')
@@ -298,8 +475,14 @@ export class FileNestDatabase {
     await this.flush()
   }
 
-  listDocumentChunks(fileId: number): DocumentChunk[] {
-    return this.rows('SELECT * FROM document_chunks WHERE file_id=? ORDER BY chunk_index', [fileId]).map((row) => ({
+  listDocumentChunks(fileId: number, offset = 0, limit?: number): DocumentChunk[] {
+    const pagination = limit == null ? '' : ' LIMIT ? OFFSET ?'
+    const parameters: SqlValue[] = limit == null
+      ? [fileId]
+      : [fileId, Math.max(0, Math.floor(limit)), Math.max(0, Math.floor(offset))]
+    return this.rows(`SELECT c.*,p.text AS parent_text FROM document_chunks c
+      LEFT JOIN document_parents p ON p.file_id=c.file_id AND p.parent_index=c.parent_index
+      WHERE c.file_id=? ORDER BY c.chunk_index${pagination}`, parameters).map((row) => ({
       index: Number(row.chunk_index),
       text: String(row.text),
       contextualText: String(row.contextual_text),
@@ -307,10 +490,62 @@ export class FileNestDatabase {
       pageStart: row.page_start == null ? null : Number(row.page_start),
       pageEnd: row.page_end == null ? null : Number(row.page_end),
       kind: String(row.kind) as DocumentChunk['kind'],
+      parentIndex: Number(row.parent_index ?? row.chunk_index),
+      parentText: String(row.parent_text ?? row.text),
+      entityTerms: JSON.parse(String(row.entity_terms || '[]')) as string[],
       tokenCount: Number(row.token_count ?? 0),
       tokenizerProfile: String(row.tokenizer_profile ?? CANONICAL_TOKENIZER_PROFILE),
       tokenizerVersion: String(row.tokenizer_version ?? CANONICAL_TOKENIZER_VERSION),
       tokenCountAccuracy: String(row.token_count_accuracy ?? 'estimated') as 'exact' | 'estimated'
+    }))
+  }
+
+  documentChunkCount(fileId: number): number {
+    return Number(this.scalar('SELECT COUNT(*) FROM document_chunks WHERE file_id=?', [fileId]) ?? 0)
+  }
+
+  entityChunkMatches(terms: string[], limit: number): Array<{ fileId: number; chunkIndex: number; chunk: DocumentChunk }> {
+    if (!terms.length || limit <= 0) return []
+    const normalized = new Set(terms.map((term) => term.normalize('NFKC').toLocaleLowerCase()))
+    const matches: Array<{ fileId: number; chunkIndex: number; chunk: DocumentChunk }> = []
+    for (const row of this.rows(`SELECT c.file_id,c.chunk_index,c.text,c.contextual_text,c.section_path,c.page_start,c.page_end,
+      c.kind,c.parent_index,c.entity_terms,c.token_count,c.tokenizer_profile,c.tokenizer_version,c.token_count_accuracy,
+      p.text AS parent_text FROM document_chunks c
+      LEFT JOIN document_parents p ON p.file_id=c.file_id AND p.parent_index=c.parent_index`)) {
+      const entityTerms = JSON.parse(String(row.entity_terms || '[]')) as string[]
+      if (!entityTerms.some((term) => normalized.has(term.normalize('NFKC').toLocaleLowerCase()))) continue
+      matches.push({ fileId: Number(row.file_id), chunkIndex: Number(row.chunk_index), chunk: {
+        index: Number(row.chunk_index), text: String(row.text), contextualText: String(row.contextual_text),
+        sectionPath: JSON.parse(String(row.section_path || '[]')) as string[],
+        pageStart: row.page_start == null ? null : Number(row.page_start), pageEnd: row.page_end == null ? null : Number(row.page_end),
+        kind: String(row.kind) as DocumentChunk['kind'], parentIndex: Number(row.parent_index ?? row.chunk_index),
+        parentText: String(row.parent_text ?? row.text), entityTerms,
+        tokenCount: Number(row.token_count ?? 0), tokenizerProfile: String(row.tokenizer_profile ?? CANONICAL_TOKENIZER_PROFILE),
+        tokenizerVersion: String(row.tokenizer_version ?? CANONICAL_TOKENIZER_VERSION),
+        tokenCountAccuracy: String(row.token_count_accuracy ?? 'estimated') as 'exact' | 'estimated'
+      } })
+      if (matches.length >= limit) break
+    }
+    return matches
+  }
+
+  async recordRAGSearchTrace(trace: RAGSearchTrace): Promise<void> {
+    this.db.run(`INSERT INTO rag_search_traces(created_at,query,semantic_query,lexical_candidates,semantic_candidates,
+      entity_candidates,fused_candidates,returned_results,semantic_threshold,reranker,duration_ms)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, [new Date().toISOString(), trace.query, trace.semanticQuery, trace.lexicalCandidates,
+      trace.semanticCandidates, trace.entityCandidates, trace.fusedCandidates, trace.returnedResults,
+      trace.semanticThreshold, trace.reranker, trace.durationMs])
+    this.db.run('DELETE FROM rag_search_traces WHERE id NOT IN (SELECT id FROM rag_search_traces ORDER BY id DESC LIMIT 500)')
+    await this.flush()
+  }
+
+  listRAGSearchTraces(limit = 100): RAGSearchTrace[] {
+    return this.rows('SELECT * FROM rag_search_traces ORDER BY id DESC LIMIT ?', [Math.max(1, Math.min(500, Math.floor(limit)))]).map((row) => ({
+      query: String(row.query), semanticQuery: String(row.semantic_query),
+      lexicalCandidates: Number(row.lexical_candidates), semanticCandidates: Number(row.semantic_candidates),
+      entityCandidates: Number(row.entity_candidates), fusedCandidates: Number(row.fused_candidates),
+      returnedResults: Number(row.returned_results), semanticThreshold: row.semantic_threshold == null ? null : Number(row.semantic_threshold),
+      reranker: row.reranker == null ? null : String(row.reranker), durationMs: Number(row.duration_ms)
     }))
   }
 
@@ -371,17 +606,26 @@ export class FileNestDatabase {
     return this.rows('SELECT * FROM chat_messages WHERE session_id=? ORDER BY ts,id', [sessionId]).map(mapMessage)
   }
 
+  chatMessagePage(sessionId: number, beforeId: number | null = null, limit = 40): { messages: ChatMessage[]; hasEarlier: boolean } {
+    const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)))
+    const parameters: SqlValue[] = beforeId == null ? [sessionId, boundedLimit + 1] : [sessionId, beforeId, boundedLimit + 1]
+    const clause = beforeId == null ? 'session_id=?' : 'session_id=? AND id<?'
+    const newestFirst = this.rows(`SELECT * FROM chat_messages WHERE ${clause} ORDER BY id DESC LIMIT ?`, parameters).map(mapMessage)
+    return { messages: newestFirst.slice(0, boundedLimit).reverse(), hasEarlier: newestFirst.length > boundedLimit }
+  }
+
   async addMessage(
     sessionId: number,
     role: ChatMessage['role'],
     content: string,
     relatedFileIds: number[] = [],
-    metrics: Partial<Pick<ChatMessage, 'inputTokens' | 'outputTokens' | 'firstResponseDuration' | 'totalResponseDuration' | 'responseProvider' | 'responseModel'>> = {}
+    metrics: Partial<Pick<ChatMessage, 'inputTokens' | 'outputTokens' | 'firstResponseDuration' | 'totalResponseDuration' | 'responseProvider' | 'responseModel'>> = {},
+    relatedFileMatches: ChatRelatedFileMatch[] = []
   ): Promise<ChatMessage> {
     const now = new Date().toISOString()
     this.db.run(
-      'INSERT INTO chat_messages(session_id,role,content,ts,related_file_ids,input_tokens,output_tokens,first_response_duration,total_response_duration,response_provider,response_model) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-      [sessionId, role, content, now, JSON.stringify(relatedFileIds), metrics.inputTokens ?? null, metrics.outputTokens ?? null, metrics.firstResponseDuration ?? null, metrics.totalResponseDuration ?? null, metrics.responseProvider ?? null, metrics.responseModel ?? null]
+      'INSERT INTO chat_messages(session_id,role,content,ts,related_file_ids,input_tokens,output_tokens,first_response_duration,total_response_duration,response_provider,response_model,related_file_matches) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+      [sessionId, role, content, now, JSON.stringify(relatedFileIds), metrics.inputTokens ?? null, metrics.outputTokens ?? null, metrics.firstResponseDuration ?? null, metrics.totalResponseDuration ?? null, metrics.responseProvider ?? null, metrics.responseModel ?? null, JSON.stringify(relatedFileMatches)]
     )
     const id = Number(this.scalar('SELECT last_insert_rowid()'))
     await this.updateChat(sessionId, { updatedAt: now })
@@ -392,13 +636,14 @@ export class FileNestDatabase {
     messageId: number,
     content: string,
     relatedFileIds: number[],
-    metrics: Partial<Pick<ChatMessage, 'inputTokens' | 'outputTokens' | 'firstResponseDuration' | 'totalResponseDuration' | 'responseProvider' | 'responseModel'>>
+    metrics: Partial<Pick<ChatMessage, 'inputTokens' | 'outputTokens' | 'firstResponseDuration' | 'totalResponseDuration' | 'responseProvider' | 'responseModel'>>,
+    relatedFileMatches: ChatRelatedFileMatch[] = []
   ): Promise<ChatMessage> {
     this.db.run(
       `UPDATE chat_messages SET content=?,ts=?,related_file_ids=?,input_tokens=?,output_tokens=?,
-       first_response_duration=?,total_response_duration=?,response_provider=?,response_model=?
+       first_response_duration=?,total_response_duration=?,response_provider=?,response_model=?,related_file_matches=?
        WHERE id=? AND role='assistant'`,
-      [content, new Date().toISOString(), JSON.stringify(relatedFileIds), metrics.inputTokens ?? null, metrics.outputTokens ?? null, metrics.firstResponseDuration ?? null, metrics.totalResponseDuration ?? null, metrics.responseProvider ?? null, metrics.responseModel ?? null, messageId]
+      [content, new Date().toISOString(), JSON.stringify(relatedFileIds), metrics.inputTokens ?? null, metrics.outputTokens ?? null, metrics.firstResponseDuration ?? null, metrics.totalResponseDuration ?? null, metrics.responseProvider ?? null, metrics.responseModel ?? null, JSON.stringify(relatedFileMatches), messageId]
     )
     await this.flush()
     const row = this.rows('SELECT * FROM chat_messages WHERE id=?', [messageId])[0]
@@ -494,7 +739,7 @@ function decryptSecret(value: unknown): unknown {
 }
 
 function mapFile(row: Record<string, unknown>): FileRecord {
-  return { id: Number(row.id), path: String(row.path), name: String(row.name), ext: String(row.ext), size: Number(row.size), mtime: String(row.mtime), category: String(row.category) as FileCategory, sourceDir: String(row.source_dir), indexedAt: row.indexed_at == null ? null : String(row.indexed_at), contentHash: row.content_hash == null ? null : String(row.content_hash), title: row.title == null ? null : String(row.title), contentText: row.content_text == null ? null : String(row.content_text), discoveredAt: String(row.discovered_at), organizedAt: row.organized_at == null ? null : String(row.organized_at), note: row.note == null ? null : String(row.note), organizationSubfolder: row.organization_subfolder == null ? null : String(row.organization_subfolder), isDirectory: Boolean(row.is_directory), indexSignature: row.index_signature == null ? null : String(row.index_signature) }
+  return { id: Number(row.id), path: String(row.path), name: String(row.name), ext: String(row.ext), size: Number(row.size), mtime: String(row.mtime), category: String(row.category) as FileCategory, sourceDir: String(row.source_dir), indexedAt: row.indexed_at == null ? null : String(row.indexed_at), contentHash: row.content_hash == null ? null : String(row.content_hash), title: row.title == null ? null : String(row.title), contentText: row.content_text == null ? null : String(row.content_text), discoveredAt: String(row.discovered_at), organizedAt: row.organized_at == null ? null : String(row.organized_at), note: row.note == null ? null : String(row.note), organizationSubfolder: row.organization_subfolder == null ? null : String(row.organization_subfolder), isDirectory: Boolean(row.is_directory), indexSignature: row.index_signature == null ? null : String(row.index_signature), creationDate: row.creation_date == null ? null : String(row.creation_date), duplicateOfFileId: row.duplicate_of_file_id == null ? null : Number(row.duplicate_of_file_id), duplicateDetectedAt: row.duplicate_detected_at == null ? null : String(row.duplicate_detected_at) }
 }
 
 function mapRule(row: Record<string, unknown>): Rule {
@@ -510,6 +755,7 @@ function mapMessage(row: Record<string, unknown>): ChatMessage {
     id: Number(row.id), sessionId: Number(row.session_id), role: String(row.role) as ChatMessage['role'],
     content: String(row.content), timestamp: String(row.ts),
     relatedFileIds: JSON.parse(String(row.related_file_ids || '[]')) as number[],
+    relatedFileMatches: JSON.parse(String(row.related_file_matches || '[]')) as ChatRelatedFileMatch[],
     inputTokens: row.input_tokens == null ? null : Number(row.input_tokens),
     outputTokens: row.output_tokens == null ? null : Number(row.output_tokens),
     firstResponseDuration: row.first_response_duration == null ? null : Number(row.first_response_duration),

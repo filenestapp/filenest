@@ -48,6 +48,8 @@ struct OrganizationJobProgress: Equatable, Sendable {
     var failed: Int
     var currentFileName: String?
     var indexingStage: IndexingStage?
+    /// A small, display-only preview of files that have not started yet.
+    var upcomingFileNames: [String] = []
 
     var fractionCompleted: Double {
         guard total > 0 else { return phase == .completed ? 1 : 0 }
@@ -67,6 +69,7 @@ struct OrganizationBatchResult: Equatable, Sendable {
 /// A visible lifecycle for files discovered by automatic watching.
 enum AutomaticFileProcessingStage: Equatable, Sendable {
     case queued
+    case duplicate(originalFileName: String)
     case indexing(IndexingStage)
     case waitingForOrganization
     case organizing
@@ -123,6 +126,16 @@ final class FileWatcherService: @unchecked Sendable {
         var stableSince: Date?
     }
 
+    private struct CachedDirectoryInspection {
+        let inspection: DirectoryInspection
+        let expiresAt: Date
+    }
+
+    private struct DirectoryInspectionRetry {
+        let failures: Int
+        let nextAttemptAt: Date
+    }
+
     private static let pendingBaselinePathsKey = "watch.pending_baseline_paths.v1"
     private let store: SQLiteStore
     private let organizer: OrganizerService
@@ -137,9 +150,13 @@ final class FileWatcherService: @unchecked Sendable {
     private let settings: AppSettings
     /// Forwarded to AppState so automatic work is not invisible to the user.
     var onAutomaticFileProcessing: (@Sendable (AutomaticFileProcessingEvent) -> Void)?
+    /// Refreshes the library when a watcher operation persists metadata without moving a file.
+    var onLibraryChange: (@Sendable () -> Void)?
     private var pollTimer: DispatchSourceTimer?
     private var stabilityTracker = FileStabilityTracker()
     private var directoryStabilityTracker = DirectoryStabilityTracker()
+    private var directoryInspectionCache = [String: CachedDirectoryInspection]()
+    private var directoryInspectionRetries = [String: DirectoryInspectionRetry]()
     private let minimumStableDuration: TimeInterval
     private let directoryMinimumStableDuration: TimeInterval
     private let pollingInterval: TimeInterval
@@ -148,6 +165,10 @@ final class FileWatcherService: @unchecked Sendable {
     /// Verifies indexed-file hashes once per launch to catch offline overwrites that preserve size and modification time.
     private var startupContentAuditedPaths = Set<String>()
     private var startupContentMismatchPaths = Set<String>()
+    /// Serializes the one-time SHA-256 inventory used for duplicate detection.
+    /// Several watcher tasks may discover files at once, but only one is allowed to
+    /// fill missing hashes before any of them look for an indexed original.
+    private let contentHashInventoryQueue = DispatchQueue(label: "filenest.duplicate-hash-inventory")
     /// Avoids duplicate scan statistics in logs and records only changed diagnostic snapshots during polling.
     private var lastScanDiagnostics: [String: String] = [:]
     /// Items that already existed when the user requested manual organization; newly arriving items are unaffected.
@@ -187,6 +208,8 @@ final class FileWatcherService: @unchecked Sendable {
         seen.removeAll()
         startupContentAuditedPaths.removeAll()
         startupContentMismatchPaths.removeAll()
+        directoryInspectionCache.removeAll()
+        directoryInspectionRetries.removeAll()
         let dirs = settings.watchDirs.compactMap { URL(fileURLWithPath: $0) }
         Self.log(
             "watcher starting",
@@ -199,6 +222,13 @@ final class FileWatcherService: @unchecked Sendable {
         )
         reconcileWatchedDirectories()
         startPolling()
+        // Populate the persisted checksum inventory in the background. Duplicate
+        // decisions for later arrivals can then compare against the complete
+        // existing library without delaying the first filesystem event.
+        Task { [weak self] in
+            self?.prepareExistingContentHashes()
+            self?.onLibraryChange?()
+        }
         Self.log(
             "watcher started",
             category: .watchLifecycle,
@@ -217,6 +247,8 @@ final class FileWatcherService: @unchecked Sendable {
             pollTimer = nil
             stabilityTracker = FileStabilityTracker()
             directoryStabilityTracker = DirectoryStabilityTracker()
+            directoryInspectionCache.removeAll()
+            directoryInspectionRetries.removeAll()
             startupContentAuditedPaths.removeAll()
             startupContentMismatchPaths.removeAll()
             lastScanDiagnostics.removeAll()
@@ -326,6 +358,7 @@ final class FileWatcherService: @unchecked Sendable {
     func organizePendingEntries(
         in directoryPaths: [String]? = nil,
         includePreservedEntries: Bool = false,
+        recursively: Bool = false,
         checkpoint: @escaping @Sendable () async -> Bool,
         progress: @escaping @MainActor @Sendable (OrganizationJobProgress) -> Void
     ) async -> OrganizationBatchResult {
@@ -361,6 +394,13 @@ final class FileWatcherService: @unchecked Sendable {
                 return stoppedResult(from: state)
             }
             let directory = URL(fileURLWithPath: path)
+            if recursively {
+                candidates.append(contentsOf: recursiveManualCandidates(
+                    in: directory,
+                    enabledExtensions: enabledExtensions
+                ))
+                continue
+            }
             guard let entries = try? FileManager.default.contentsOfDirectory(
                 at: directory,
                 includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey],
@@ -370,6 +410,10 @@ final class FileWatcherService: @unchecked Sendable {
                 ? Set<String>()
                 : ((try? store.watchDirectoryBaselineEntries(directoryPath: path)) ?? [])
             for entry in entries where !baseline.contains(entry.path) {
+                // Never feed the managed destination folder back into an ad-hoc organization pass.
+                guard entry.standardizedFileURL.path != organizer.organizeRoot.standardizedFileURL.path else {
+                    continue
+                }
                 let isDirectory = (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
                 guard exclusionReason(
                     for: entry,
@@ -381,6 +425,7 @@ final class FileWatcherService: @unchecked Sendable {
         }
 
         state.total = candidates.count
+        state.upcomingFileNames = Array(candidates.prefix(10).map { $0.url.lastPathComponent })
         await progress(state)
         guard !candidates.isEmpty else {
             state.phase = .completed
@@ -421,6 +466,7 @@ final class FileWatcherService: @unchecked Sendable {
                 }
             }
             candidates = remaining
+            state.upcomingFileNames = Array((ready + candidates).prefix(10).map { $0.url.lastPathComponent })
 
             guard !ready.isEmpty else {
                 state.phase = .waitingForStability
@@ -437,7 +483,7 @@ final class FileWatcherService: @unchecked Sendable {
                 continue
             }
 
-            for candidate in ready {
+            for (index, candidate) in ready.enumerated() {
                 guard await checkpoint() else {
                     state.phase = .stopped
                     await progress(state)
@@ -446,12 +492,38 @@ final class FileWatcherService: @unchecked Sendable {
                 state.phase = .indexing
                 state.currentFileName = candidate.url.lastPathComponent
                 state.indexingStage = nil
+                state.upcomingFileNames = Array(
+                    (Array(ready.dropFirst(index + 1)) + candidates)
+                        .prefix(10)
+                        .map { $0.url.lastPathComponent }
+                )
                 await progress(state)
 
                 guard let fileID = register(candidate) else {
                     state.completed += 1
                     state.failed += 1
                     await progress(state)
+                    continue
+                }
+                if let original = await linkDuplicateIfNeeded(
+                    fileID: fileID,
+                    url: candidate.url,
+                    isDirectory: candidate.isDirectory
+                ) {
+                    state.completed += 1
+                    state.skipped += 1
+                    state.currentFileName = candidate.url.lastPathComponent
+                    state.indexingStage = nil
+                    await progress(state)
+                    Self.log(
+                        "manual organization skipped duplicate file indexing",
+                        category: .organizeQueue,
+                        level: .notice,
+                        metadata: [
+                            "file": candidate.url.lastPathComponent,
+                            "original": original.name,
+                        ]
+                    )
                     continue
                 }
                 let progressSnapshot = state
@@ -469,7 +541,11 @@ final class FileWatcherService: @unchecked Sendable {
                         skipped: progressSnapshot.skipped,
                         failed: progressSnapshot.failed,
                         currentFileName: candidate.url.lastPathComponent,
-                        indexingStage: stage
+                        indexingStage: stage,
+                        // Indexer callbacks report a narrow stage snapshot. Preserve
+                        // the job-level queue preview so the pending-files control
+                        // does not disappear while a document is being indexed.
+                        upcomingFileNames: progressSnapshot.upcomingFileNames
                     ))
                 }
                 guard indexed else {
@@ -514,8 +590,83 @@ final class FileWatcherService: @unchecked Sendable {
         state.phase = state.failed > 0 ? .failed : .completed
         state.currentFileName = nil
         state.indexingStage = nil
+        state.upcomingFileNames = []
         await progress(state)
         return result(from: state, stopped: false)
+    }
+
+    /// Enumerates file leaves only. Directories remain in place while their eligible contents
+    /// are processed, which prevents a recursive pass from moving a parent before its children.
+    private func recursiveManualCandidates(
+        in root: URL,
+        enabledExtensions: Set<String>
+    ) -> [ManualCandidate] {
+        guard !isRepositoryDirectory(root) else {
+            Self.log(
+                "recursive organization skipped repository root",
+                category: .organizeQueue,
+                level: .notice,
+                metadata: ["directory": root.lastPathComponent]
+            )
+            return []
+        }
+
+        let keys: Set<URLResourceKey> = [
+            .isDirectoryKey,
+            .isSymbolicLinkKey,
+        ]
+        let options: FileManager.DirectoryEnumerationOptions = settings.excludeHidden
+            ? [.skipsHiddenFiles, .skipsPackageDescendants]
+            : [.skipsPackageDescendants]
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: Array(keys),
+            options: options,
+            errorHandler: { url, error in
+                Self.log(
+                    "recursive organization could not read directory",
+                    category: .organizeQueue,
+                    level: .warning,
+                    metadata: ["directory": url.lastPathComponent, "error": error.localizedDescription]
+                )
+                return true
+            }
+        ) else { return [] }
+
+        let managedRoot = organizer.organizeRoot.standardizedFileURL.path
+        var candidates = [ManualCandidate]()
+        while let entry = enumerator.nextObject() as? URL {
+            let values = try? entry.resourceValues(forKeys: keys)
+            let isDirectory = values?.isDirectory == true
+            let isSymbolicLink = values?.isSymbolicLink == true
+
+            if isDirectory {
+                if isSymbolicLink ||
+                    entry.standardizedFileURL.path == managedRoot ||
+                    isRepositoryDirectory(entry) {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            guard !isSymbolicLink,
+                  exclusionReason(
+                    for: entry,
+                    isDirectory: false,
+                    enabledExtensions: enabledExtensions
+                  ) == nil else { continue }
+            candidates.append(ManualCandidate(url: entry, isDirectory: false))
+        }
+        return candidates
+    }
+
+    /// Source-control worktrees are intentionally excluded as a unit. Moving only some of
+    /// their nested files would make a repository unusable, so the enumerator skips them.
+    private func isRepositoryDirectory(_ directory: URL) -> Bool {
+        let metadataNames = [".git", ".hg", ".svn"]
+        if metadataNames.contains(directory.lastPathComponent) { return true }
+        return metadataNames.contains { marker in
+            FileManager.default.fileExists(atPath: directory.appendingPathComponent(marker).path)
+        }
     }
 
     private func exclusionReason(
@@ -864,7 +1015,7 @@ final class FileWatcherService: @unchecked Sendable {
                 continue
             }
             if isDir.boolValue {
-                guard let inspection = DirectoryInspector.inspect(entry) else {
+                guard let inspection = inspectWatchedDirectory(entry, observedAt: now) else {
                     inspectionFailures += 1
                     continue
                 }
@@ -985,6 +1136,36 @@ final class FileWatcherService: @unchecked Sendable {
         return true
     }
 
+    /// Large or actively changing directory trees are retried with exponential backoff.
+    /// A short successful-result cache also coalesces duplicate FSEvent and polling scans.
+    private func inspectWatchedDirectory(_ url: URL, observedAt now: Date) -> DirectoryInspection? {
+        let path = url.standardizedFileURL.path
+        if let retry = directoryInspectionRetries[path], retry.nextAttemptAt > now {
+            return nil
+        }
+        if let cached = directoryInspectionCache[path], cached.expiresAt > now {
+            return cached.inspection
+        }
+
+        guard let inspection = DirectoryInspector.inspect(url, budget: .watcher) else {
+            directoryInspectionCache.removeValue(forKey: path)
+            let failures = min(8, (directoryInspectionRetries[path]?.failures ?? 0) + 1)
+            let delay = min(15 * 60, max(pollingInterval, 15) * pow(2, Double(failures - 1)))
+            directoryInspectionRetries[path] = DirectoryInspectionRetry(
+                failures: failures,
+                nextAttemptAt: now.addingTimeInterval(delay)
+            )
+            return nil
+        }
+
+        directoryInspectionRetries.removeValue(forKey: path)
+        directoryInspectionCache[path] = CachedDirectoryInspection(
+            inspection: inspection,
+            expiresAt: now.addingTimeInterval(min(5, max(1, pollingInterval / 2)))
+        )
+        return inspection
+    }
+
     /// Remove records whose original top-level watched entry disappeared while FileNest
     /// was not running. Organized records are not affected because their current parent
     /// is the managed library rather than the watched directory.
@@ -992,7 +1173,7 @@ final class FileWatcherService: @unchecked Sendable {
         let rootPath = Self.canonicalPath(directory.path)
         let canonicalExistingPaths = Set(existingPaths.map(Self.canonicalPath))
         let fm = FileManager.default
-        guard let records = try? store.allFiles() else { return }
+        guard let records = try? store.libraryFiles(inSourceDirectory: directory.path) else { return }
         for record in records {
             let path = Self.canonicalPath(record.path)
             let parentPath = Self.canonicalPath(
@@ -1061,6 +1242,21 @@ final class FileWatcherService: @unchecked Sendable {
                 ]
             )
             Task {
+                if let original = await self.linkDuplicateIfNeeded(fileID: id, url: url, isDirectory: false) {
+                    self.reportAutomaticProcessing(
+                        fileID: id,
+                        fileName: record.name,
+                        stage: .duplicate(originalFileName: original.name)
+                    )
+                    Self.log(
+                        "watcher linked duplicate file without indexing",
+                        category: .watchDiscovery,
+                        level: .notice,
+                        metadata: ["file": record.name, "original": original.name]
+                    )
+                    self.onLibraryChange?()
+                    return
+                }
                 guard await indexer.indexFile(
                     id: id,
                     overridePath: url,
@@ -1139,6 +1335,25 @@ final class FileWatcherService: @unchecked Sendable {
             // Moving first would invalidate the original path and prevent the indexer from reading the content.
             // Index from the original URL, then let the organizer update the database path after moving.
             Task {
+                if let original = await self.linkDuplicateIfNeeded(
+                    fileID: id,
+                    url: url,
+                    isDirectory: false
+                ) {
+                    self.reportAutomaticProcessing(
+                        fileID: id,
+                        fileName: record.name,
+                        stage: .duplicate(originalFileName: original.name)
+                    )
+                    Self.log(
+                        "watcher linked duplicate file without indexing",
+                        category: .watchDiscovery,
+                        level: .notice,
+                        metadata: ["file": record.name, "original": original.name]
+                    )
+                    self.onLibraryChange?()
+                    return
+                }
                 guard await indexer.indexFile(
                     id: id,
                     overridePath: url,
@@ -1188,6 +1403,62 @@ final class FileWatcherService: @unchecked Sendable {
     private func allowRetry(for dedupKey: String) {
         queue.async { [weak self] in
             self?.seen.remove(dedupKey)
+        }
+    }
+
+    /// Calculates hashes only for legacy files that lack one. New arrivals call this
+    /// before indexing, ensuring a duplicate comparison always considers the full
+    /// existing library rather than only recently indexed files.
+    private func prepareExistingContentHashes() {
+        contentHashInventoryQueue.sync {
+            let candidates = (try? store.filesMissingContentHash()) ?? []
+            for file in candidates {
+                guard !file.isDirectory,
+                      let id = file.id,
+                      FileManager.default.fileExists(atPath: file.path),
+                      let hash = try? FileContentHasher.sha256(of: URL(fileURLWithPath: file.path)) else {
+                    continue
+                }
+                try? store.updateFileContentHash(id: id, contentHash: hash)
+            }
+        }
+    }
+
+    /// Links a newly discovered regular file to an already indexed original with
+    /// matching bytes. The duplicate keeps its own filesystem path, but does not
+    /// create extraction, chunk, or embedding rows.
+    private func linkDuplicateIfNeeded(
+        fileID: Int64,
+        url: URL,
+        isDirectory: Bool
+    ) async -> FileRecord? {
+        guard !isDirectory, FileManager.default.fileExists(atPath: url.path) else { return nil }
+        prepareExistingContentHashes()
+        guard let contentHash = try? FileContentHasher.sha256(of: url),
+              let original = try? store.indexedOriginal(
+                matchingContentHash: contentHash,
+                excludingFileID: fileID
+              ),
+              let originalID = original.id else {
+            return nil
+        }
+        await indexer.cancel(fileID: fileID)
+        await indexer.vectorStore.remove(fileId: fileID)
+        do {
+            try store.markFileAsDuplicate(
+                id: fileID,
+                originalFileID: originalID,
+                contentHash: contentHash
+            )
+            return original
+        } catch {
+            Self.log(
+                "could not persist duplicate file link",
+                category: .watchDiscovery,
+                level: .error,
+                metadata: ["file": url.lastPathComponent, "error": error.localizedDescription]
+            )
+            return nil
         }
     }
 

@@ -7,6 +7,7 @@ final class LocalizationCoverageTests: XCTestCase {
             .deletingLastPathComponent()
         let files = [
             "FileNest/UI/ChatView.swift",
+            "FileNest/UI/DesignSystem.swift",
             "FileNest/UI/MainView.swift",
             "FileNest/UI/MenuBarView.swift",
             "FileNest/UI/LibraryView.swift",
@@ -30,6 +31,85 @@ final class LocalizationCoverageTests: XCTestCase {
             nonEnglishSourceStrings.isEmpty,
             "UI source contains non-English string literals: \(nonEnglishSourceStrings.sorted())"
         )
+    }
+
+    func testEnglishAndSimplifiedChineseHaveIdenticalLocalizationKeys() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let folders = ["en.lproj", "zh-Hans.lproj"]
+        let keys = try folders.map { folder in
+            let source = try String(
+                contentsOf: repositoryRoot.appendingPathComponent(
+                    "FileNest/\(folder)/Localizable.strings"
+                ),
+                encoding: .utf8
+            )
+            return stringKeys(in: source)
+        }
+
+        XCTAssertEqual(
+            keys[0],
+            keys[1],
+            "English and Simplified Chinese localization keys must stay in sync."
+        )
+    }
+
+    func testLocalizationResourcesDoNotContainDuplicateKeys() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+
+        for folder in ["en.lproj", "zh-Hans.lproj"] {
+            let source = try String(
+                contentsOf: repositoryRoot.appendingPathComponent(
+                    "FileNest/\(folder)/Localizable.strings"
+                ),
+                encoding: .utf8
+            )
+            let keys = captures(pattern: #"(?m)^\"((?:\\.|[^\"\\])*)\"\s*="#, in: source)
+            let duplicates = Dictionary(grouping: keys, by: { $0 })
+                .filter { $0.value.count > 1 }
+                .map(\.key)
+                .sorted()
+
+            XCTAssertTrue(
+                duplicates.isEmpty,
+                "Duplicate localization keys in \(folder): \(duplicates)"
+            )
+        }
+    }
+
+    func testMediaTranscriptionAndReindexControlsHaveTranslations() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let expectedKeys: Set<String> = [
+            "Limit Reindex to File Types",
+            "Media transcription",
+            "Audio or video transcription settings, model, or runtime changed",
+            "Creating an isolated Whisper environment…",
+            "Downloading FFmpeg…",
+            "Downloading the Whisper %@ model…",
+            "Whisper model download complete",
+            "FFmpeg installation failed: %@",
+            "Whisper installation failed: %@",
+            "Whisper model download failed: %@",
+        ]
+
+        for folder in ["en.lproj", "zh-Hans.lproj"] {
+            let source = try String(
+                contentsOf: repositoryRoot.appendingPathComponent(
+                    "FileNest/\(folder)/Localizable.strings"
+                ),
+                encoding: .utf8
+            )
+            let localizedKeys = stringKeys(in: source)
+            XCTAssertTrue(
+                expectedKeys.isSubset(of: localizedKeys),
+                "Missing media localization keys in \(folder): \(expectedKeys.subtracting(localizedKeys).sorted())"
+            )
+        }
     }
 
     func testVersionAndUpdateControlsHaveEnglishTranslations() throws {
@@ -114,6 +194,37 @@ final class LocalizationCoverageTests: XCTestCase {
             XCTAssertTrue(
                 expectedKeys.isSubset(of: localizedKeys),
                 "Missing chat edit localization keys in \(localizationFile.path): "
+                    + "\(expectedKeys.subtracting(localizedKeys).sorted())"
+            )
+        }
+    }
+
+    func testDuplicateFileControlsHaveTranslations() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let expectedKeys: Set<String> = [
+            "Find Duplicates",
+            "Duplicate Files",
+            "Rescan",
+            "Scanning files for duplicates… %d of %d",
+            "No duplicate files found",
+            "Move %d Duplicates to Trash",
+            "Move selected duplicates to Trash?",
+            "The selected files will be moved to the macOS Trash. The kept original files are not changed.",
+            "Keep",
+            "Duplicate copy",
+        ]
+
+        for localizationFolder in ["en.lproj", "zh-Hans.lproj"] {
+            let localizationURL = repositoryRoot.appendingPathComponent(
+                "FileNest/\(localizationFolder)/Localizable.strings"
+            )
+            let source = try String(contentsOf: localizationURL, encoding: .utf8)
+            let localizedKeys = stringKeys(in: source)
+            XCTAssertTrue(
+                expectedKeys.isSubset(of: localizedKeys),
+                "Missing duplicate-file localization keys in \(localizationURL.path): "
                     + "\(expectedKeys.subtracting(localizedKeys).sorted())"
             )
         }

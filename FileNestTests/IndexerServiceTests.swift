@@ -4,6 +4,28 @@ import ImageIO
 @testable import FileNest
 
 final class IndexerServiceTests: XCTestCase {
+    func testRecommendedFileConcurrencyProtectsLowMemoryAndHeavyLocalProcessing() {
+        let gibibyte = UInt64(1_024 * 1_024 * 1_024)
+
+        XCTAssertEqual(IndexerService.recommendedFileConcurrency(
+            physicalMemory: 8 * gibibyte,
+            usesLocalEmbedding: false,
+            usesDocling: false,
+            usesLocalOCR: false
+        ), 1)
+        XCTAssertEqual(IndexerService.recommendedFileConcurrency(
+            physicalMemory: 64 * gibibyte,
+            usesLocalEmbedding: false,
+            usesDocling: true,
+            usesLocalOCR: false
+        ), 2)
+        XCTAssertEqual(IndexerService.recommendedFileConcurrency(
+            physicalMemory: 64 * gibibyte,
+            usesLocalEmbedding: false,
+            usesDocling: false,
+            usesLocalOCR: false
+        ), 3)
+    }
     private actor StageRecorder {
         private var stages = [IndexingStage]()
         func append(_ stage: IndexingStage) { stages.append(stage) }

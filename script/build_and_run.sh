@@ -109,7 +109,23 @@ unregister_stale_launch_services_entries() {
   )
 }
 
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+terminate_running_app() {
+  if ! pgrep -x "$APP_NAME" >/dev/null; then
+    return
+  fi
+
+  /usr/bin/osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+  for _ in {1..10}; do
+    if ! pgrep -x "$APP_NAME" >/dev/null; then
+      return
+    fi
+    sleep 1
+  done
+
+  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+}
+
+terminate_running_app
 
 xcodebuild \
   -project "$ROOT_DIR/FileNest.xcodeproj" \
@@ -174,8 +190,14 @@ case "$MODE" in
     ;;
   --verify|verify)
     open_app
-    sleep 2
-    pgrep -x "$APP_NAME" >/dev/null
+    for _ in {1..10}; do
+      if pgrep -x "$APP_NAME" >/dev/null; then
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "$APP_NAME did not remain running after launch." >&2
+    exit 1
     ;;
   *)
     echo "usage: $0 [run|--install-only|--debug|--logs|--telemetry|--verify]" >&2

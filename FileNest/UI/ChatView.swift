@@ -6,18 +6,21 @@ import UniformTypeIdentifiers
 /// Natural-language file search with message history, result references, and a composer.
 struct ChatView: View {
     private static let conversationBottomID = "chat-conversation-bottom"
+    private static let messagePageSize = 40
 
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
-    let isActive: Bool
     let returnFromFileChat: () -> Void
     @State private var sendTasks = [Int64: Task<Void, Never>]()
     @State private var pendingStreamDeltas = [Int64: String]()
     @State private var streamFlushTasks = [Int64: Task<Void, Never>]()
+    @State private var streamScrollTask: Task<Void, Never>?
+    @State private var followsStreamingOutput = true
     @State private var composerTextHeight = ChatComposerTextView.defaultHeight
     @State private var activeFallbackRequests = [Int64: ChatFallbackRequest]()
     @State private var pendingCloudFallback: ChatFallbackRequest?
     @State private var editingContext: ChatEditingContext?
+    @State private var isLoadingEarlierMessages = false
 
     private var messages: [ChatMessage] {
         if FileNestEnvironment.isUIPreview { return UIShowcaseData.messages }
@@ -32,23 +35,18 @@ struct ChatView: View {
         messages.last(where: { $0.role == ChatRole.user.rawValue })?.id
     }
 
+    private var displayedMessages: [ChatMessage] {
+        messages
+    }
+
     private var composerInput: Binding<String> {
         Binding(
-            get: { editingContext?.text ?? appState.chatComposerInput },
-            set: { value in
-                if var context = editingContext {
-                    context.text = value
-                    editingContext = context
-                } else {
-                    appState.updateChatComposerInput(value)
-                }
-            }
+            get: { appState.chatComposerInput },
+            set: { appState.updateChatComposerInput($0) }
         )
     }
 
-    private var composerText: String {
-        editingContext?.text ?? appState.chatComposerInput
-    }
+    private var composerText: String { appState.chatComposerInput }
 
     private var sending: Bool {
         guard let sessionID = appState.selectedChatSessionID else { return false }
@@ -61,30 +59,7 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PageHeader(
-                title: isFileChat ? "Chat with File" : "Find with Chat",
-                subtitle: isFileChat
-                    ? "Analyze only the current file without searching or mixing in content from the library."
-                    : "Find files naturally, or attach one file and chat with it directly."
-            ) {
-                HStack(spacing: 8) {
-                    if isFileChat {
-                        Button(action: returnFromFileChat) {
-                            Label("Back", systemImage: "chevron.left")
-                        }
-                        .buttonStyle(QuietButtonStyle(compact: true, foreground: .secondary))
-                        .help("Back to previous view")
-                    }
-
-                    Button {
-                        appState.newChat()
-                    } label: {
-                        Label("New Chat", systemImage: "square.and.pencil")
-                    }
-                    .buttonStyle(QuietButtonStyle(compact: true, foreground: FileNestTheme.accent))
-                    .keyboardShortcut("n", modifiers: .command)
-                }
-            }
+            chatHeader
 
             conversation
             composer
@@ -96,10 +71,8 @@ struct ChatView: View {
             markSelectedChatSeenIfActive()
             Task { await appState.ollama.refresh(host: appState.settings.ollamaHost) }
         }
-        .onChange(of: isActive) { _ in
-            markSelectedChatSeenIfActive()
-        }
         .onChange(of: appState.selectedChatSessionID) { _ in
+            isLoadingEarlierMessages = false
             if editingContext?.sessionID != appState.selectedChatSessionID {
                 editingContext = nil
             }
@@ -133,10 +106,75 @@ struct ChatView: View {
         }
     }
 
+    private var chatHeader: some View {
+        HStack(alignment: .center, spacing: 20) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Text(LocalizedStringKey(isFileChat ? "Chat with File" : "Find with Chat"))
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(2)
+
+                    if let path = appState.currentChatAttachmentPath {
+                        FileContextPill(
+                            path: path,
+                            preview: { appState.presentAttachedFilePreview(path: path) }
+                        )
+                        .frame(maxWidth: 220)
+                        .layoutPriority(0)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text(LocalizedStringKey(isFileChat
+                    ? "Analyze only the current file without searching or mixing in content from the library."
+                    : "Find files naturally, or attach one file and chat with it directly."))
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .layoutPriority(1)
+
+            Spacer(minLength: 24)
+
+            HStack(spacing: 8) {
+                if isFileChat {
+                    Button(action: returnFromFileChat) {
+                        Label("Back", systemImage: "chevron.left")
+                    }
+                    .buttonStyle(QuietButtonStyle(compact: true, foreground: .secondary))
+                    .help("Back to previous view")
+                }
+
+                Button {
+                    appState.newChat()
+                } label: {
+                    Label("New Chat", systemImage: "square.and.pencil")
+                }
+                .buttonStyle(QuietButtonStyle(compact: true, foreground: FileNestTheme.accent))
+                .keyboardShortcut("n", modifiers: .command)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, 28)
+        .frame(height: 96)
+        .background(FileNestTheme.surface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(FileNestTheme.border).frame(height: 1)
+        }
+    }
+
     private var conversation: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                // A growing streamed message needs an exact, continuously updated
+                // layout. LazyVStack can retain a stale estimated height while a
+                // visible row changes rapidly, leaving the scroll position beyond
+                // the rendered content until the user scrolls manually.
+                VStack(alignment: .leading, spacing: 0) {
                     if messages.isEmpty {
                         if let path = appState.currentChatAttachmentPath {
                             EmptyFileChatState(path: path) { query in submit(query) }
@@ -146,13 +184,46 @@ struct ChatView: View {
                                 .frame(maxWidth: .infinity, minHeight: 430)
                         }
                     } else {
-                        ForEach(messages) { message in
+                        if appState.hasEarlierChatMessages {
+                            Button {
+                                let previousFirstID = displayedMessages.first?.id
+                                isLoadingEarlierMessages = true
+                                Task {
+                                    await appState.loadEarlierChatMessages()
+                                    await Task.yield()
+                                    if let previousFirstID {
+                                        proxy.scrollTo(previousFirstID, anchor: .top)
+                                    }
+                                    isLoadingEarlierMessages = false
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if isLoadingEarlierMessages { ProgressView().controlSize(.small) }
+                                    Text(appState.settings.localizedFormat(
+                                        "Show %d Earlier Messages",
+                                        Self.messagePageSize
+                                    ))
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isLoadingEarlierMessages)
+                            .foregroundStyle(FileNestTheme.accent)
+                            .padding(.vertical, 12)
+                        }
+
+                        ForEach(displayedMessages) { message in
                             MessageRow(
                                 message: message,
                                 progress: progress(for: message),
+                                isStreamingContent: isStreamingContent(for: message),
+                                showsRelatedFiles: !isFileChat,
                                 openSettings: openSettings,
                                 retry: retryLastQuestion,
                                 edit: { beginEditing(message) },
+                                editingText: editingBinding(for: message),
+                                cancelEdit: { editingContext = nil },
+                                resendEditedQuestion: resendEditedLastQuestion,
                                 showsLastUserActions: !sending && message.id == lastUserMessageID,
                                 startFileChat: { file in
                                     appState.startFileChat(
@@ -175,14 +246,39 @@ struct ChatView: View {
                 .frame(maxWidth: 1040)
                 .frame(maxWidth: .infinity)
             }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 1).onChanged { _ in
+                    // Do not keep pulling the transcript to the bottom while the
+                    // user is inspecting an earlier part of the conversation.
+                    followsStreamingOutput = false
+                }
+            )
+            .onAppear {
+                // The chat view is recreated when returning from the library. In that
+                // transition the selected session can be set before this ScrollView
+                // begins observing it, so explicitly restore the newest message.
+                followsStreamingOutput = true
+                scrollToConversationBottom(proxy, animated: false)
+            }
             .onChange(of: messages.count) { _ in
-                scrollToConversationBottom(proxy, animated: true)
+                guard !isLoadingEarlierMessages else { return }
+                followsStreamingOutput = true
+                scrollToConversationBottom(proxy, animated: !sending)
             }
             .onChange(of: messages.last?.content) { _ in
                 guard sending else { return }
-                scrollToConversationBottom(proxy, animated: false)
+                scheduleStreamScroll(proxy)
             }
             .onChange(of: sending) { _ in
+                if !sending {
+                    streamScrollTask?.cancel()
+                    streamScrollTask = nil
+                }
+                guard followsStreamingOutput else { return }
+                scrollToConversationBottom(proxy, animated: false)
+            }
+            .onChange(of: appState.selectedChatSessionID) { _ in
+                followsStreamingOutput = true
                 scrollToConversationBottom(proxy, animated: false)
             }
         }
@@ -200,6 +296,33 @@ struct ChatView: View {
         }
     }
 
+    private func scheduleStreamScroll(_ proxy: ScrollViewProxy) {
+        guard followsStreamingOutput, streamScrollTask == nil else { return }
+        streamScrollTask = Task { @MainActor in
+            defer { streamScrollTask = nil }
+            do {
+                // Coalesce token updates and wait until SwiftUI has laid out the
+                // newly grown transcript before changing the scroll position.
+                try await Task.sleep(nanoseconds: 180_000_000)
+            } catch {
+                return
+            }
+            guard followsStreamingOutput, sending else { return }
+            await Task.yield()
+            proxy.scrollTo(Self.conversationBottomID, anchor: .bottom)
+        }
+    }
+
+    private func isStreamingContent(for message: ChatMessage) -> Bool {
+        guard sending,
+              message.role == ChatRole.assistant.rawValue,
+              let sessionID = appState.selectedChatSessionID,
+              let presentation = appState.chatExecutionPresentations[sessionID] else {
+            return false
+        }
+        return presentation.assistantMessage.id == message.id && !message.content.isEmpty
+    }
+
     private func progress(for message: ChatMessage) -> ChatProgress? {
         guard let sessionID = appState.selectedChatSessionID,
               let presentation = appState.chatExecutionPresentations[sessionID],
@@ -209,32 +332,6 @@ struct ChatView: View {
 
     private var composer: some View {
         VStack(spacing: 7) {
-            if editingContext != nil {
-                HStack(spacing: 8) {
-                    Image(systemName: "pencil.line")
-                        .foregroundStyle(FileNestTheme.accent)
-                    Text("Editing your last question")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    Button("Cancel") {
-                        editingContext = nil
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 12)
-                .frame(height: 32)
-                .background(FileNestTheme.selection.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
-            }
-
-            if let path = appState.currentChatAttachmentPath {
-                AttachedFileChip(
-                    path: path,
-                    preview: { appState.presentAttachedFilePreview(path: path) },
-                    remove: { appState.attachFileToSelectedChat(nil) }
-                )
-            }
-
             VStack(spacing: 0) {
                 ZStack(alignment: .topLeading) {
                     ChatComposerTextView(
@@ -258,21 +355,21 @@ struct ChatView: View {
                 .help("Enter to send, Shift+Enter for a new line")
 
                 HStack(spacing: 10) {
-                        Button(action: chooseFile) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 14, weight: .medium))
-                                .frame(width: 24, height: 24)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("Attach a file and chat with it")
+                    Button(action: chooseFile) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Attach a file and chat with it")
 
-                        HStack(spacing: 5) {
-                            Image(systemName: "shield.lefthalf.filled")
-                            Text("Local file access")
-                        }
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Color.orange)
+                    HStack(spacing: 5) {
+                        Image(systemName: "shield.lefthalf.filled")
+                        Text("Local file access")
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.orange)
 
                         Spacer()
 
@@ -354,11 +451,7 @@ struct ChatView: View {
     }
 
     private func submit(_ rawQuestion: String) {
-        if editingContext != nil {
-            resendEditedLastQuestion(rawQuestion)
-        } else {
-            sendNewQuestion(rawQuestion)
-        }
+        sendNewQuestion(rawQuestion)
     }
 
     private func sendNewQuestion(_ rawQuestion: String) {
@@ -372,7 +465,11 @@ struct ChatView: View {
         let seed = Int64(Date().timeIntervalSince1970 * 1_000_000)
         let userID = -max(seed, 1)
         let assistantID = userID - 1
-        let userMessage = ChatMessage(
+        let persistedUserMessage = appState.saveUserQuestionForImmediateDisplay(
+            question,
+            sessionID: sessionID
+        )
+        let userMessage = persistedUserMessage ?? ChatMessage(
             id: userID,
             role: ChatRole.user.rawValue,
             content: question,
@@ -413,7 +510,8 @@ struct ChatView: View {
                 question,
                 sessionId: sessionID,
                 attachedFilePath: attachment,
-                modelOverride: model
+                modelOverride: model,
+                savesUserMessage: persistedUserMessage == nil
             ) {
                 guard !Task.isCancelled else { break }
                 handle(update, sessionID: sessionID)
@@ -448,11 +546,28 @@ struct ChatView: View {
         )
     }
 
-    private func resendEditedLastQuestion(_ rawQuestion: String) {
+    private func editingBinding(for message: ChatMessage) -> Binding<String>? {
+        guard let context = editingContext,
+              context.sessionID == appState.selectedChatSessionID,
+              context.messageID == message.id else { return nil }
+        return Binding(
+            get: { editingContext?.text ?? message.content },
+            set: { value in
+                guard var context = editingContext,
+                      context.sessionID == appState.selectedChatSessionID,
+                      context.messageID == message.id else { return }
+                context.text = value
+                editingContext = context
+            }
+        )
+    }
+
+    private func resendEditedLastQuestion() {
+        guard let context = editingContext else { return }
+        let rawQuestion = context.text
         let question = rawQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty,
               !sending,
-              let context = editingContext,
               context.sessionID == appState.selectedChatSessionID,
               let userIndex = appState.chatMessages.firstIndex(where: { $0.id == context.messageID }),
               let updatedMessage = appState.chat.editUserMessage(
@@ -561,7 +676,7 @@ struct ChatView: View {
         appState.clearChatExecution(sessionID: sessionID)
         if reload {
             appState.refreshChatSessionsPreservingSelection()
-            appState.refreshStatistics()
+            appState.markStatisticsDirty()
         }
     }
 
@@ -655,7 +770,9 @@ struct ChatView: View {
         guard streamFlushTasks[sessionID] == nil else { return }
         streamFlushTasks[sessionID] = Task { @MainActor in
             do {
-                try await Task.sleep(nanoseconds: 50_000_000)
+                // A 100 ms cadence is visually continuous while avoiding a full
+                // chat transcript update for every network token.
+                try await Task.sleep(nanoseconds: 100_000_000)
             } catch {
                 return
             }
@@ -691,7 +808,7 @@ struct ChatView: View {
     }
 
     private func markSelectedChatSeenIfActive() {
-        guard isActive, let sessionID = appState.selectedChatSessionID else { return }
+        guard let sessionID = appState.selectedChatSessionID else { return }
         appState.markChatSeen(sessionID)
     }
 
@@ -1025,63 +1142,51 @@ private struct ChatModelMenu: View {
     }
 }
 
-private struct AttachedFileChip: View {
+/// A compact current-file control for the chat header. It keeps preview and remove
+/// actions near the page context without occupying conversation or composer space.
+private struct FileContextPill: View {
     let path: String
     let preview: () -> Void
-    let remove: () -> Void
 
     var body: some View {
-        HStack(spacing: 9) {
-            Button(action: preview) {
-                HStack(spacing: 9) {
-                    FileIconView(
-                        file: FileRecord(
-                            id: nil,
-                            path: path,
-                            name: URL(fileURLWithPath: path).lastPathComponent,
-                            ext: URL(fileURLWithPath: path).pathExtension,
-                            size: 0,
-                            mtime: Date(),
-                            category: FileCategory.from(extension: URL(fileURLWithPath: path).pathExtension).rawValue,
-                            sourceDir: URL(fileURLWithPath: path).deletingLastPathComponent().path,
-                            indexedAt: nil,
-                            contentHash: nil,
-                            title: nil,
-                            contentText: nil
-                        ),
-                        size: 26
-                    )
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(URL(fileURLWithPath: path).lastPathComponent)
-                            .font(.system(size: 11, weight: .semibold))
-                            .lineLimit(1)
-                        Text("Chatting with this file")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                }
+        Button(action: preview) {
+            HStack(spacing: 6) {
+                FileIconView(
+                    file: FileRecord(
+                        id: nil,
+                        path: path,
+                        name: URL(fileURLWithPath: path).lastPathComponent,
+                        ext: URL(fileURLWithPath: path).pathExtension,
+                        size: 0,
+                        mtime: Date(),
+                        category: FileCategory.from(extension: URL(fileURLWithPath: path).pathExtension).rawValue,
+                        sourceDir: URL(fileURLWithPath: path).deletingLastPathComponent().path,
+                        indexedAt: nil,
+                        contentHash: nil,
+                        title: nil,
+                        contentText: nil
+                    ),
+                    size: 17
+                )
+                Text(URL(fileURLWithPath: path).lastPathComponent)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            .buttonStyle(.plain)
-            .contentShape(Rectangle())
-            .help("Show file details")
-            .pointingHandOnHover()
-
-            Button(action: remove) {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Remove attachment")
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .contentShape(Capsule())
         }
-        .padding(.horizontal, 12)
-        .frame(height: 44)
-        .background(FileNestTheme.selection.opacity(0.72))
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .buttonStyle(.plain)
+        .help("Show file details")
+        .pointingHandOnHover()
+        .frame(maxWidth: .infinity)
+        .background(FileNestTheme.selection.opacity(0.58), in: Capsule())
         .overlay {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(FileNestTheme.accent.opacity(0.16), lineWidth: 1)
+            Capsule()
+                .stroke(FileNestTheme.accent.opacity(0.18), lineWidth: 1)
         }
+        .layoutPriority(0)
     }
 }
 
@@ -1089,9 +1194,14 @@ private struct MessageRow: View {
     @EnvironmentObject private var appState: AppState
     let message: ChatMessage
     let progress: ChatProgress?
+    let isStreamingContent: Bool
+    let showsRelatedFiles: Bool
     let openSettings: () -> Void
     let retry: () -> Void
     let edit: () -> Void
+    let editingText: Binding<String>?
+    let cancelEdit: () -> Void
+    let resendEditedQuestion: () -> Void
     let showsLastUserActions: Bool
     let startFileChat: (FileRecord) -> Void
 
@@ -1119,7 +1229,13 @@ private struct MessageRow: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if modelUnavailable {
+                if let editingText {
+                    InlineQuestionEditor(
+                        text: editingText,
+                        cancel: cancelEdit,
+                        resend: resendEditedQuestion
+                    )
+                } else if modelUnavailable {
                     Text("I found related files that you can open directly:")
                         .font(.system(size: 15))
                     ModelUnavailableBanner(openSettings: openSettings)
@@ -1127,7 +1243,7 @@ private struct MessageRow: View {
                     if let progress {
                         ChatProgressSteps(
                             progress: progress,
-                            preview: appState.presentFilePreview,
+                            preview: appState.toggleFilePreview,
                             startDocumentChat: startFileChat
                         )
                     } else {
@@ -1139,13 +1255,22 @@ private struct MessageRow: View {
                         }
                     }
                 } else {
+                    if isStreamingContent {
+                        StreamingChatText(content: message.content)
+                    } else {
+                    // Markdown parsing and layout are expensive for long answers.
+                    // Keep completed rows stable when unrelated application state
+                    // (indexing, service health, file watching) changes.
                     ChatMarkdownText(content: message.content)
+                        .equatable()
+                    }
                 }
 
-                if !message.relatedFiles.isEmpty {
+                if showsRelatedFiles, !message.relatedFiles.isEmpty {
                     FileCitationGroup(
                         files: message.relatedFiles,
-                        preview: appState.presentFilePreview,
+                        matches: message.relatedFileMatches,
+                        preview: appState.toggleFilePreview,
                         startDocumentChat: startFileChat
                     )
                 }
@@ -1154,14 +1279,16 @@ private struct MessageRow: View {
                     ChatResponseMetricsView(message: message)
                 }
 
-                if isUser || !message.content.isEmpty {
+                if editingText == nil, isUser || !message.content.isEmpty {
                     MessageActionBar(
                         message: message,
                         feedback: $feedback,
                         retry: retry,
                         edit: edit,
                         showsLastUserActions: showsLastUserActions,
-                        startFileChat: message.relatedFiles.first(where: \.supportsDocumentChat).map { file in
+                        startFileChat: message.relatedFiles.first(where: {
+                            $0.supportsFileChat(with: appState.settings)
+                        }).map { file in
                             { startFileChat(file) }
                         }
                     )
@@ -1171,6 +1298,47 @@ private struct MessageRow: View {
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 18)
+    }
+}
+
+private struct InlineQuestionEditor: View {
+    @Binding var text: String
+    let cancel: () -> Void
+    let resend: () -> Void
+    @FocusState private var isFocused: Bool
+
+    private var canResend: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            TextEditor(text: $text)
+                .font(.system(size: 17))
+                .foregroundStyle(.primary)
+                .scrollContentBackground(.hidden)
+                .focused($isFocused)
+                .frame(minHeight: 68, maxHeight: 180)
+                .padding(8)
+                .background(FileNestTheme.elevatedSurface, in: RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(FileNestTheme.accent.opacity(0.55), lineWidth: 1)
+                }
+
+            HStack(spacing: 8) {
+                Text("Edit your question")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .buttonStyle(InlineActionButtonStyle(tint: .secondary))
+                Button("Resend", action: resend)
+                    .buttonStyle(InlineActionButtonStyle(tint: FileNestTheme.accent))
+                    .disabled(!canResend)
+            }
+        }
+        .onAppear { isFocused = true }
     }
 }
 
@@ -1367,7 +1535,7 @@ private struct ChatMatchedFileCard: View {
 
             Spacer(minLength: 2)
 
-            if file.supportsDocumentChat {
+            if file.supportsFileChat(with: appState.settings) {
                 Button(action: startDocumentChat) {
                     Image(systemName: "doc.text.magnifyingglass")
                         .font(.system(size: 11, weight: .semibold))
@@ -1376,7 +1544,7 @@ private struct ChatMatchedFileCard: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(FileNestTheme.accent)
                 .background(FileNestTheme.selection, in: Circle())
-                .help("Chat with Document")
+                .help("Chat with File")
             }
 
             Button(action: preview) {
@@ -1411,14 +1579,14 @@ private struct ChatMatchedFileCard: View {
         .onHover { isHovering = $0 }
         .contextMenu {
             Button("Preview", action: preview)
-            if file.supportsDocumentChat {
-                Button("Chat with Document", action: startDocumentChat)
+            if file.supportsFileChat(with: appState.settings) {
+                Button("Chat with File", action: startDocumentChat)
             }
         }
     }
 }
 
-struct ChatMarkdownText: View {
+struct ChatMarkdownText: View, Equatable {
     let content: String
 
     var body: some View {
@@ -1429,6 +1597,20 @@ struct ChatMarkdownText: View {
                 ForegroundColor(.primary)
             }
             .tint(FileNestTheme.accent)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Keeps streamed output cheap and stable while a response is still growing.
+/// Markdown is rendered once the answer completes.
+private struct StreamingChatText: View {
+    let content: String
+
+    var body: some View {
+        Text(content)
+            .font(.system(size: 15))
+            .foregroundStyle(.primary)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -1552,59 +1734,100 @@ private struct MessageActionBar: View {
 }
 
 private struct FileCitationGroup: View {
+    @EnvironmentObject private var appState: AppState
     let files: [FileRecord]
+    let matches: [ChatRelatedFileMatch]
     let preview: (FileRecord) -> Void
     let startDocumentChat: (FileRecord) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
+            FileCitationTableHeader(showsCategory: appState.previewedFile == nil)
             ForEach(Array(files.enumerated()), id: \.element) { index, file in
                 FileCitationRow(
                     file: file,
                     isTopMatch: index == 0,
+                    confidence: confidence(for: file),
                     preview: { preview(file) },
                     startDocumentChat: { startDocumentChat(file) }
                 )
                 if index < files.count - 1 {
-                    Divider().padding(.horizontal, 14)
+                    Divider().padding(.leading, LibraryTableLayout.nameColumnLeading)
                 }
             }
+        }
+    }
+
+    private func confidence(for file: FileRecord) -> Double? {
+        guard let fileID = file.id else { return nil }
+        return matches.first(where: { $0.fileID == fileID })?.confidence
+    }
+}
+
+/// The chat result table intentionally mirrors the file library: clicking a row
+/// controls the shared inspector, while actions are compact and non-destructive.
+private struct FileCitationTableHeader: View {
+    let showsCategory: Bool
+
+    var body: some View {
+        HStack(spacing: LibraryTableLayout.spacing) {
+            Color.clear.frame(width: LibraryTableLayout.iconWidth)
+            Text("Name").frame(maxWidth: .infinity, alignment: .leading)
+            if showsCategory {
+                Text("Category").frame(width: LibraryTableLayout.categoryWidth, alignment: .leading)
+            }
+            Text("Size").frame(width: LibraryTableLayout.sizeWidth, alignment: .leading)
+            Text("Modified").frame(width: LibraryTableLayout.modifiedWidth, alignment: .leading)
+            Text("Actions").frame(width: LibraryTableLayout.actionsWidth, alignment: .center)
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(.secondary)
+        .frame(height: 42)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(FileNestTheme.border).frame(height: 1)
         }
     }
 }
 
 private struct FileCitationRow: View {
+    @EnvironmentObject private var appState: AppState
     @State private var isHovering = false
     let file: FileRecord
     let isTopMatch: Bool
+    let confidence: Double?
     let preview: () -> Void
     let startDocumentChat: () -> Void
 
+    private var isSelected: Bool {
+        guard let previewedFile = appState.previewedFile else { return false }
+        if let fileID = file.id { return previewedFile.id == fileID }
+        return previewedFile.path == file.path
+    }
+
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            citationRow(compact: false)
-                .frame(minWidth: 580)
-            citationRow(compact: true)
+        HStack(spacing: LibraryTableLayout.spacing) {
+            rowContent
+            actionButtons
         }
-        .padding(.horizontal, 14)
-        .frame(minHeight: 88)
-        .background(
-            isTopMatch || isHovering ? FileNestTheme.selection.opacity(isTopMatch ? 0.82 : 0.5) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-        )
-        .overlay {
-            if isTopMatch {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(FileNestTheme.accent.opacity(0.28), lineWidth: 1)
-            }
+        .font(.system(size: 11))
+        .frame(minHeight: 66)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(
+                    isSelected
+                        ? FileNestTheme.contentSelection
+                        : (isHovering ? FileNestTheme.contentHover : Color.clear)
+                )
         }
         .contentShape(Rectangle())
         .onTapGesture(perform: preview)
-        .onHover { isHovering = $0 }
+        .onHover { hovered in
+            withAnimation(.easeOut(duration: 0.12)) { isHovering = hovered }
+        }
         .contextMenu {
-            Button("Preview", action: preview)
-            if file.supportsDocumentChat {
-                Button("Chat with Document", action: startDocumentChat)
+            Button("View File Details", action: preview)
+            if file.supportsFileChat(with: appState.settings) {
+                Button("Chat with File", action: startDocumentChat)
             }
             Button("Open") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: file.path))
@@ -1615,14 +1838,14 @@ private struct FileCitationRow: View {
         }
     }
 
-    private func citationRow(compact: Bool) -> some View {
-        HStack(spacing: compact ? 10 : 14) {
-            FileIconView(file: file, size: compact ? 38 : 40)
+    private var rowContent: some View {
+        HStack(spacing: LibraryTableLayout.spacing) {
+            FileIconView(file: file, size: LibraryTableLayout.iconWidth)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 7) {
                     Text(file.name)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
                     if isTopMatch {
                         Label("Best Match", systemImage: "sparkles")
@@ -1632,62 +1855,55 @@ private struct FileCitationRow: View {
                             .frame(height: 20)
                             .background(FileNestTheme.elevatedSurface.opacity(0.7), in: Capsule())
                     }
+                    if let confidence {
+                        ConfidenceBadge(confidence: confidence)
+                    }
                 }
                 Text(file.displayPath)
-                    .font(.system(size: 12))
+                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                HStack(spacing: 8) {
-                    Label(file.mtime.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
-                    Text("·")
-                    Text(file.displaySize)
-                }
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Spacer(minLength: compact ? 6 : 16)
-
-            if file.supportsDocumentChat {
-                Button(action: startDocumentChat) {
-                    if compact {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .frame(width: 24, height: 24)
-                    } else {
-                        Label("Chat with Document", systemImage: "doc.text.magnifyingglass")
-                    }
-                }
-                .buttonStyle(QuietButtonStyle(compact: true, foreground: FileNestTheme.accent))
-                .help("Chat with Document")
+            if appState.previewedFile == nil {
+                Text(LocalizedStringKey(file.categoryEnum.label))
+                    .frame(width: LibraryTableLayout.categoryWidth, alignment: .leading)
             }
-
-            Button(action: preview) {
-                if compact {
-                    Image(systemName: "eye")
-                        .frame(width: 24, height: 24)
-                } else {
-                    Label("Preview", systemImage: "eye")
-                }
-            }
-            .buttonStyle(QuietButtonStyle(compact: true, foreground: FileNestTheme.accent))
-            .help("Preview")
-
-            Button {
-                reveal(file)
-            } label: {
-                if compact {
-                    Image(systemName: "folder")
-                        .frame(width: 24, height: 24)
-                } else {
-                    Label("Show in Finder", systemImage: "folder")
-                }
-            }
-            .buttonStyle(QuietButtonStyle(compact: true, foreground: FileNestTheme.accent))
-            .help("Show in Finder")
+            Text(file.displaySize)
+                .frame(width: LibraryTableLayout.sizeWidth, alignment: .leading)
+            Text(file.mtime.formatted(date: .abbreviated, time: .shortened))
+                .frame(width: LibraryTableLayout.modifiedWidth, alignment: .leading)
         }
+        .contentShape(Rectangle())
+        .help("Click to view file details")
+        .pointingHandOnHover()
+        .accessibilityAction(named: Text("View File Details")) {
+            preview()
+        }
+    }
+
+    private var actionButtons: some View {
+        HStack(spacing: 4) {
+            Spacer(minLength: 0)
+            if file.supportsFileChat(with: appState.settings) {
+                LibraryActionButton(
+                    systemName: "doc.text.magnifyingglass",
+                    tint: FileNestTheme.accent,
+                    title: "Chat with File",
+                    action: startDocumentChat
+                )
+            }
+            LibraryActionButton(
+                systemName: "folder",
+                tint: FileNestTheme.accent,
+                title: "Show in Finder"
+            ) {
+                reveal(file)
+            }
+        }
+        .frame(width: LibraryTableLayout.actionsWidth)
     }
 
     private func reveal(_ file: FileRecord) {

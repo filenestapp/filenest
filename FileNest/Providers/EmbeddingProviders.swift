@@ -78,15 +78,24 @@ final class NLEmbeddingProvider: EmbeddingProvider {
 
 /// Ollama embeddings through the current official `/api/embed` endpoint; settings default to qwen3-embedding.
 final class OllamaEmbeddingProvider: EmbeddingProvider {
+    static let defaultContextLength = 4_096
+
     let name: String
     let dimension = 0
     let maximumBatchSize = 2
     private let host: String
     private let model: String
+    private let contextLength: Int
     private let session: URLSession
-    init(host: String, model: String, session: URLSession = .shared) {
+    init(
+        host: String,
+        model: String,
+        contextLength: Int = OllamaEmbeddingProvider.defaultContextLength,
+        session: URLSession = .shared
+    ) {
         self.host = host
         self.model = model
+        self.contextLength = max(1_024, contextLength)
         self.session = session
         self.name = "ollama:\(model)"
     }
@@ -120,7 +129,12 @@ final class OllamaEmbeddingProvider: EmbeddingProvider {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 60
-        let body: [String: Any] = ["model": model, "input": texts, "truncate": true]
+        let body: [String: Any] = [
+            "model": model,
+            "input": texts,
+            "truncate": true,
+            "options": ["num_ctx": contextLength],
+        ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else {

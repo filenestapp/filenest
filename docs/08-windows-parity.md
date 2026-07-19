@@ -30,14 +30,14 @@ A capability is complete only when all applicable layers agree:
 | --- | --- | --- | --- |
 | App shell, tray, and Quick Search | complete | implemented, including configurable global shortcut, centered floating search, and routing into Library; native shortcut conflicts pending Windows acceptance | build + Windows smoke |
 | Onboarding and watched-folder policy | complete | implemented, including per-folder process/preserve choice and persistent baseline | integration tests passed |
-| Stable file/directory watching | complete | implemented, including stop generations and offline arrival reconciliation | watcher tests passed; Windows filesystem smoke pending |
-| Extraction, Docling, OCR | complete | implemented with Windows-native legacy Office fallback, iWork package fallback, managed Docling, Tesseract, Ollama, and cloud OCR | code-level tests passed; provider/runtime matrix pending Windows |
-| Vector lifecycle | complete | implemented with atomic replacement, structured chunks, per-file generations, mutation guards, recovery splitting, and selective rebuild | index/database tests passed |
-| Organization | complete | implemented with priority/ignore/hybrid logic, safe paths, conflicts, cross-volume fallback, and rollback distinction | organizer tests passed; cross-volume Windows smoke pending |
-| Library | complete | implemented with lexical/semantic/date search, match evidence, sorting, paging, and inspector | query tests and Electron UI smoke passed |
-| Chat | complete | implemented with bounded chunk context, configurable retrieval, file/image chat, retry replacement, progress, metrics, cancellation, and retrieval fallback | chat tests and Electron UI smoke passed |
+| Stable file/directory watching | complete | implemented, including stop generations, budgeted directory inspection, offline arrival reconciliation, and a bounded 24-hour managed-content hash audit | watcher and directory-budget tests passed; Windows filesystem smoke pending |
+| Extraction, Docling, OCR, media transcription | complete | implemented with Windows-native legacy Office fallback, iWork package fallback, managed Docling, Tesseract, Ollama, cloud OCR, managed FFmpeg, and isolated OpenAI Whisper with time-coded transcript chunks | code-level tests passed; provider/runtime matrix pending Windows |
+| Vector lifecycle | complete | implemented with atomic replacement, semantic parent/child chunks, entity terms, per-file generations, mutation guards, recovery splitting, media scope, and file-category-scoped rebuild | index/database tests passed |
+| Organization | complete | implemented with priority/ignore/hybrid logic, safe paths, conflicts, cross-volume fallback, rollback distinction, and restart-safe one-time multi-folder organization with optional recursion and repository exclusion | organizer tests passed; cross-volume Windows smoke pending |
+| Library | complete | implemented with complete Smart Search filters, lexical/entity/semantic RRF, dynamic semantic acceptance, optional reranking, the 50%/minimum-three display policy, duplicate management, sorting, paging, creation dates, and inspector | query/duplicate tests and Electron UI build passed |
+| Chat | complete | implemented with parent evidence expansion, stable citation validation, bounded context, persisted related-file confidence, immediate durable questions, 40-message history pages, configurable retrieval, document/image/transcribed-media chat, retry replacement, progress, metrics, cancellation, and retrieval fallback | chat/database tests and Electron UI build passed |
 | Rules | complete | implemented with create/edit/delete/toggle/generate/apply | integration and UI build passed |
-| Settings and managed services | complete | implemented with independent providers, connectivity checks, model lifecycle, and selective indexing controls | type check/build passed; provider runtime matrix pending Windows |
+| Settings and managed services | complete | implemented with independent providers, connectivity checks, model lifecycle, managed Qwen3 reranker lifecycle, FFmpeg/Whisper setup and model management, and selective indexing controls | type check/build passed; provider runtime matrix pending Windows |
 | Statistics, logs, updates | complete | implemented with activity/category/storage/model metrics, log lifecycle, and updater configuration | database tests passed; signed update pending publisher infrastructure |
 | Localization and theme | complete | English/Chinese/system and light/dark/system implemented; new parity surfaces localized | type check and UI smoke passed |
 | Security | native sandbox boundary | renderer sandbox, navigation denial, allowlisted preview, and refusal to persist plaintext secrets implemented | static inspection passed; DPAPI packaged check pending Windows |
@@ -57,6 +57,19 @@ A capability is complete only when all applicable layers agree:
 - Added settings normalization for chunk, overlap, RAG limit, context window, scheduling, extensions, folders, and cloud provider defaults.
 - Added configurable global Quick Search with registration-conflict reporting, a centered floating query window, and automatic main-window Library routing.
 - Added an integration-oriented parity suite covering structured chunks, note-only reindexing, query intent, safe organization, bounded chat context, retry replacement, metrics, cancellation, and watcher baselines.
+- Added the current semantic retrieval pipeline: 600-token parents, 300-token retrieval children, whole-unit overlap, table-header repetition, parent evidence expansion, and exact entity terms.
+- Added weighted reciprocal-rank fusion across lexical, semantic, and entity lanes, query-relative semantic thresholds, fail-open OpenAI/Jina-compatible reranking, and bounded local retrieval traces.
+- Added the isolated managed Qwen3-Reranker-0.6B runtime for Windows, including download, verification, health, start, stop, delete, status, and cloud-compatible configuration.
+- Added stable `[F#:P#]` evidence IDs, centralized AI prompts, invalid-citation removal, and the complete macOS Smart Search filter schema.
+- Added provider-aware Ollama automatic startup for local loopback hosts, an idempotent cold-start wait, and managed-process shutdown.
+- Added a dismissible automatic processing status tip that follows active indexing, queued organization, and file moves without hiding later work.
+- Added managed Windows FFmpeg and an isolated pinned OpenAI Whisper runtime, selectable model download/delete, serialized local transcription, time-coded transcript chunks, transcribed-media search/chat, and media-only reindexing.
+- Added one-time multi-folder organization without changing watch settings, optional recursive traversal, source-control repository exclusion, pending queue presentation, pause/resume/stop, and interrupted-job recovery.
+- Added adaptive indexing concurrency, initial unpersisted blank chat behavior, mixed CamelCase/Chinese lexical boundaries, and paged inspector chunk loading.
+- Added SHA-256 duplicate discovery, indexed-original links, automatic duplicate vector suppression, retained-original protection, pre-delete hash verification, progress, and Windows Recycle Bin cleanup.
+- Added durable related-file confidence, immediate question persistence, 40-message chat history pages, and the shared confidence display policy that keeps all results at or above 50% and uses weaker results only to reach three.
+- Added file creation-date backfill, file-type-scoped reindex controls, bounded directory inspection, a 24-hour/cursor/256 MB managed-content audit, and one-time schema migration markers.
+- Added Ollama embedding requests with truncation and an explicit 32,000-token context window.
 
 ## Verification truth
 
@@ -72,9 +85,10 @@ These platform gates must not be reported as passed solely because packaging suc
 
 Therefore, the source implementation now targets complete functional parity, while the release as a whole remains **not yet certified as 100% parity** until the Windows-native gates above pass on x64 and ARM64 Windows 11.
 
-## Latest code-level verification — 2026-07-17
+## Latest code-level verification — 2026-07-19
 
+- Current macOS XCTest baseline: 339 tests passed, 0 failed.
 - TypeScript strict type check: passed.
-- Vitest: 21 tests passed across 2 files, 0 failed.
+- Vitest: 36 tests passed across 2 files, 0 failed.
 - Electron production build: main, preload, and renderer bundles passed.
-- Windows-native installer, shell, DPAPI, tray, startup, and signed update gates remain pending.
+- Windows-native installer, shell, DPAPI, tray, startup, managed FFmpeg/Whisper runtime, and signed update gates remain pending.

@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#4f46e5" />
+    <meta
+      name="description"
+      content="FileNest is a local-first intelligent file manager for macOS and Windows. Search, organize, and chat with your files without sending them away by default."
+    />
+    <meta property="og:title" content="FileNest — Your files, understood" />
+    <meta
+      property="og:description"
+      content="A local-first intelligent file manager that organizes, indexes, and understands your files."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="assets/filenest-chat-current.webp" />
+    <link rel="icon" href="assets/app-icon.png" />
+    <link rel="stylesheet" href="styles.css" />
+    <title>FileNest — Your files, understood</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main" data-i18n="a11y.skip">Skip to content</a>
+
+    <header class="site-header" data-header>
+      <a class="wordmark" href="#top" aria-label="FileNest home">
+        <img src="assets/app-icon.png" alt="" width="40" height="40" />
+        <span>FileNest</span>
+      </a>
+
+      <button
+        class="menu-button"
+        type="button"
+        aria-expanded="false"
+        aria-controls="site-navigation"
+        data-menu-button
+      >
+        <span class="menu-button__line"></span>
+        <span class="menu-button__line"></span>
+        <span class="sr-only" data-i18n="a11y.menu">Open navigation</span>
+      </button>
+
+      <nav class="site-nav" id="site-navigation" aria-label="Primary navigation" data-nav>
+        <a href="#demo" data-i18n="nav.demo">Live demo</a>
+        <a href="#privacy" data-i18n="nav.privacy">Privacy</a>
+        <a href="#platforms" data-i18n="nav.platforms">Platforms</a>
+        <a href="#questions" data-i18n="nav.questions">Questions</a>
+      </nav>
+
+      <div class="header-actions">
+        <button class="locale-switch" type="button" data-locale-switch aria-label="Switch language">
+          <span data-locale-label>ZH</span>
+        </button>
+        <a class="header-cta" href="#availability" data-i18n="nav.cta">Release updates</a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero__copy">
+          <div class="availability-line">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span data-i18n="hero.status">Local AI · Built for macOS 13+ and Windows 11</span>
+          </div>
+          <h1>
+            <span data-i18n="hero.titleLine1">Your files,</span>
+            <span class="hero__title-accent" data-i18n="hero.titleLine2">understood.</span>
+          </h1>
+          <p class="hero__lede" data-i18n="hero.lede">
+            Index, search, and chat with the files already on your computer using local AI. In local mode, content, indexes, notes, and conversations stay on this device.
+          </p>
+          <div class="hero__actions">
+            <a class="button button--primary" href="#demo" data-i18n="hero.primaryCta">Explore local AI</a>
+            <a class="button button--quiet" href="#privacy" data-i18n="hero.secondaryCta">How local-first works</a>
+          </div>
+          <div class="hero__trust-grid" aria-label="Local AI, privacy, and security guarantees">
+            <span><strong data-i18n="hero.localAiTitle">Local AI</strong><small data-i18n="hero.localAiBody">Ollama, OCR, and embeddings</small></span>
+            <span><strong data-i18n="hero.privateIndexTitle">Private index</strong><small data-i18n="hero.privateIndexBody">Stored on this device</small></span>
+            <span><strong data-i18n="hero.securityTitle">Security boundary</strong><small data-i18n="hero.securityBody">Your operating-system account</small></span>
+          </div>
+        </div>
+
+        <div class="hero__visual" aria-label="FileNest application preview">
+          <div class="hero__halo" aria-hidden="true"></div>
+          <div class="app-window">
+            <img
+              src="assets/filenest-chat-current.webp"
+              alt="FileNest finding the most relevant contract files from a natural-language request"
+              data-i18n-alt="images.hero"
+              width="2584"
+              height="1500"
+            />
+          </div>
+          <span class="capture-note" data-i18n="hero.captureNote">Actual UI · mock workspace</span>
+          <div class="floating-proof floating-proof--privacy">
+            <span class="proof-status" aria-hidden="true"></span>
+            <span>
+              <strong data-i18n="hero.proofPrivacyTitle">Local AI running</strong>
+              <small data-i18n="hero.proofPrivacyBody">Processing stays on this device</small>
+            </span>
+          </div>
+          <div class="floating-proof floating-proof--result">
+            <img src="assets/brand-mark.png" alt="" width="28" height="28" />
+            <span>
+              <strong data-i18n="hero.proofResultTitle">Private index</strong>
+              <small data-i18n="hero.proofResultBody">Grounded answers, local vectors</small>
+            </span>
+          </div>
+        </div>
+
+        <div class="hero__workflow-bar">
+          <div>
+            <strong data-i18n="hero.workflowTitle">Private intelligence. Five real workflows.</strong>
+            <span data-i18n="hero.workflowBody">One native product shell, grounded in your local files.</span>
+          </div>
+          <nav aria-label="FileNest workflow shortcuts">
+            <a href="#product-demo" data-hero-demo="indexing"><small>01</small><span data-i18n="demo.tabIndexing">Indexing</span></a>
+            <a href="#product-demo" data-hero-demo="search"><small>02</small><span data-i18n="demo.tabSearch">Search</span></a>
+            <a href="#product-demo" data-hero-demo="smart"><small>03</small><span data-i18n="demo.tabSmart">Smart Search</span></a>
+            <a href="#product-demo" data-hero-demo="find-chat"><small>04</small><span data-i18n="demo.tabFindChat">Find with Chat</span></a>
+            <a href="#product-demo" data-hero-demo="file-chat"><small>05</small><span data-i18n="demo.tabFileChat">Chat with a File</span></a>
+          </nav>
+        </div>
+      </section>
+
+      <section class="format-ribbon" aria-label="Supported content types">
+        <p data-i18n="formats.label">One library for the things scattered across your desktop</p>
+        <div class="format-list" aria-hidden="true">
+          <span>PDF</span><span>DOCX</span><span>XLSX</span><span>PPTX</span><span>Images</span><span>Audio</span><span>Video</span><span>Projects</span>
+        </div>
+      </section>
+
+      <section class="demo-lab section" id="demo" data-demo-lab>
+        <div class="section-heading section-heading--centered">
+          <p class="section-intro" data-i18n="demo.intro">Five workflows. One private workspace.</p>
+          <h2 data-i18n="demo.title">Watch FileNest turn scattered files into answers.</h2>
+          <p data-i18n="demo.body">
+            Explore a guided product simulation built entirely with fictional Northstar Studio files. Nothing below comes from a real user or device.
+          </p>
+        </div>
+
+        <div class="demo-tabs" role="tablist" aria-label="FileNest demo workflows" data-i18n-aria-label="demo.tabsLabel">
+          <button type="button" role="tab" aria-selected="true" aria-controls="demo-indexing" id="demo-tab-indexing" data-demo-tab="indexing">
+            <span data-i18n="demo.tabIndexing">Indexing</span>
+          </button>
+          <button type="button" role="tab" aria-selected="false" aria-controls="demo-search" id="demo-tab-search" data-demo-tab="search">
+            <span data-i18n="demo.tabSearch">Search</span>
+          </button>
+          <button type="button" role="tab" aria-selected="false" aria-controls="demo-smart" id="demo-tab-smart" data-demo-tab="smart">
+            <span data-i18n="demo.tabSmart">Smart Search</span>
+          </button>
+          <button type="button" role="tab" aria-selected="false" aria-controls="demo-find-chat" id="demo-tab-find-chat" data-demo-tab="find-chat">
+            <span data-i18n="demo.tabFindChat">Find with Chat</span>
+          </button>
+          <button type="button" role="tab" aria-selected="false" aria-controls="demo-file-chat" id="demo-tab-file-chat" data-demo-tab="file-chat">
+            <span data-i18n="demo.tabFileChat">Chat with a File</span>
+          </button>
+        </div>
+
+        <div class="demo-shell" id="product-demo">
+          <aside class="demo-native-sidebar" aria-label="FileNest application sidebar">
+            <div class="demo-sidebar-chrome"><span class="demo-window-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
+            <div class="demo-native-brand"><img src="assets/app-icon.png" alt="" width="31" height="31" /><strong>FileNest</strong></div>
+            <nav class="demo-native-nav" aria-label="FileNest demo navigation">
+              <span class="is-selected" data-demo-sidebar-library>Library</span>
+              <span data-demo-sidebar-chat>Find with Chat</span>
+            </nav>
+            <p class="demo-recent-label">Recent</p>
+            <div class="demo-recent-list">
+              <span data-demo-recent-find>Find the launch research</span>
+              <span data-demo-recent-file>Chat with Aurora brief</span>
+              <span>Recently modified PDFs</span>
+              <span>Organize launch materials</span>
+              <span>Customer meeting notes</span>
+            </div>
+            <div class="demo-sidebar-state"><span class="status-dot" aria-hidden="true"></span><span data-i18n="demo.localAiReady">Local AI ready</span><small data-i18n="demo.mockBadge">Mock data</small></div>
+          </aside>
+
+          <div class="demo-native-main">
+
+          <div class="demo-stage">
+            <article class="demo-panel demo-panel--indexing" id="demo-indexing" role="tabpanel" aria-labelledby="demo-tab-indexing" data-demo-panel="indexing">
+              <div class="demo-panel__heading">
+                <div><span class="demo-kicker" data-i18n="demo.indexingKicker">Private index</span><h3 data-i18n="demo.indexingTitle">Preparing Project Aurora</h3></div>
+                <span class="demo-state demo-state--active"><i></i><span data-i18n="demo.indexingState">Indexing locally</span></span>
+              </div>
+              <div class="indexing-progress"><span></span></div>
+              <div class="indexing-grid">
+                <div class="indexing-queue">
+                  <div class="mock-file demo-reveal" style="--delay: 180ms"><span class="file-badge file-badge--pdf">P</span><span><strong>Aurora Product Brief.pdf</strong><small data-i18n="demo.extracting">Extracting text</small></span><i class="activity-ring"></i></div>
+                  <div class="mock-file demo-reveal" style="--delay: 700ms"><span class="file-badge">W</span><span><strong>Customer Research Notes.docx</strong><small data-i18n="demo.embedding">Creating embeddings</small></span><i class="activity-ring"></i></div>
+                  <div class="mock-file demo-reveal" style="--delay: 1220ms"><span class="file-badge file-badge--sheet">X</span><span><strong>Launch Budget.xlsx</strong><small data-i18n="demo.reading">Reading tables</small></span><i class="activity-ring"></i></div>
+                </div>
+                <div class="indexing-summary demo-reveal" style="--delay: 2050ms">
+                  <span class="summary-check" aria-hidden="true"></span>
+                  <strong data-i18n="demo.indexingComplete">12 files ready to search</strong>
+                  <small data-i18n="demo.indexingCompleteBody">Text, entities, notes, and semantic vectors are stored on this device.</small>
+                </div>
+              </div>
+            </article>
+
+            <article class="demo-panel demo-panel--search" id="demo-search" role="tabpanel" aria-labelledby="demo-tab-search" data-demo-panel="search" hidden>
+              <div class="demo-panel__heading">
+                <div><span class="demo-kicker" data-i18n="demo.searchKicker">Fast search</span><h3 data-i18n="demo.searchTitle">Search names and contents</h3></div>
+                <span class="demo-state"><span data-i18n="demo.searchCount">3 results</span></span>
+              </div>
+              <div class="demo-search-field"><span class="search-glyph" aria-hidden="true"></span><span class="typed-query">Aurora launch plan</span><span class="typing-caret" aria-hidden="true"></span><kbd>⌘ K</kbd></div>
+              <div class="demo-results">
+                <div class="mock-file demo-reveal" style="--delay: 900ms"><span class="file-badge file-badge--pdf">P</span><span><strong>Aurora Launch Plan.pdf</strong><small>Projects / Aurora / Planning</small></span><span class="result-reason" data-i18n="demo.nameMatch">Name match</span></div>
+                <div class="mock-file demo-reveal" style="--delay: 1220ms"><span class="file-badge">W</span><span><strong>Launch Checklist.docx</strong><small>Projects / Aurora / Operations</small></span><span class="result-reason" data-i18n="demo.contentMatch">Content match</span></div>
+                <div class="mock-file demo-reveal" style="--delay: 1540ms"><span class="file-badge file-badge--slide">S</span><span><strong>Aurora Kickoff.pptx</strong><small>Projects / Aurora / Meetings</small></span><span class="result-reason" data-i18n="demo.keywordMatch">Keyword match</span></div>
+              </div>
+            </article>
+
+            <article class="demo-panel demo-panel--smart" id="demo-smart" role="tabpanel" aria-labelledby="demo-tab-smart" data-demo-panel="smart" hidden>
+              <div class="demo-panel__heading">
+                <div><span class="demo-kicker" data-i18n="demo.smartKicker">Smart Search</span><h3 data-i18n="demo.smartTitle">Describe what you remember</h3></div>
+                <span class="demo-state demo-state--active"><i></i><span data-i18n="demo.smartState">Understanding intent</span></span>
+              </div>
+              <div class="smart-query"><span class="query-avatar">You</span><p data-i18n="demo.smartQuery">The deck from our spring offsite about Aurora pricing</p></div>
+              <div class="intent-row">
+                <span class="intent-chip demo-reveal" style="--delay: 500ms"><b data-i18n="demo.intentType">Type</b> Presentation</span>
+                <span class="intent-chip demo-reveal" style="--delay: 760ms"><b data-i18n="demo.intentDate">Date</b> Mar–May 2026</span>
+                <span class="intent-chip demo-reveal" style="--delay: 1020ms"><b data-i18n="demo.intentTopic">Topic</b> Aurora pricing</span>
+              </div>
+              <div class="smart-best demo-reveal" style="--delay: 1450ms">
+                <span class="file-badge file-badge--slide">S</span>
+                <span><small data-i18n="demo.bestSemanticMatch">Best semantic match · 93%</small><strong>Spring Offsite — Aurora Packaging.pptx</strong><em data-i18n="demo.smartReason">Mentions three pricing tiers and was edited during the April offsite.</em></span>
+                <button type="button" data-i18n="demo.preview">Preview</button>
+              </div>
+            </article>
+
+            <article class="demo-panel demo-panel--find-chat" id="demo-find-chat" role="tabpanel" aria-labelledby="demo-tab-find-chat" data-demo-panel="find-chat" hidden>
+              <div class="demo-panel__heading">
+                <div><span class="demo-kicker" data-i18n="demo.findKicker">Chat to find files</span><h3 data-i18n="demo.findTitle">Ask for the outcome, not a filename</h3></div>
+              </div>
+              <div class="chat-thread">
+                <div class="chat-message chat-message--user demo-reveal" style="--delay: 180ms"><span class="query-avatar">You</span><p data-i18n="demo.findQuery">Find the research that changed our onboarding plan.</p></div>
+                <div class="chat-thinking demo-reveal" style="--delay: 700ms"><img src="assets/brand-mark.png" alt="" width="28" height="28" /><span><i></i><i></i><i></i></span><small data-i18n="demo.findThinking">Searching notes, documents, and meeting summaries</small></div>
+                <div class="chat-answer demo-reveal" style="--delay: 1500ms">
+                  <div class="answer-heading"><img src="assets/brand-mark.png" alt="" width="30" height="30" /><strong>FileNest</strong></div>
+                  <p data-i18n="demo.findAnswer">These two files connect the research findings to the revised onboarding flow.</p>
+                  <div class="compact-results">
+                    <div class="mock-file"><span class="file-badge">W</span><span><strong>Onboarding Research Synthesis.docx</strong><small data-i18n="demo.findReasonOne">Primary research · 8 matching passages</small></span></div>
+                    <div class="mock-file"><span class="file-badge file-badge--pdf">P</span><span><strong>Onboarding Flow v3.pdf</strong><small data-i18n="demo.findReasonTwo">References the synthesis in decision notes</small></span></div>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <article class="demo-panel demo-panel--file-chat" id="demo-file-chat" role="tabpanel" aria-labelledby="demo-tab-file-chat" data-demo-panel="file-chat" hidden>
+              <div class="file-context demo-reveal" style="--delay: 100ms"><span class="file-badge file-badge--pdf">P</span><span><small data-i18n="demo.fileContext">Chatting with</small><strong>Aurora Product Brief.pdf</strong></span><span class="context-pages">18 <span data-i18n="demo.pages">pages</span></span></div>
+              <div class="chat-thread chat-thread--file">
+                <div class="chat-message chat-message--user demo-reveal" style="--delay: 480ms"><span class="query-avatar">You</span><p data-i18n="demo.fileQuery">What are the launch risks, and who owns each one?</p></div>
+                <div class="file-answer demo-reveal" style="--delay: 1120ms">
+                  <div class="answer-heading"><img src="assets/brand-mark.png" alt="" width="30" height="30" /><strong>FileNest</strong><span data-i18n="demo.groundedAnswer">Grounded answer</span></div>
+                  <p data-i18n="demo.fileAnswer">The brief identifies three launch risks:</p>
+                  <ol>
+                    <li><span><strong data-i18n="demo.riskOne">Enterprise migration readiness</strong><small data-i18n="demo.ownerOne">Owner: Maya Chen · Product</small></span><button type="button">p. 9</button></li>
+                    <li><span><strong data-i18n="demo.riskTwo">Support coverage during rollout</strong><small data-i18n="demo.ownerTwo">Owner: Leo Martin · Customer Success</small></span><button type="button">p. 12</button></li>
+                    <li><span><strong data-i18n="demo.riskThree">Pricing page dependencies</strong><small data-i18n="demo.ownerThree">Owner: Priya Shah · Growth</small></span><button type="button">p. 14</button></li>
+                  </ol>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div class="demo-controls">
+            <div class="demo-progress" aria-hidden="true">
+              <span class="is-active"></span><span></span><span></span><span></span><span></span>
+            </div>
+            <p aria-live="polite"><span data-i18n="demo.showing">Showing</span> <strong data-demo-status>Indexing</strong></p>
+            <div>
+              <button class="demo-control" type="button" data-demo-replay><span data-i18n="demo.replay">Replay</span></button>
+              <button class="demo-control" type="button" aria-pressed="true" data-demo-autoplay><span data-demo-autoplay-label data-i18n="demo.pause">Pause</span></button>
+            </div>
+          </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="capabilities section" id="capabilities">
+        <div class="capability capability--search">
+          <div class="capability__copy">
+            <span class="capability__label" data-i18n="capabilities.searchLabel">Search by meaning</span>
+            <h2 data-i18n="capabilities.searchTitle">Names are optional. Context is enough.</h2>
+            <p data-i18n="capabilities.searchBody">
+              Smart Search turns everyday language into keywords, dates, file types, and semantic intent. Hybrid retrieval brings the strongest signals together, then shows why a result matched.
+            </p>
+            <ul class="check-list">
+              <li data-i18n="capabilities.searchPoint1">Natural-language file search</li>
+              <li data-i18n="capabilities.searchPoint2">Content, entity, keyword, and vector retrieval</li>
+              <li data-i18n="capabilities.searchPoint3">Evidence-backed answers with file previews</li>
+            </ul>
+          </div>
+          <figure class="capability__media media-frame">
+            <img src="assets/filenest-chat-detail-current.webp" alt="FileNest search results showing relevant local documents" data-i18n-alt="images.chat" width="1850" height="1000" loading="lazy" />
+          </figure>
+        </div>
+
+        <div class="capability capability--organize">
+          <div class="organize-flow" aria-label="Automatic organization flow">
+            <div class="flow-step">
+              <span class="flow-step__icon flow-step__icon--watch" aria-hidden="true"></span>
+              <span><strong data-i18n="capabilities.flow1Title">Watch</strong><small data-i18n="capabilities.flow1Body">Selected folders only</small></span>
+            </div>
+            <div class="flow-connector" aria-hidden="true"><span></span></div>
+            <div class="flow-step">
+              <span class="flow-step__icon flow-step__icon--index" aria-hidden="true"></span>
+              <span><strong data-i18n="capabilities.flow2Title">Understand</strong><small data-i18n="capabilities.flow2Body">Extract, OCR, and index</small></span>
+            </div>
+            <div class="flow-connector" aria-hidden="true"><span></span></div>
+            <div class="flow-step">
+              <span class="flow-step__icon flow-step__icon--move" aria-hidden="true"></span>
+              <span><strong data-i18n="capabilities.flow3Title">Organize</strong><small data-i18n="capabilities.flow3Body">Rules first, AI optional</small></span>
+            </div>
+          </div>
+          <div class="capability__copy">
+            <span class="capability__label" data-i18n="capabilities.organizeLabel">Quiet automation</span>
+            <h2 data-i18n="capabilities.organizeTitle">Organized before clutter becomes a project.</h2>
+            <p data-i18n="capabilities.organizeBody">
+              FileNest waits until downloads and project folders are stable, indexes before moving, and follows your ordered rules. Unmatched files can be classified by local AI, while installers and temporary files stay untouched.
+            </p>
+          </div>
+        </div>
+
+        <div class="capability capability--chat">
+          <div class="capability__copy">
+            <span class="capability__label" data-i18n="capabilities.chatLabel">Local models, explicit control</span>
+            <h2 data-i18n="capabilities.chatTitle">Run intelligence where your files already live.</h2>
+            <p data-i18n="capabilities.chatBody">
+              FileNest manages local Ollama models and keeps chat, embeddings, and OCR independently configurable. Cloud providers remain optional and visible.
+            </p>
+            <div class="mini-features">
+              <span data-i18n="capabilities.chatPoint1">Local chat</span>
+              <span data-i18n="capabilities.chatPoint2">Local embeddings</span>
+              <span data-i18n="capabilities.chatPoint3">Local OCR</span>
+            </div>
+          </div>
+          <figure class="capability__media media-frame media-frame--dark">
+            <img src="assets/filenest-models-current.webp" alt="FileNest settings for local models and indexing" data-i18n-alt="images.settings" width="2584" height="1904" loading="lazy" />
+          </figure>
+        </div>
+      </section>
+
+      <section class="privacy" id="privacy">
+        <div class="privacy__inner">
+          <div class="privacy__statement">
+            <img class="privacy__mark" src="assets/brand-mark.png" alt="" width="84" height="84" loading="lazy" />
+            <p data-i18n="privacy.intro">Local-first is not a setting hidden in preferences.</p>
+            <h2 data-i18n="privacy.title">Your computer is the boundary.</h2>
+            <p data-i18n="privacy.body">
+              File metadata, extracted content, embeddings, notes, and conversations are stored on your device by default. Local models can handle search, OCR, and answers without uploading document content.
+            </p>
+          </div>
+          <div class="privacy__map" aria-label="Local-first data flow">
+            <div class="device-boundary">
+              <div class="device-boundary__label">
+                <span class="status-dot"></span>
+                <span data-i18n="privacy.device">On this device</span>
+              </div>
+              <div class="local-parts">
+                <div><strong data-i18n="privacy.files">Your files</strong><small data-i18n="privacy.filesBody">Originals stay in your folders</small></div>
+                <span aria-hidden="true">→</span>
+                <div><strong data-i18n="privacy.index">Private index</strong><small data-i18n="privacy.indexBody">Chunks, notes, and vectors</small></div>
+                <span aria-hidden="true">→</span>
+                <div><strong data-i18n="privacy.ai">Local AI</strong><small data-i18n="privacy.aiBody">Ollama, OCR, and embeddings</small></div>
+              </div>
+            </div>
+            <div class="cloud-choice">
+              <div>
+                <span class="cloud-choice__icon" aria-hidden="true"></span>
+                <span><strong data-i18n="privacy.cloud">Optional cloud providers</strong><small data-i18n="privacy.cloudBody">Used only when you configure them</small></span>
+              </div>
+              <span class="choice-tag" data-i18n="privacy.choice">Your choice</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="platforms section" id="platforms">
+        <div class="platforms__heading">
+          <h2 data-i18n="platforms.title">At home on your desktop.</h2>
+          <p data-i18n="platforms.body">One product model, shaped for the conventions of each operating system.</p>
+        </div>
+        <div class="platforms__content">
+          <div class="platform-copy">
+            <div class="platform-tabs" role="tablist" aria-label="Platforms">
+              <button type="button" role="tab" aria-selected="true" aria-controls="mac-panel" id="mac-tab" data-platform="mac">macOS</button>
+              <button type="button" role="tab" aria-selected="false" aria-controls="windows-panel" id="windows-tab" data-platform="windows">Windows</button>
+            </div>
+            <div class="platform-panel" id="mac-panel" role="tabpanel" aria-labelledby="mac-tab" data-platform-panel="mac">
+              <h3 data-i18n="platforms.macTitle">Native where it matters.</h3>
+              <p data-i18n="platforms.macBody">A SwiftUI app with menu bar presence, Finder integration, native previews, system appearance, and global quick search. macOS 13 and later.</p>
+              <span class="release-state release-state--active" data-i18n="platforms.macState">Product behavior baseline</span>
+            </div>
+            <div class="platform-panel" id="windows-panel" role="tabpanel" aria-labelledby="windows-tab" data-platform-panel="windows" hidden>
+              <h3 data-i18n="platforms.windowsTitle">Parity without impersonation.</h3>
+              <p data-i18n="platforms.windowsBody">A Windows 11 implementation with tray workflows, native shell actions, secure credential storage, and matching search, chat, indexing, and rules.</p>
+              <span class="release-state" data-i18n="platforms.windowsState">Native release validation in progress</span>
+            </div>
+          </div>
+          <figure class="platform-preview media-frame">
+            <img src="assets/filenest-chat-current.webp" alt="FileNest desktop application on macOS" data-i18n-alt="images.platform" width="2584" height="1500" loading="lazy" data-platform-image />
+          </figure>
+        </div>
+      </section>
+
+      <section class="questions section" id="questions">
+        <div class="questions__heading">
+          <h2 data-i18n="faq.title">The practical questions.</h2>
+          <p data-i18n="faq.body">Clear answers, before you trust an app with your files.</p>
+        </div>
+        <div class="faq-list">
+          <details open>
+            <summary data-i18n="faq.q1">Does FileNest upload my files?</summary>
+            <p data-i18n="faq.a1">Not in local mode. File contents, indexes, notes, and conversations stay on your computer. If you explicitly configure a cloud model, only the requests for that provider are sent to its API.</p>
+          </details>
+          <details>
+            <summary data-i18n="faq.q2">What can FileNest understand?</summary>
+            <p data-i18n="faq.a2">It can extract text and structure from PDFs, Office documents, images, archives, project folders, and—when enabled—audio and video transcripts. OCR and parser fallbacks depend on your setup.</p>
+          </details>
+          <details>
+            <summary data-i18n="faq.q3">Will automatic organization move unfinished downloads?</summary>
+            <p data-i18n="faq.a3">FileNest checks that files and directories are stable before processing them. It also ignores locks, temporary downloads, installers, and unsupported items by default.</p>
+          </details>
+          <details>
+            <summary data-i18n="faq.q4">Can I use my own AI provider?</summary>
+            <p data-i18n="faq.a4">Yes. You can run compatible local models with Ollama or configure OpenAI-compatible and Anthropic cloud providers separately for chat, embeddings, and OCR.</p>
+          </details>
+        </div>
+      </section>
+
+      <section class="availability section" id="availability">
+        <div class="availability__icon">
+          <img src="assets/app-icon.png" alt="FileNest app icon" width="128" height="128" loading="lazy" />
+        </div>
+        <div class="availability__copy">
+          <p data-i18n="availability.intro">FileNest is preparing for public release</p>
+          <h2 data-i18n="availability.title">Make room for the work. Not the file hunt.</h2>
+          <p data-i18n="availability.body">macOS is the current product baseline. Windows 11 is completing native release validation for x64 and ARM64.</p>
+        </div>
+        <a class="button button--primary" href="#top" data-i18n="availability.cta">Back to overview</a>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <a class="wordmark wordmark--footer" href="#top">
+        <img src="assets/brand-mark.png" alt="" width="34" height="34" loading="lazy" />
+        <span>FileNest</span>
+      </a>
+      <p data-i18n="footer.tagline">Local-first intelligent file management.</p>
+      <p class="footer-note">© <span data-year></span> FileNest. <span data-i18n="footer.rights">All rights reserved.</span></p>
+    </footer>
+
+    <script src="script.js" defer></script>
+  </body>
+</html>

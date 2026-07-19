@@ -80,6 +80,9 @@ struct LibraryRelativeDateIntent: Equatable {
 }
 
 struct LibrarySearchResult: Identifiable, Equatable {
+    static let minimumDisplayConfidence = 0.50
+    static let minimumVisibleResultCount = 3
+
     var id: String { file.id.map(String.init) ?? file.path }
     let file: FileRecord
     let score: Double
@@ -92,6 +95,22 @@ struct LibrarySearchResult: Identifiable, Equatable {
 
     var confidencePercent: Int {
         Int((min(max(confidence, 0), 1) * 100).rounded())
+    }
+
+    /// Keeps weak matches out of result lists unless they are needed to provide
+    /// a minimally useful set of search results.
+    static func applyingDisplayConfidencePolicy(
+        to results: [LibrarySearchResult]
+    ) -> [LibrarySearchResult] {
+        let confident = results.filter { $0.confidence >= minimumDisplayConfidence }
+        let requiredCount = min(minimumVisibleResultCount, results.count)
+        guard confident.count < requiredCount else { return confident }
+
+        let fallbackCount = requiredCount - confident.count
+        let lowerConfidence = results
+            .filter { $0.confidence < minimumDisplayConfidence }
+            .prefix(fallbackCount)
+        return confident + lowerConfidence
     }
 }
 
@@ -264,6 +283,11 @@ private enum SmartSearchPlanError: Error {
     case invalidJSON
 }
 
+struct ChatHistoryPage {
+    let messages: [ChatMessage]
+    let hasEarlier: Bool
+}
+
 /// Chat service for persistence, file and RAG context, streamed model output, and file references.
 final class ChatService {
     private static let attachedChunkLimit = 6
@@ -302,8 +326,7 @@ final class ChatService {
         var sessions = (try? store.allChatSessions()) ?? []
         for index in sessions.indices where sessions[index].title == "New Chat" {
             guard let id = sessions[index].id,
-                  let history = try? store.chatMessages(sessionId: id),
-                  let firstQuestion = history.first(where: { $0.role == ChatRole.user.rawValue })?.content,
+                  let firstQuestion = try? store.firstUserQuestion(sessionId: id),
                   !firstQuestion.isEmpty else { continue }
             sessions[index].title = String(
                 firstQuestion
@@ -342,10 +365,51 @@ final class ChatService {
         } else {
             messages = (try? store.allChatMessages()) ?? []
         }
-        for index in messages.indices {
-            messages[index].relatedFiles = resolveRelated(from: messages[index])
+        return resolveRelationships(in: messages)
+    }
+
+    func loadHistoryPage(
+        sessionId: Int64,
+        beforeID: Int64? = nil,
+        limit: Int = 40
+    ) -> ChatHistoryPage {
+        guard let page = try? store.chatMessagePage(
+            sessionId: sessionId,
+            beforeID: beforeID,
+            limit: limit
+        ) else {
+            return ChatHistoryPage(messages: [], hasEarlier: false)
         }
-        return messages
+        return ChatHistoryPage(
+            messages: resolveRelationships(in: page.messages),
+            hasEarlier: page.hasEarlier
+        )
+    }
+
+    /// Persists the user's question before starting the asynchronous RAG pipeline so the
+    /// conversation can render immediately even when file parsing or model startup is slow.
+    func saveUserQuestion(_ question: String, sessionId: Int64) -> ChatMessage? {
+        var message = ChatMessage(
+            id: nil,
+            role: ChatRole.user.rawValue,
+            content: question,
+            ts: Date(),
+            relatedFileIds: nil,
+            sessionId: sessionId
+        )
+        do {
+            message.id = try store.addChatMessage(message)
+            updateSessionAfterQuestion(sessionId: sessionId, question: question)
+            return message
+        } catch {
+            AppLogService.shared.write(
+                "chat user message persistence failed",
+                category: .chat,
+                level: .error,
+                metadata: ["session_id": "\(sessionId)", "error": error.localizedDescription]
+            )
+            return nil
+        }
     }
 
     /// Updates the latest editable user question without inserting another message.
@@ -380,14 +444,15 @@ final class ChatService {
                       sessionId: Int64,
                       attachedFilePath: String?,
                       modelOverride: String? = nil,
-                      providerMode: ChatProviderMode = .configured) -> AsyncStream<ChatStreamUpdate> {
+                      providerMode: ChatProviderMode = .configured,
+                      savesUserMessage: Bool = true) -> AsyncStream<ChatStreamUpdate> {
         streamResponse(
             question,
             sessionId: sessionId,
             attachedFilePath: attachedFilePath,
             modelOverride: modelOverride,
             providerMode: providerMode,
-            savesUserMessage: true,
+            savesUserMessage: savesUserMessage,
             replacingAssistantMessageID: nil
         )
     }
@@ -421,19 +486,9 @@ final class ChatService {
             let task = Task {
                 let responseStartedAt = Date()
                 if savesUserMessage {
-                    var userMessage = ChatMessage(
-                        id: nil,
-                        role: ChatRole.user.rawValue,
-                        content: question,
-                        ts: Date(),
-                        relatedFileIds: nil,
-                        sessionId: sessionId
-                    )
-                    if let id = try? store.addChatMessage(userMessage) {
-                        userMessage.id = id
+                    if let userMessage = saveUserQuestion(question, sessionId: sessionId) {
+                        continuation.yield(.userSaved(userMessage))
                     }
-                    updateSessionAfterQuestion(sessionId: sessionId, question: question)
-                    continuation.yield(.userSaved(userMessage))
                 }
 
                 let isFileChat = !(attachedFilePath?.isEmpty ?? true)
@@ -603,6 +658,8 @@ final class ChatService {
                 let ids = related.files.compactMap(\.id).filter { $0 > 0 }
                 let idJSON = (try? JSONEncoder().encode(ids))
                     .flatMap { String(data: $0, encoding: .utf8) }
+                let matchJSON = (try? JSONEncoder().encode(related.matches))
+                    .flatMap { String(data: $0, encoding: .utf8) }
                 var assistantMessage = ChatMessage(
                     id: replacingAssistantMessageID,
                     role: ChatRole.assistant.rawValue,
@@ -610,6 +667,8 @@ final class ChatService {
                     ts: Date(),
                     relatedFileIds: idJSON,
                     relatedFiles: related.files,
+                    relatedFileMatchesJSON: matchJSON,
+                    relatedFileMatches: related.matches,
                     sessionId: sessionId,
                     inputTokens: inputTokens,
                     outputTokens: outputTokens,
@@ -710,16 +769,30 @@ final class ChatService {
     func searchLibrary(
         _ rawQuery: String,
         limit: Int = 200,
-        managedRootPath: String? = nil
+        managedRootPath: String? = nil,
+        includeSemantic: Bool = true,
+        rerankCandidateLimit: Int = 10,
+        allowedCategories: Set<FileCategory> = []
     ) async -> [LibrarySearchResult] {
-        let results = await executeLibrarySearch(rawQuery, limit: limit, smartPlan: nil)
-        return Self.existingManagedResults(results, rootPath: managedRootPath)
+        let results = await executeLibrarySearch(
+            rawQuery,
+            limit: limit,
+            smartPlan: nil,
+            includeSemantic: includeSemantic,
+            rerankCandidateLimit: rerankCandidateLimit
+        )
+        return LibrarySearchResult.applyingDisplayConfidencePolicy(to: Self.filteredManagedResults(
+            results,
+            rootPath: managedRootPath,
+            allowedCategories: allowedCategories
+        ))
     }
 
     func smartSearchLibrary(
         _ rawQuery: String,
         limit: Int = 200,
         managedRootPath: String? = nil,
+        allowedCategories: Set<FileCategory> = [],
         onIntentUpdate: ((String) -> Void)? = nil
     ) async -> SmartLibrarySearchResponse {
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -735,10 +808,11 @@ final class ChatService {
             return SmartLibrarySearchResponse(results: [], plan: fallbackPlan, usedAI: false)
         }
         let plan = resolved.plan
-        let results = Self.existingManagedResults(
+        let results = LibrarySearchResult.applyingDisplayConfidencePolicy(to: Self.filteredManagedResults(
             await executeLibrarySearch(query, limit: limit, smartPlan: plan),
-            rootPath: managedRootPath
-        )
+            rootPath: managedRootPath,
+            allowedCategories: allowedCategories
+        ))
         return SmartLibrarySearchResponse(results: results, plan: plan, usedAI: resolved.usedAI)
     }
 
@@ -753,6 +827,16 @@ final class ChatService {
             return canonicalPath(path).hasPrefix(canonicalRoot + "/")
                 && FileManager.default.fileExists(atPath: path)
         }
+    }
+
+    private static func filteredManagedResults(
+        _ results: [LibrarySearchResult],
+        rootPath: String?,
+        allowedCategories: Set<FileCategory>
+    ) -> [LibrarySearchResult] {
+        let managed = existingManagedResults(results, rootPath: rootPath)
+        guard !allowedCategories.isEmpty else { return managed }
+        return managed.filter { allowedCategories.contains($0.file.categoryEnum) }
     }
 
     private static func canonicalPath(_ path: String) -> String {
@@ -805,13 +889,17 @@ final class ChatService {
     private func executeLibrarySearch(
         _ rawQuery: String,
         limit: Int,
-        smartPlan: SmartLibrarySearchPlan?
+        smartPlan: SmartLibrarySearchPlan?,
+        includeSemantic: Bool = true,
+        rerankCandidateLimit: Int = 24
     ) async -> [LibrarySearchResult] {
         await executeLibrarySearchDetails(
             rawQuery,
             limit: limit,
             smartPlan: smartPlan,
-            sortByConfidence: true
+            sortByConfidence: true,
+            includeSemantic: includeSemantic,
+            rerankCandidateLimit: rerankCandidateLimit
         ).results
     }
 
@@ -820,6 +908,8 @@ final class ChatService {
         limit: Int,
         smartPlan: SmartLibrarySearchPlan?,
         sortByConfidence: Bool = false,
+        includeSemantic: Bool = true,
+        rerankCandidateLimit: Int = 24,
         onReranking: (() -> Void)? = nil
     ) async -> LibrarySearchExecution {
         let searchStartedAt = Date()
@@ -828,43 +918,59 @@ final class ChatService {
             return LibrarySearchExecution(results: [], semanticHitsByFile: [:])
         }
 
-        let semanticQuery = smartPlan?.semanticQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        let effectiveSemanticQuery = semanticQuery.flatMap { $0.isEmpty ? nil : $0 }
-            ?? Self.contentSearchQuery(in: query)
+        // Ordinary search uses the same deterministic structural constraints as
+        // Smart Search, without waiting for an LLM planning request.
+        let effectivePlan = smartPlan ?? Self.fallbackSmartSearchPlan(for: query)
+        let semanticQuery = effectivePlan.semanticQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveSemanticQuery = semanticQuery.isEmpty
+            ? Self.contentSearchQuery(in: query)
+            : semanticQuery
         // Keep model paraphrases in vector retrieval only. Lexical ranking must use terms
         // grounded in the user's original wording, otherwise translated grammar can become evidence.
         let terms = Self.librarySearchTerms(
             query,
-            additionalTerms: (smartPlan?.keywords ?? [])
-                + [smartPlan?.exactName].compactMap { $0 }
-                + (smartPlan?.folderTerms ?? [])
+            additionalTerms: effectivePlan.keywords
+                + [effectivePlan.exactName].compactMap { $0 }
+                + effectivePlan.folderTerms
         )
-        let relativeDateIntent = smartPlan?.dateInterval.map {
+        let relativeDateIntent = effectivePlan.dateInterval.map {
             LibraryRelativeDateIntent(interval: $0, contentYears: [])
         } ?? Self.relativeDateIntent(in: query)
         let isRelativeDateOnlyQuery = relativeDateIntent != nil
             && Self.isRelativeDateOnlyQuery(query)
+        let lexicalStartedAt = Date()
         var lexicalByID = [Int64: LibraryLexicalMatch]()
-        for term in terms.prefix(8) {
-            for file in (try? store.files(matching: term)) ?? [] {
-                guard let id = file.id,
-                      let match = Self.libraryLexicalMatch(file: file, query: query, terms: terms) else {
-                    continue
-                }
-                if let existing = lexicalByID[id], match.score <= existing.score { continue }
-                lexicalByID[id] = match
+        let lexicalCandidates = (try? store.files(
+            matchingAny: Array(terms.prefix(8)),
+            limit: max(200, min(800, limit * 3))
+        )) ?? []
+        for file in lexicalCandidates {
+            guard !Task.isCancelled else {
+                return LibrarySearchExecution(results: [], semanticHitsByFile: [:])
             }
+            guard let id = file.id,
+                  let match = Self.libraryLexicalMatch(file: file, query: query, terms: terms) else {
+                continue
+            }
+            if let existing = lexicalByID[id], match.score <= existing.score { continue }
+            lexicalByID[id] = match
         }
+        let lexicalMilliseconds = Int(Date().timeIntervalSince(lexicalStartedAt) * 1_000)
 
         var semanticByID = [Int64: VectorSearchHit]()
         var semanticHitsByFile = [Int64: [VectorSearchHit]]()
         var acceptedSemanticCount = 0
         var effectiveSemanticThreshold: Float?
+        let entityStartedAt = Date()
         let entityTerms = IndexerService.extractedEntityTerms(from: query)
         let entityHits = (try? store.entityChunkMatches(
             terms: entityTerms,
             limit: max(20, min(limit * 2, 60))
         )) ?? []
+        guard !Task.isCancelled else {
+            return LibrarySearchExecution(results: [], semanticHitsByFile: [:])
+        }
+        let entityMilliseconds = Int(Date().timeIntervalSince(entityStartedAt) * 1_000)
         var entityByID = [Int64: VectorSearchHit]()
         for hit in entityHits {
             semanticHitsByFile[hit.fileId, default: []].append(hit)
@@ -872,44 +978,76 @@ final class ChatService {
                 entityByID[hit.fileId] = hit
             }
         }
-        if !effectiveSemanticQuery.isEmpty,
-           let queryVector = try? await activeEmbedder().embed(effectiveSemanticQuery), !queryVector.isEmpty {
-            let vectorStore = providedVectorStore ?? AppStateIndexerProxy.shared.vectorStore
-            let hits = await vectorStore.searchChunks(queryVector, k: max(40, min(limit * 6, 120)))
-            let dynamicallyAccepted: [VectorSearchHit]
-            if relativeDateIntent != nil || !Self.requestedYears(in: query).isEmpty {
-                dynamicallyAccepted = hits
-                    .filter { $0.score.isFinite && $0.score >= Self.semanticScoreFloor }
-                    .sorted { $0.score > $1.score }
-            } else {
-                dynamicallyAccepted = Self.dynamicallyAcceptedSemanticHits(hits)
-            }
-            acceptedSemanticCount = dynamicallyAccepted.count
-            effectiveSemanticThreshold = dynamicallyAccepted.map(\.score).min()
-            if settings.makeRerankingProvider() != nil, dynamicallyAccepted.count > 1 {
-                onReranking?()
-            }
-            let acceptedHits = await rerankedSemanticHits(
-                dynamicallyAccepted,
-                query: effectiveSemanticQuery
-            )
-            for hit in acceptedHits {
-                semanticHitsByFile[hit.fileId, default: []].append(hit)
-                if hit.score > (semanticByID[hit.fileId]?.score ?? -.infinity) {
-                    semanticByID[hit.fileId] = hit
+        var embeddingMilliseconds = 0
+        var vectorMilliseconds = 0
+        var rerankerMilliseconds = 0
+        if includeSemantic, !effectiveSemanticQuery.isEmpty, !Task.isCancelled {
+            let embeddingStartedAt = Date()
+            let queryVector = try? await activeEmbedder().embed(effectiveSemanticQuery)
+            embeddingMilliseconds = Int(Date().timeIntervalSince(embeddingStartedAt) * 1_000)
+            if let queryVector, !queryVector.isEmpty {
+                guard !Task.isCancelled else {
+                    return LibrarySearchExecution(results: [], semanticHitsByFile: [:])
+                }
+                let vectorStore = providedVectorStore ?? AppStateIndexerProxy.shared.vectorStore
+                let vectorStartedAt = Date()
+                let hits = await vectorStore.searchChunks(queryVector, k: max(40, min(limit * 6, 120)))
+                vectorMilliseconds = Int(Date().timeIntervalSince(vectorStartedAt) * 1_000)
+                let dynamicallyAccepted: [VectorSearchHit]
+                if relativeDateIntent != nil || !Self.requestedYears(in: query).isEmpty {
+                    dynamicallyAccepted = hits
+                        .filter { $0.score.isFinite && $0.score >= Self.semanticScoreFloor }
+                        .sorted { $0.score > $1.score }
+                } else {
+                    dynamicallyAccepted = Self.dynamicallyAcceptedSemanticHits(hits)
+                }
+                acceptedSemanticCount = dynamicallyAccepted.count
+                effectiveSemanticThreshold = dynamicallyAccepted.map(\.score).min()
+                if settings.makeRerankingProvider() != nil, dynamicallyAccepted.count > 1 {
+                    onReranking?()
+                }
+                let rerankerStartedAt = Date()
+                let acceptedHits = await rerankedSemanticHits(
+                    dynamicallyAccepted,
+                    query: effectiveSemanticQuery,
+                    maximumCandidates: rerankCandidateLimit
+                )
+                rerankerMilliseconds = Int(Date().timeIntervalSince(rerankerStartedAt) * 1_000)
+                for hit in acceptedHits {
+                    semanticHitsByFile[hit.fileId, default: []].append(hit)
+                    if hit.score > (semanticByID[hit.fileId]?.score ?? -.infinity) {
+                        semanticByID[hit.fileId] = hit
+                    }
                 }
             }
         }
 
         var structuredByID = [Int64: FileRecord]()
-        if isRelativeDateOnlyQuery || smartPlan?.hasStructuredFilters == true {
-            for file in (try? store.allFiles()) ?? [] {
-                let date: Date? = smartPlan == nil
-                    ? file.mtime
-                    : smartPlan?.dateField.date(for: file)
+        if isRelativeDateOnlyQuery || effectivePlan.hasStructuredFilters {
+            let filter = LibraryFileMetadataFilter(
+                exactName: effectivePlan.exactName,
+                fileExtensions: effectivePlan.fileExtensions,
+                categories: Set(effectivePlan.categories.map(\.rawValue)),
+                folderTerms: effectivePlan.folderTerms,
+                isDirectory: effectivePlan.itemKind == .any
+                    ? nil
+                    : effectivePlan.itemKind == .directory,
+                dateField: Self.metadataDateField(for: effectivePlan.dateField),
+                dateInterval: effectivePlan.dateInterval ?? relativeDateIntent?.interval,
+                minimumSizeBytes: effectivePlan.minimumSizeBytes,
+                maximumSizeBytes: effectivePlan.maximumSizeBytes,
+                hasNote: effectivePlan.hasNote,
+                isIndexed: effectivePlan.isIndexed
+            )
+            let structuredCandidateLimit = max(200, min(2_000, limit * 20))
+            for file in (try? store.libraryFiles(
+                matching: filter,
+                limit: structuredCandidateLimit
+            )) ?? [] {
+                let date = effectivePlan.dateField.date(for: file)
                 let matchesDate = date.map { relativeDateIntent?.contains($0) ?? true } ?? false
                 guard matchesDate,
-                      smartPlan.map({ Self.matchesStructuredPlan(file, plan: $0) }) ?? true,
+                      Self.matchesStructuredPlan(file, plan: effectivePlan),
                       let id = file.id else { continue }
                 structuredByID[id] = file
             }
@@ -951,7 +1089,7 @@ final class ChatService {
             let lexical = lexicalByID[fileID]
             let semantic = semanticByID[fileID]
             let entity = entityByID[fileID]
-            let isExactNameMatch = smartPlan?.exactName.map {
+            let isExactNameMatch = effectivePlan.exactName.map {
                 Self.fileName(file.name, equals: $0)
             } ?? false
             var score = 0.0
@@ -988,7 +1126,7 @@ final class ChatService {
                     entity == nil ? 0 : 0.98
                 ),
                 lexical == nil && semantic == nil && entity == nil
-                    ? Self.structuredOnlyConfidence(for: smartPlan)
+                    ? Self.structuredOnlyConfidence(for: effectivePlan)
                     : 0
             )
             return LibrarySearchResult(
@@ -1003,9 +1141,8 @@ final class ChatService {
             )
         }
 
-        let filteredResults = results.filter { result in
-            guard let smartPlan else { return true }
-            return Self.matchesStructuredPlan(result.file, plan: smartPlan)
+        let filteredResults = results.filter {
+            Self.matchesStructuredPlan($0.file, plan: effectivePlan)
         }
         let requestedYears = Self.requestedYears(in: query)
         let sortedResults = Array(filteredResults.sorted { lhs, rhs in
@@ -1037,25 +1174,24 @@ final class ChatService {
             if sortByConfidence, lhs.confidence != rhs.confidence {
                 return lhs.confidence > rhs.confidence
             }
-            if sortByConfidence, let smartPlan {
-                let lhsDate = smartPlan.dateField.date(for: lhs.file) ?? .distantPast
-                let rhsDate = smartPlan.dateField.date(for: rhs.file) ?? .distantPast
-                switch smartPlan.sort {
+            if sortByConfidence {
+                let lhsDate = effectivePlan.dateField.date(for: lhs.file) ?? .distantPast
+                let rhsDate = effectivePlan.dateField.date(for: rhs.file) ?? .distantPast
+                switch effectivePlan.sort {
                 case .newest where lhsDate != rhsDate: return lhsDate > rhsDate
                 case .oldest where lhsDate != rhsDate: return lhsDate < rhsDate
                 case .largest where lhs.file.size != rhs.file.size: return lhs.file.size > rhs.file.size
                 case .smallest where lhs.file.size != rhs.file.size: return lhs.file.size < rhs.file.size
                 default: break
                 }
-            } else if smartPlan?.sortNewestFirst == true {
+            } else if effectivePlan.sortNewestFirst {
                 func relevanceTier(_ result: LibrarySearchResult) -> Int {
                     guard let fileID = result.file.id else { return 0 }
                     guard let lexical = lexicalByID[fileID] else {
                         return semanticByID[fileID] == nil ? 0 : 1
                     }
                     switch lexical.rankingKind {
-                    case .content: return 5
-                    case .note: return 4
+                    case .content, .note: return 5
                     case .fileName: return lexical.confidence == 1 ? 6 : 3
                     case .path: return 3
                     case .title: return 2
@@ -1082,6 +1218,19 @@ final class ChatService {
             reranker: settings.makeRerankingProvider()?.name,
             duration: Date().timeIntervalSince(searchStartedAt)
         )
+        AppLogService.shared.write(
+            "library search stages completed",
+            category: .performance,
+            metadata: [
+                "embeddingMs": "\(embeddingMilliseconds)",
+                "entityMs": "\(entityMilliseconds)",
+                "lexicalMs": "\(lexicalMilliseconds)",
+                "rerankerMs": "\(rerankerMilliseconds)",
+                "results": "\(sortedResults.count)",
+                "semantic": "\(includeSemantic)",
+                "vectorMs": "\(vectorMilliseconds)",
+            ]
+        )
         return LibrarySearchExecution(
             results: sortedResults,
             semanticHitsByFile: semanticHitsByFile
@@ -1090,16 +1239,37 @@ final class ChatService {
 
     // MARK: - Context
 
-    private func resolveRelated(from message: ChatMessage) -> [FileRecord] {
-        guard let json = message.relatedFileIds,
-              let ids = try? JSONDecoder().decode([Int64].self, from: Data(json.utf8)) else { return [] }
-        return ids.compactMap { try? store.file(id: $0) }
+    private func resolveRelationships(in source: [ChatMessage]) -> [ChatMessage] {
+        var messageFileIDs = [[Int64]]()
+        var allFileIDs = Set<Int64>()
+        messageFileIDs.reserveCapacity(source.count)
+        for message in source {
+            let ids = message.relatedFileIds.flatMap { json in
+                try? JSONDecoder().decode([Int64].self, from: Data(json.utf8))
+            } ?? []
+            messageFileIDs.append(ids)
+            allFileIDs.formUnion(ids)
+        }
+        let filesByID = (try? store.files(ids: allFileIDs)) ?? [:]
+
+        var messages = source
+        for index in messages.indices {
+            messages[index].relatedFiles = messageFileIDs[index].compactMap { filesByID[$0] }
+            messages[index].relatedFileMatches = messages[index].relatedFileMatchesJSON.flatMap { json in
+                try? JSONDecoder().decode([ChatRelatedFileMatch].self, from: Data(json.utf8))
+            } ?? []
+        }
+        return messages
     }
 
     private func relatedFiles(for question: String,
                               attachedFilePath: String?,
                               smartSearchPlan: SmartLibrarySearchPlan?,
-                              onReranking: (() -> Void)? = nil) async -> (files: [FileRecord], context: String) {
+                              onReranking: (() -> Void)? = nil) async -> (
+                                  files: [FileRecord],
+                                  matches: [ChatRelatedFileMatch],
+                                  context: String
+                              ) {
         var files: [FileRecord] = []
         var contextParts: [String] = []
         var matchedChunks: [Int64: [VectorSearchHit]] = [:]
@@ -1112,7 +1282,7 @@ final class ChatService {
                     question: question,
                     file: indexedFile
                 )
-                return ([indexedFile], context)
+                return ([indexedFile], [], context)
             }
 
             let analysis = url.pathExtension.lowercased() == "pdf"
@@ -1153,7 +1323,7 @@ final class ChatService {
                 extractedText: String(extracted.text.prefix(Self.attachedContextCharacterLimit))
             ))
             // Chat with File is isolated: it uses only the current file and skips library-wide vector and keyword search.
-            return (files, contextParts.joined(separator: "\n\n"))
+            return (files, [], contextParts.joined(separator: "\n\n"))
         }
 
         let execution = await executeLibrarySearchDetails(
@@ -1163,7 +1333,14 @@ final class ChatService {
             sortByConfidence: true,
             onReranking: onReranking
         )
-        files = execution.results.map(\.file)
+        let visibleResults = LibrarySearchResult.applyingDisplayConfidencePolicy(
+            to: execution.results
+        )
+        files = visibleResults.map(\.file)
+        let matches = visibleResults.compactMap { result -> ChatRelatedFileMatch? in
+            guard let fileID = result.file.id else { return nil }
+            return ChatRelatedFileMatch(fileID: fileID, confidence: result.confidence)
+        }
 
         let selectedFileIDs = Set(files.compactMap(\.id))
         let vectorStore = providedVectorStore ?? AppStateIndexerProxy.shared.vectorStore
@@ -1195,7 +1372,7 @@ final class ChatService {
             from: execution.results,
             matchedChunks: matchedChunks
         ))
-        return (files, contextParts.joined(separator: "\n\n"))
+        return (files, matches, contextParts.joined(separator: "\n\n"))
     }
 
     private func canReuseIndex(for file: FileRecord) -> Bool {
@@ -1322,14 +1499,55 @@ final class ChatService {
     /// already represented by deterministic filters such as dates and extensions.
     private static func contentSearchTerms(in query: String) -> [String] {
         let stripped = strippingStructuralPhrases(from: query)
-        return uniqueSearchTerms(relevanceTerms(in: stripped).filter(isLexicalEvidenceTerm))
+        let variants = lexicalTokenVariants(in: stripped)
+        return uniqueSearchTerms(
+            variants.flatMap(relevanceTerms(in:)).filter(isLexicalEvidenceTerm)
+        )
+    }
+
+    /// Preserves the original phrase while exposing generic word boundaries that
+    /// Apple's word tokenizer cannot infer from mixed Chinese/Latin project names.
+    private static func lexicalTokenVariants(in query: String) -> [String] {
+        let compact = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !compact.isEmpty else { return [] }
+        let bounded = insertingSearchBoundaries(in: compact)
+        return uniqueSearchTerms(
+            [compact, bounded] + bounded
+                .split(whereSeparator: { $0.isWhitespace })
+                .map(String.init)
+        )
+    }
+
+    private static func insertingSearchBoundaries(in value: String) -> String {
+        let patterns = [
+            #"([a-z0-9])([A-Z])"#,       // LumensAI -> Lumens AI
+            #"([A-Z]+)([A-Z][a-z])"#,    // GPTVideo -> GPT Video
+            #"([A-Za-z0-9])([\p{Han}])"#,
+            #"([\p{Han}])([A-Za-z0-9])"#,
+        ]
+        return patterns.reduce(value) { result, pattern in
+            guard let expression = try? NSRegularExpression(pattern: pattern) else { return result }
+            let range = NSRange(result.startIndex..<result.endIndex, in: result)
+            return expression.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: "$1 $2"
+            )
+        }
     }
 
     private static func strippingStructuralPhrases(from query: String) -> String {
-        var output = query.lowercased()
+        // Keep the original casing until lexical variants have been generated.
+        // Lowercasing here would erase generic CamelCase boundaries such as
+        // "LumensAI", turning a searchable "Lumens" + "AI" pair into one token.
+        var output = query
         let phrases = relativeDatePhrases + Array(genericStructuralWords)
         for phrase in phrases.sorted(by: { $0.count > $1.count }) {
-            output = output.replacingOccurrences(of: phrase, with: " ")
+            output = output.replacingOccurrences(
+                of: phrase,
+                with: " ",
+                options: [.caseInsensitive, .diacriticInsensitive]
+            )
         }
         return output
     }
@@ -1684,6 +1902,16 @@ final class ChatService {
         return true
     }
 
+    private static func metadataDateField(
+        for dateField: LibrarySearchDateField
+    ) -> LibraryFileMetadataFilter.DateField {
+        switch dateField {
+        case .modified: return .modified
+        case .added: return .added
+        case .organized: return .organized
+        }
+    }
+
     private static func smartSearchDateInterval(
         from startValue: String?,
         through endValue: String?,
@@ -1742,7 +1970,7 @@ final class ChatService {
     ]
 
     private static func inferredFileExtensions(in query: String) -> Set<String> {
-        let normalized = query.lowercased()
+        let normalized = insertingSearchBoundaries(in: query).lowercased()
         var extensions = Set(normalized
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { recognizedFileExtensions.contains($0) })
@@ -2076,7 +2304,7 @@ final class ChatService {
         }
         if let strength = evidenceStrength(in: note) {
             considerEvidence(
-                confidence: 0.75 + (0.09 * strength),
+                confidence: 0.90 + (0.09 * strength),
                 kind: .note,
                 source: file.note
             )
@@ -2108,7 +2336,7 @@ final class ChatService {
             consider(200, .fileName, file.title ?? file.note ?? file.displayPath)
         }
         if content.contains(normalizedQuery) { consider(400, .content, file.contentText) }
-        if note.contains(normalizedQuery) { consider(300, .note, file.note) }
+        if note.contains(normalizedQuery) { consider(400, .note, file.note) }
         if path.contains(normalizedQuery) { consider(200, .path, file.displayPath) }
         if title == normalizedQuery { consider(110, .title, file.title) }
         else if title.contains(normalizedQuery) { consider(100, .title, file.title) }
@@ -2128,8 +2356,8 @@ final class ChatService {
                 termScore += 40
                 recordTermMatch(priority: 5, kind: .content, source: file.contentText)
             } else if note.contains(term) {
-                termScore += 30
-                recordTermMatch(priority: 4, kind: .note, source: file.note)
+                termScore += 40
+                recordTermMatch(priority: 5, kind: .note, source: file.note)
             } else if name.contains(term) {
                 termScore += 20
                 recordTermMatch(priority: 3, kind: .fileName, source: file.title ?? file.displayPath)
@@ -2164,9 +2392,13 @@ final class ChatService {
         return finite.filter { $0.score >= threshold }
     }
 
-    private func rerankedSemanticHits(_ hits: [VectorSearchHit], query: String) async -> [VectorSearchHit] {
+    private func rerankedSemanticHits(
+        _ hits: [VectorSearchHit],
+        query: String,
+        maximumCandidates: Int = 24
+    ) async -> [VectorSearchHit] {
         guard let provider = settings.makeRerankingProvider(), hits.count > 1 else { return hits }
-        let candidates = Array(hits.prefix(24))
+        let candidates = Array(hits.prefix(maximumCandidates))
         let documents = candidates.map { $0.chunkText ?? "" }
         do {
             let results = try await provider.rerank(
@@ -2215,10 +2447,10 @@ final class ChatService {
         let strength = min(max((Double(hit.score) - threshold) / (1 - threshold), 0), 1)
         let base: Double
         switch hit.kind {
-        case .text, .table, .list, .picture:
+        case .text, .table, .list, .picture, .transcript:
             base = 0.90
         case .note:
-            base = 0.75
+            base = 0.90
         case .title:
             base = 0.45
         case .metadata:
@@ -2369,8 +2601,7 @@ final class ChatService {
 
     private static func contextPriority(for kind: DocumentChunkKind) -> Int {
         switch kind {
-        case .text, .table, .list, .picture: return 5
-        case .note: return 4
+        case .text, .table, .list, .picture, .transcript, .note: return 5
         case .metadata: return 3
         case .title: return 2
         }
@@ -2379,6 +2610,7 @@ final class ChatService {
     private static func contextLabel(for kind: DocumentChunkKind) -> String {
         switch kind {
         case .text, .table, .list, .picture: return "content excerpt"
+        case .transcript: return "time-coded transcript excerpt"
         case .note: return "user-note excerpt"
         case .metadata: return "metadata excerpt"
         case .title: return "title excerpt"

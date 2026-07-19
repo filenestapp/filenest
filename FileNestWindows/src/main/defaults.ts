@@ -6,7 +6,8 @@ export const DEFAULT_EXTENSIONS = [
   'pdf', 'doc', 'docx', 'docm', 'txt', 'md', 'rtf', 'xls', 'xlsx', 'xlsm', 'ppt', 'pptx',
   'ppsx', 'csv', 'epub', 'odt', 'ods', 'odp', 'pages', 'numbers', 'key', 'keynote',
   'png', 'jpg', 'jpeg', 'gif', 'heic', 'tiff', 'tif', 'webp', 'bmp', 'svg', 'psd', 'sketch',
-  'mp4', 'mov', 'avi', 'mkv', 'm4v', 'mp3', 'wav', 'aac', 'flac', 'm4a', 'swift', 'py',
+  'mp4', 'mov', 'avi', 'mkv', 'm4v', 'webm', 'mpeg', 'mpg', 'mp3', 'wav', 'aac', 'flac',
+  'm4a', 'ogg', 'opus', 'aiff', 'aif', 'wma', 'swift', 'py',
   'js', 'ts', 'tsx', 'jsx', 'java', 'kt', 'go', 'rs', 'c', 'cpp', 'h', 'hpp', 'cs', 'rb',
   'php', 'sh', 'sql', 'json', 'yaml', 'yml', 'html', 'css', 'vue', 'lua', 'r', 'zip',
   'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'dmg'
@@ -19,6 +20,10 @@ export const DEFAULT_VECTOR_EXTENSIONS = [
   'js', 'ts', 'tsx', 'jsx', 'java', 'kt', 'go', 'rs', 'c', 'cpp', 'h', 'hpp', 'cs',
   'rb', 'php', 'sh', 'sql', 'json', 'yaml', 'yml', 'html', 'css', 'vue', 'lua', 'r'
 ]
+
+export const AUDIO_TRANSCRIPTION_EXTENSIONS = ['mp3', 'wav', 'aac', 'flac', 'm4a', 'ogg', 'opus', 'aiff', 'aif', 'wma']
+export const VIDEO_TRANSCRIPTION_EXTENSIONS = ['mp4', 'mov', 'mkv', 'avi', 'm4v', 'webm', 'mpeg', 'mpg']
+export const MEDIA_TRANSCRIPTION_EXTENSIONS = [...AUDIO_TRANSCRIPTION_EXTENSIONS, ...VIDEO_TRANSCRIPTION_EXTENSIONS]
 
 export const CATEGORY_FOLDERS: Record<FileCategory, string> = {
   documents: 'Documents',
@@ -65,10 +70,18 @@ export function createDefaultSettings(): Settings {
     autoVectorize: true,
     vectorizeExtensions: DEFAULT_VECTOR_EXTENSIONS,
     vectorChunkWords: 600,
+    vectorRetrievalChunkTokens: 300,
     vectorChunkOverlap: 80,
     ragResultLimit: 10,
+    rerankerSource: 'disabled',
+    rerankerBaseUrl: 'http://127.0.0.1:11435/v1',
+    rerankerApiKey: '',
+    rerankerModel: 'Qwen/Qwen3-Reranker-0.6B',
+    rerankerReuseChatCredentials: true,
     doclingEnabled: true,
     doclingEndpoint: '',
+    mediaTranscriptionEnabled: false,
+    whisperModel: 'base',
     embeddingSource: 'local',
     ocrSource: 'local',
     thinkingMode: false,

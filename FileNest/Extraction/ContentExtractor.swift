@@ -9,7 +9,7 @@ enum ContentExtractor {
     /// Limits extracted characters per file so oversized files do not slow indexing.
     static let maxChars = 120_000
 
-    struct Extracted {
+    struct Extracted: Sendable {
         var title: String?
         var text: String
     }
@@ -181,7 +181,7 @@ enum ContentExtractor {
             appendNumber(exif[kCGImagePropertyExifFocalLength], label: "Focal length", suffix: " mm", to: &lines)
             if let values = exif[kCGImagePropertyExifISOSpeedRatings] as? [NSNumber],
                let iso = values.first {
-                lines.append("ISO：\(iso.intValue)")
+                lines.append("ISO: \(iso.intValue)")
             }
         }
         return Extracted(title: title, text: lines.joined(separator: "\n"))
@@ -190,13 +190,13 @@ enum ContentExtractor {
     private static func append(_ value: Any?, label: String, to lines: inout [String]) {
         guard let text = value as? String,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        lines.append("\(label)：\(text)")
+        lines.append("\(label): \(text)")
     }
 
     private static func appendNumber(_ value: Any?, label: String, prefix: String = "",
                                      suffix: String = "", to lines: inout [String]) {
         guard let value = number(value) else { return }
-        lines.append("\(label)：\(prefix)\(format(value))\(suffix)")
+        lines.append("\(label): \(prefix)\(format(value))\(suffix)")
     }
 
     private static func number(_ value: Any?) -> Double? {

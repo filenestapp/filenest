@@ -1,9 +1,12 @@
 import AppKit
+import AVKit
 import QuickLookUI
 import SwiftUI
 
 /// Unified file details and Quick Look preview pane on the right side of the main window.
 struct FilePreviewView: View {
+    private static let automaticQuickLookByteLimit: Int64 = 48 * 1_024 * 1_024
+
     @EnvironmentObject private var appState: AppState
 
     let file: FileRecord
@@ -23,9 +26,16 @@ struct FilePreviewView: View {
     @State private var trashError: String?
     @State private var didSaveNote = false
     @State private var indexedChunks: [IndexedDocumentChunk] = []
+    @State private var indexedChunkCount = 0
     @State private var isLoadingChunks = false
+    @State private var isLoadingChunkCount = false
     @State private var isChunkListExpanded = false
     @State private var expandedChunkIndex: Int?
+    @State private var chunkLoadGeneration = UUID()
+    @State private var isQuickLookReady = false
+    @State private var isQuickLookDeferred = false
+
+    private let chunkPageSize = 20
 
     init(file: FileRecord, startDocumentChat: @escaping (FileRecord) -> Void) {
         self.file = file
@@ -58,7 +68,7 @@ struct FilePreviewView: View {
             }
             .fileNestOverlayScrollStyle()
         }
-        .background(.ultraThinMaterial)
+        .background(FileNestTheme.inspectorSurface)
         .onDisappear {
             summaryGenerationTask?.cancel()
             summaryGenerationTask = nil
@@ -70,7 +80,19 @@ struct FilePreviewView: View {
         } message: {
             Text(appState.settings.localizedFormat("Are you sure you want to move “%@” to the Trash?", file.name))
         }
-        .task(id: file.id) { loadIndexedChunks() }
+        .task(id: file.id) {
+            resetIndexedChunkPagination()
+            isQuickLookReady = false
+            isQuickLookDeferred = !isMediaPreview
+                && file.size >= Self.automaticQuickLookByteLimit
+            await loadIndexedChunkCount()
+            guard !isQuickLookDeferred else { return }
+            // Let the inspector commit its lightweight layout before Quick Look
+            // starts parsing a potentially large document.
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard !Task.isCancelled else { return }
+            isQuickLookReady = true
+        }
     }
 
     private var header: some View {
@@ -132,8 +154,8 @@ struct FilePreviewView: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(file.path, forType: .string)
             }
-            if file.supportsDocumentChat {
-                inspectorLink("Chat with Document", icon: "doc.text.magnifyingglass") {
+            if file.supportsFileChat(with: appState.settings) {
+                inspectorLink("Chat with File", icon: "doc.text.magnifyingglass") {
                     startDocumentChat(file)
                 }
             }
@@ -145,26 +167,39 @@ struct FilePreviewView: View {
             ZStack(alignment: .bottomTrailing) {
                 preview
 
-                Button {
-                    expandedPreviewPresenter.present(file: file)
-                } label: {
-                    ZStack(alignment: .bottomTrailing) {
-                        Color.clear
-                            .contentShape(Rectangle())
+                if file.supportsPreview, !isQuickLookDeferred {
+                    Button {
+                        expandedPreviewPresenter.present(file: file)
+                    } label: {
+                        if isMediaPreview {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
+                                .background(.black.opacity(0.68), in: Circle())
+                                .padding(9)
+                                .contentShape(Circle())
+                        } else {
+                            ZStack(alignment: .bottomTrailing) {
+                                Color.clear
+                                    .contentShape(Rectangle())
 
-                        Label("Expand Preview", systemImage: "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 9)
-                            .frame(height: 28)
-                            .background(.black.opacity(0.68), in: Capsule())
-                            .padding(9)
-                            .opacity(isPreviewHovered ? 1 : 0)
+                                Label("Expand Preview", systemImage: "arrow.up.left.and.arrow.down.right")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 9)
+                                    .frame(height: 28)
+                                    .background(.black.opacity(0.68), in: Capsule())
+                                    .padding(9)
+                                    .opacity(isPreviewHovered ? 1 : 0)
+                            }
+                        }
                     }
+                    .buttonStyle(.plain)
+                    .disabled(!FileManager.default.fileExists(atPath: file.path))
+                    .accessibilityLabel("Expand Preview")
+                    .pointingHandOnHover()
                 }
-                .buttonStyle(.plain)
-                .disabled(!FileManager.default.fileExists(atPath: file.path))
-                .accessibilityLabel("Expand Preview")
             }
                 .frame(height: 220)
                 .background(Color(nsColor: .underPageBackgroundColor))
@@ -174,15 +209,52 @@ struct FilePreviewView: View {
                         .stroke(FileNestTheme.strongBorder, lineWidth: 1)
                 }
                 .onHover { isPreviewHovered = $0 }
-                .pointingHandOnHover(FileManager.default.fileExists(atPath: file.path))
+                .pointingHandOnHover(
+                    !isMediaPreview && FileManager.default.fileExists(atPath: file.path)
+                )
         }
     }
 
     @ViewBuilder
     private var preview: some View {
         let url = URL(fileURLWithPath: file.path)
-        if FileManager.default.fileExists(atPath: file.path) {
-            QuickLookFileView(url: url)
+        if !file.supportsPreview {
+            VStack(spacing: 8) {
+                Image(systemName: "doc.questionmark")
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text("Preview Not Available")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("This file type does not support an in-app preview.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if FileManager.default.fileExists(atPath: file.path), isQuickLookDeferred {
+            VStack(spacing: 9) {
+                Image(systemName: "doc.viewfinder")
+                    .font(.system(size: 26, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text("Large Preview Paused")
+                    .font(.system(size: 12, weight: .semibold))
+                Button("Load Preview") {
+                    isQuickLookDeferred = false
+                    isQuickLookReady = true
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if FileManager.default.fileExists(atPath: file.path), isQuickLookReady {
+            if isMediaPreview {
+                NativeMediaPlayerView(url: url)
+            } else {
+                QuickLookFileView(url: url)
+            }
+        } else if FileManager.default.fileExists(atPath: file.path) {
+            ProgressView("Preparing Preview…")
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 8) {
                 Image(systemName: "doc.questionmark")
@@ -196,6 +268,10 @@ struct FilePreviewView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private var isMediaPreview: Bool {
+        file.categoryEnum == .videos || file.categoryEnum == .audio
     }
 
     private var noteSection: some View {
@@ -256,7 +332,7 @@ struct FilePreviewView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(FileNestTheme.accent)
+                .tint(FileNestTheme.accentFill)
                 .controlSize(.small)
                 .disabled(isSavingNote || isGeneratingSummary || file.id == nil)
             }
@@ -295,12 +371,12 @@ struct FilePreviewView: View {
                 .disabled(isReindexing || appState.reindexButtonsDisabled || file.id == nil)
             }
 
-            if file.indexedAt != nil || !indexedChunks.isEmpty {
+            if file.indexedAt != nil || indexedChunkCount > 0 {
                 Divider()
 
                 HStack(spacing: 8) {
                     Label(
-                        appState.settings.localizedFormat("%d Chunks", indexedChunks.count),
+                        appState.settings.localizedFormat("%d Chunks", indexedChunkCount),
                         systemImage: "square.stack.3d.up"
                     )
                     .font(.system(size: 10, weight: .medium))
@@ -312,6 +388,9 @@ struct FilePreviewView: View {
                         withAnimation(.easeOut(duration: 0.15)) {
                             isChunkListExpanded.toggle()
                         }
+                        if isChunkListExpanded, indexedChunks.isEmpty {
+                            loadNextIndexedChunkPage()
+                        }
                     } label: {
                         HStack(spacing: 4) {
                             Text(isChunkListExpanded ? "Collapse" : "View Chunks")
@@ -319,12 +398,11 @@ struct FilePreviewView: View {
                                 .font(.system(size: 8, weight: .semibold))
                         }
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(FileNestTheme.accent)
-                    .disabled(isLoadingChunks || indexedChunks.isEmpty)
+                    .buttonStyle(InlineActionButtonStyle())
+                    .disabled(isLoadingChunkCount || indexedChunkCount == 0)
                 }
 
-                if !isLoadingChunks, indexedChunks.isEmpty {
+                if !isLoadingChunkCount, indexedChunkCount == 0 {
                     Text("This file has metadata indexing only and no vector chunks to preview.")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
@@ -342,6 +420,17 @@ struct FilePreviewView: View {
                                         : chunk.index
                                 }
                             }
+                            .onAppear {
+                                guard chunk.id == indexedChunks.last?.id else { return }
+                                loadNextIndexedChunkPage()
+                            }
+                        }
+
+                        if isLoadingChunks {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
                         }
                     }
                 }
@@ -409,12 +498,10 @@ struct FilePreviewView: View {
     private func inspectorLink(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(LocalizedStringKey(title), systemImage: icon)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(FileNestTheme.accent)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(InlineActionButtonStyle(fillsWidth: true))
     }
 
     private func revealInFinder() {
@@ -454,7 +541,8 @@ struct FilePreviewView: View {
             do {
                 try await appState.saveNote(fileID: id, note: noteDraft)
                 didSaveNote = true
-                loadIndexedChunks()
+                await loadIndexedChunkCount()
+                if isChunkListExpanded { reloadIndexedChunkPages() }
             } catch {
                 noteError = appState.settings.localizedRuntimeMessage(error.localizedDescription)
             }
@@ -469,7 +557,8 @@ struct FilePreviewView: View {
             if !succeeded {
                 reindexError = appState.settings.localized("Reindexing failed. Please try again later.")
             } else {
-                loadIndexedChunks()
+                await loadIndexedChunkCount()
+                if isChunkListExpanded { reloadIndexedChunkPages() }
             }
             isReindexing = false
         }
@@ -491,17 +580,58 @@ struct FilePreviewView: View {
         }
     }
 
-    private func loadIndexedChunks() {
+    private func loadIndexedChunkCount() async {
         guard let id = file.id else {
-            indexedChunks = []
+            indexedChunkCount = 0
             return
         }
-        isLoadingChunks = true
-        indexedChunks = appState.indexedChunks(fileID: id)
+        isLoadingChunkCount = true
+        let count = await appState.indexedChunkCount(fileID: id)
+        guard !Task.isCancelled, file.id == id else { return }
+        indexedChunkCount = count
+        isLoadingChunkCount = false
+    }
+
+    private func resetIndexedChunkPagination() {
+        chunkLoadGeneration = UUID()
+        indexedChunks = []
+        expandedChunkIndex = nil
         isLoadingChunks = false
-        if let expandedChunkIndex,
-           !indexedChunks.contains(where: { $0.index == expandedChunkIndex }) {
-            self.expandedChunkIndex = nil
+    }
+
+    private func reloadIndexedChunkPages() {
+        resetIndexedChunkPagination()
+        loadNextIndexedChunkPage()
+    }
+
+    private func loadNextIndexedChunkPage() {
+        guard let id = file.id,
+              !isLoadingChunks,
+              indexedChunks.count < indexedChunkCount else { return }
+        let offset = indexedChunks.count
+        let generation = chunkLoadGeneration
+        isLoadingChunks = true
+        Task {
+            let page = await appState.loadIndexedChunks(
+                fileID: id,
+                offset: offset,
+                limit: chunkPageSize
+            )
+            guard generation == chunkLoadGeneration, file.id == id else { return }
+            if page.isEmpty {
+                // The index may have changed after the count query. Stop requesting
+                // an offset that no longer exists until the next explicit refresh.
+                indexedChunkCount = indexedChunks.count
+                isLoadingChunks = false
+                return
+            }
+            let loadedIndexes = Set(indexedChunks.map(\.index))
+            indexedChunks.append(contentsOf: page.filter { !loadedIndexes.contains($0.index) })
+            isLoadingChunks = false
+            if let expandedChunkIndex,
+               !indexedChunks.contains(where: { $0.index == expandedChunkIndex }) {
+                self.expandedChunkIndex = nil
+            }
         }
     }
 }
@@ -628,6 +758,7 @@ private struct IndexedChunkPreviewRow: View {
         case .table: return "Table Chunk"
         case .list: return "List Chunk"
         case .picture: return "Image Chunk"
+        case .transcript: return "Transcript Chunk"
         case .note: return "Note Chunk"
         case .metadata: return "Metadata Chunk"
         }
@@ -678,12 +809,19 @@ private struct ExpandedFilePreviewView: View {
 
             Divider()
 
-            QuickLookFileView(url: URL(fileURLWithPath: file.path))
-                .background(Color(nsColor: .underPageBackgroundColor))
-                .padding(18)
+            Group {
+                if file.categoryEnum == .videos || file.categoryEnum == .audio {
+                    NativeMediaPlayerView(url: URL(fileURLWithPath: file.path))
+                } else {
+                    QuickLookFileView(url: URL(fileURLWithPath: file.path))
+                }
+            }
+            .background(Color(nsColor: .underPageBackgroundColor))
+            .padding(18)
         }
         .frame(minWidth: 720, minHeight: 520)
         .background(.regularMaterial)
+        .fileNestOverlayScrollStyle()
     }
 }
 
@@ -761,14 +899,71 @@ private struct QuickLookFileView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> QLPreviewView {
         let view = QLPreviewView(frame: .zero, style: .normal)!
-        view.autostarts = true
+        // Quick Look autoplays audio and video when this is enabled. FileNest
+        // leaves playback under explicit user control in every preview surface.
+        view.autostarts = false
         return view
     }
 
     func updateNSView(_ nsView: QLPreviewView, context: Context) {
+        nsView.autostarts = false
         guard context.coordinator.currentURL != url else { return }
         context.coordinator.currentURL = url
         nsView.previewItem = url as NSURL
+    }
+
+    static func dismantleNSView(_ nsView: QLPreviewView, coordinator: Coordinator) {
+        nsView.autostarts = false
+        nsView.previewItem = nil
+        coordinator.currentURL = nil
+    }
+
+    final class Coordinator {
+        var currentURL: URL?
+    }
+}
+
+/// A narrow AVKit bridge that keeps playback lifecycle inside the preview view.
+/// `AVPlayerViewControlsStyle.inline` provides play/pause, seeking, elapsed time,
+/// and volume controls below the media content without starting playback.
+private struct NativeMediaPlayerView: NSViewRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView(frame: .zero)
+        view.controlsStyle = .inline
+        view.videoGravity = .resizeAspect
+        view.showsSharingServiceButton = false
+        view.showsFullScreenToggleButton = false
+        view.updatesNowPlayingInfoCenter = false
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.88).cgColor
+        configure(view, coordinator: context.coordinator)
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        guard context.coordinator.currentURL != url else { return }
+        configure(nsView, coordinator: context.coordinator)
+    }
+
+    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
+        nsView.player?.pause()
+        nsView.player?.replaceCurrentItem(with: nil)
+        nsView.player = nil
+        coordinator.currentURL = nil
+    }
+
+    private func configure(_ view: AVPlayerView, coordinator: Coordinator) {
+        view.player?.pause()
+        view.player?.replaceCurrentItem(with: nil)
+
+        let player = AVPlayer(url: url)
+        player.pause()
+        view.player = player
+        coordinator.currentURL = url
     }
 
     final class Coordinator {

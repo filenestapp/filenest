@@ -67,6 +67,7 @@ SQLite + sqlite-vec + 关键词/实体/向量 RRF 融合
 - 本地模式可安装、启动、更新 Ollama，并管理生成、Embedding 和 OCR 模型。
 - 初始化向导默认选择 `qwen3.5:9b` 和 `qwen3-embedding:0.6b`，也允许用户调整。
 - Docling 与 PaddleOCR 安装在 FileNest 用户目录下的独立 Python 环境中。
+- 可在初始化向导或 AI 设置中启用音视频处理；FileNest 使用 FFmpeg 解码并通过独立环境中的 OpenAI Whisper 生成带时间码的转写切片，再复用现有 Embedding 与 RAG 流程。
 - 云端模式支持 OpenAI-compatible 与 Anthropic 格式，并可独立配置 Chat、Embedding、OCR 或复用凭据。
 - 云端模型可以手动指定上下文窗口；未知兼容模型默认按 612K tokens 规划。
 

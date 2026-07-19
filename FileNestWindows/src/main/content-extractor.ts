@@ -48,7 +48,8 @@ export class ContentExtractor {
       hash.update(await readFile(path))
       return hash.digest('hex')
     }
-    const entries = await walkDirectory(path, 1000)
+    const entries = await walkDirectory(path, { maximumEntries: 50_000, maximumDurationMs: 2_000 })
+    if (!entries) throw new Error('Directory inspection exceeded its indexing budget')
     for (const entry of entries) hash.update(`${entry.path}|${entry.size}|${entry.mtimeMs}\n`)
     return hash.digest('hex')
   }
@@ -186,7 +187,7 @@ export class ContentExtractor {
   }
 
   private async extractDirectory(path: string): Promise<ExtractedContent> {
-    const entries = await walkDirectory(path, 2000)
+    const entries = await walkDirectory(path, { maximumEntries: 50_000, maximumDurationMs: 2_000 }) ?? []
     const text = entries.map((entry) => `${entry.isDirectory ? '[Folder]' : '[File]'} ${relative(path, entry.path)} (${entry.size} bytes)`).join('\n')
     return { title: basename(path), text: `Folder: ${basename(path)}\n\n${text}` }
   }
@@ -222,10 +223,19 @@ export class ContentExtractor {
   }
 }
 
-async function walkDirectory(root: string, limit: number): Promise<Array<{ path: string; size: number; mtimeMs: number; isDirectory: boolean }>> {
+export interface DirectoryInspectionBudget {
+  maximumEntries: number
+  maximumDurationMs: number
+}
+
+export async function walkDirectory(root: string, budget: DirectoryInspectionBudget): Promise<Array<{ path: string; size: number; mtimeMs: number; isDirectory: boolean }> | null> {
   const result: Array<{ path: string; size: number; mtimeMs: number; isDirectory: boolean }> = []
   const queue = [root]
-  while (queue.length && result.length < limit) {
+  const startedAt = performance.now()
+  const maximumEntries = Math.max(1, budget.maximumEntries)
+  const maximumDurationMs = Math.max(50, budget.maximumDurationMs)
+  while (queue.length) {
+    if (result.length >= maximumEntries || performance.now() - startedAt >= maximumDurationMs) return null
     const current = queue.shift()!
     const entries = await readdir(current, { withFileTypes: true }).catch(() => [])
     for (const entry of entries) {
@@ -235,7 +245,7 @@ async function walkDirectory(root: string, limit: number): Promise<Array<{ path:
       if (!info) continue
       result.push({ path, size: info.size, mtimeMs: info.mtimeMs, isDirectory: entry.isDirectory() })
       if (entry.isDirectory()) queue.push(path)
-      if (result.length >= limit) break
+      if (result.length >= maximumEntries) return null
     }
   }
   return result

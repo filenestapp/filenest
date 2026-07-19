@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import type { Settings } from '../shared/types'
 import { FileNestDatabase } from './database'
 
+export const OLLAMA_EMBEDDING_CONTEXT_LENGTH = 32_000
+
 export interface SearchHit {
   fileId: number
   score: number
@@ -15,7 +17,7 @@ export class EmbeddingService {
   signature(settings: Settings): string {
     const source = settings.embeddingSource
     const model = source === 'local' ? 'filenest-local-384-v1' : source === 'ollama' ? settings.ollamaEmbeddingModel : settings.cloudEmbeddingModel
-    return createHash('sha256').update([source, model, settings.vectorChunkWords, settings.vectorChunkOverlap].join('|')).digest('hex')
+    return createHash('sha256').update([source, model].join('|')).digest('hex')
   }
 
   modelName(settings: Settings): string {
@@ -36,7 +38,7 @@ export class EmbeddingService {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: settings.ollamaEmbeddingModel, input: texts })
+        body: JSON.stringify({ model: settings.ollamaEmbeddingModel, input: texts, truncate: true, options: { num_ctx: OLLAMA_EMBEDDING_CONTEXT_LENGTH } })
       })
       if (response.ok) {
         const payload = await response.json() as { embeddings?: number[][] }
@@ -72,7 +74,7 @@ export class EmbeddingService {
     const response = await fetch(new URL('/api/embed', normalizeBase(settings.ollamaHost)), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: settings.ollamaEmbeddingModel, input: text })
+      body: JSON.stringify({ model: settings.ollamaEmbeddingModel, input: text, truncate: true, options: { num_ctx: OLLAMA_EMBEDDING_CONTEXT_LENGTH } })
     })
     if (!response.ok) throw new Error(`Ollama Embedding ${response.status}: ${await response.text()}`)
     const payload = await response.json() as { embeddings?: number[][] }

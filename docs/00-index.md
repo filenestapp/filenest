@@ -51,6 +51,7 @@ The macOS source is the normative feature specification. Existing overview files
 
 | Date | Baseline | Documentation synchronized |
 | --- | --- | --- |
+| 2026-07-19 | Latest working-tree macOS product update | SHA-256 duplicate management, persisted retrieval confidence, 40-message chat paging, file-category reindex scope, creation-date backfill, budgeted directory inspection, managed-content audit, one-time migrations, and Windows parity implementation |
 | 2026-07-17 | `839c410` | Semantic boundary chunking, parent/child terminology, runner EOF recovery, parent-row cleanup, and selective reindex behavior |
 | 2026-07-17 | `0cda7bf` → current product update | Search and Smart Search presentation, confidence ranking, persistent chat execution, model onboarding, managed service updates, selective indexing, Windows parity, build and verification records |
 | 2026-07-16 | Initial repository analysis | Product overview, architecture, data model, integration map, onboarding, Windows parity, and verification baseline |

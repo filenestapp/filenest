@@ -1,32 +1,6 @@
 import AppKit
 import SwiftUI
 
-private struct LibraryCreationDateCandidate: Sendable {
-    let path: String
-    let fallback: Date
-}
-
-private actor LibraryCreationDateCache {
-    static let shared = LibraryCreationDateCache()
-    private var datesByPath = [String: Date]()
-
-    func dates(for candidates: [LibraryCreationDateCandidate]) -> [String: Date] {
-        var resolved = [String: Date]()
-        for candidate in candidates {
-            if let cached = datesByPath[candidate.path] {
-                resolved[candidate.path] = cached
-                continue
-            }
-            let url = URL(fileURLWithPath: candidate.path)
-            let created = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate)
-                ?? candidate.fallback
-            datesByPath[candidate.path] = created
-            resolved[candidate.path] = created
-        }
-        return resolved
-    }
-}
-
 enum LibrarySortField: Equatable {
     case relevance
     case modified
@@ -124,12 +98,14 @@ struct LibraryFileQuery {
 /// Library search, category filtering, organization progress, and Finder actions.
 struct LibraryView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.openWindow) private var openWindow
     let startDocumentChat: (FileRecord) -> Void
     @State private var searchText = ""
-    @State private var category: FileCategory?
+    @State private var selectedCategories = Set<FileCategory>()
     @State private var searchResults: [LibrarySearchResult]?
     @State private var isSearching = false
     @State private var searchTask: Task<Void, Never>?
+    @State private var semanticSearchTask: Task<Void, Never>?
     @State private var activeSearchQuery = ""
     @State private var smartSearchEnabled = false
     @State private var smartSearchPlan: SmartLibrarySearchPlan?
@@ -141,22 +117,44 @@ struct LibraryView: View {
     @State private var draftDateRange = LibraryDateRange(start: Date(), end: Date())
     @State private var selectedDateRange: LibraryDateRange?
     @State private var isCalendarPresented = false
-    @State private var creationDates: [String: Date] = [:]
     @State private var visibleLimit = 20
     @State private var isApplyingExternalSearch = false
     @State private var isSearchHistoryPresented = false
+    @State private var derivedFiles: [FileRecord] = []
+    @State private var derivedSearchMatchesByPath: [String: LibrarySearchResult] = [:]
+    @State private var dismissedAutomaticProcessingItemIDs = Set<Int64>()
+
+    private var activeAutomaticProcessingItemIDs: Set<Int64> {
+        Set(appState.activeAutomaticFileProcessingItems.map(\.id))
+    }
+
+    private var showsAutomaticProcessingStatus: Bool {
+        !activeAutomaticProcessingItemIDs.subtracting(dismissedAutomaticProcessingItemIDs).isEmpty
+    }
 
     private var sourceFiles: [FileRecord] {
         searchResults?.map(\.file) ?? appState.files
     }
 
     private var searchMatchesByPath: [String: LibrarySearchResult] {
-        Dictionary(uniqueKeysWithValues: (searchResults ?? []).map { ($0.file.path, $0) })
+        derivedSearchMatchesByPath
     }
 
     private var filteredFiles: [FileRecord] {
-        let matchingFiles = sourceFiles.filter { file in
-            (category == nil || file.categoryEnum == category) &&
+        derivedFiles
+    }
+
+    private var visibleFiles: [FileRecord] {
+        Array(derivedFiles.prefix(visibleLimit))
+    }
+
+    /// Filtering and sorting a large library is deliberately performed only when
+    /// an input changes, never as a side effect of a SwiftUI body invalidation.
+    private func rebuildDerivedFiles() {
+        let matches = Dictionary(uniqueKeysWithValues: (searchResults ?? []).map { ($0.file.path, $0) })
+        let files = searchResults?.map(\.file) ?? appState.files
+        let matchingFiles = files.filter { file in
+            (selectedCategories.isEmpty || selectedCategories.contains(file.categoryEnum)) &&
             (searchText.isEmpty || searchResults != nil ||
              file.name.localizedCaseInsensitiveContains(searchText) ||
              (file.title ?? "").localizedCaseInsensitiveContains(searchText))
@@ -165,27 +163,23 @@ struct LibraryView: View {
             matchingFiles,
             in: selectedDateRange,
             dateField: dateField,
-            creationDates: creationDates
+            creationDates: appState.fileCreationDates
         )
         if sortField == .relevance, searchResults != nil {
-            return LibraryFileQuery.sortedByConfidence(
+            derivedFiles = LibraryFileQuery.sortedByConfidence(
                 dateFiltered,
-                matchesByPath: searchMatchesByPath
+                matchesByPath: matches
             )
+        } else {
+            derivedFiles = LibraryFileQuery.sorted(dateFiltered, field: sortField, direction: sortDirection)
         }
-        return LibraryFileQuery.sorted(dateFiltered, field: sortField, direction: sortDirection)
-    }
-
-    private var visibleFiles: [FileRecord] {
-        Array(filteredFiles.prefix(visibleLimit))
+        derivedSearchMatchesByPath = matches
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            PageHeader(title: appState.organizationState.isActive ? appState.organizationStatusTitle : "Library",
-                       subtitle: appState.organizationState.isActive
-                       ? appState.organizationStatusSubtitle
-                       : "Search and manage organized files; all indexes stay on this Mac.") {
+            PageHeader(title: "Library",
+                       subtitle: "Search and manage organized files; all indexes stay on this Mac.") {
                 HStack(spacing: 10) {
                     if appState.organizationState == .running {
                         Button {
@@ -214,13 +208,26 @@ struct LibraryView: View {
                         }
                         .buttonStyle(QuietButtonStyle())
                     } else {
-                        Button {
-                            appState.organizeNow()
-                        } label: {
+                        OrganizeNowMenu {
                             Label("Organize Now", systemImage: "tray.and.arrow.down")
                         }
                         .buttonStyle(GradientButtonStyle())
-                        .disabled(appState.indexingState.isActive)
+
+                        Button {
+                            NSApp.activate(ignoringOtherApps: true)
+                            openWindow(id: "duplicates")
+                        } label: {
+                            Label(
+                                appState.duplicateConfirmationFileCount > 0
+                                    ? appState.settings.localizedFormat(
+                                        "Review %d Duplicates",
+                                        appState.duplicateConfirmationFileCount
+                                    )
+                                    : appState.settings.localized("Find Duplicates"),
+                                systemImage: "doc.on.doc"
+                            )
+                        }
+                        .buttonStyle(QuietButtonStyle())
 
                         Button {
                             appState.reindexAll()
@@ -234,37 +241,87 @@ struct LibraryView: View {
             }
 
             if appState.organizationState.isActive {
-                OrganizationProgressView(
-                    progress: appState.organizationProgress,
-                    title: appState.organizationStatusTitle,
-                    subtitle: appState.organizationStatusSubtitle
-                )
-            } else {
-                libraryContent
+                ManualOrganizationQueueView(appState: appState, maximumItems: 10, showsControls: false)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 13)
+                    .background(FileNestTheme.elevatedSurface)
+                Divider()
             }
+            if showsAutomaticProcessingStatus {
+                AutomaticProcessingQueueView(
+                    appState: appState,
+                    maximumItems: 2,
+                    onDismiss: {
+                        dismissedAutomaticProcessingItemIDs.formUnion(activeAutomaticProcessingItemIDs)
+                    }
+                )
+                .padding(.horizontal, 18)
+                .padding(.vertical, 13)
+                .background(FileNestTheme.elevatedSurface)
+                Divider()
+            }
+            libraryContent
         }
         .background(FileNestTheme.surface)
         .onAppear {
-            refreshCreationDates()
+            rebuildDerivedFiles()
+            appState.refreshPersistedCreationDates()
             applyPendingLibrarySearch()
         }
         .onChange(of: appState.files) { _ in
             resetPagination()
-            refreshCreationDates()
+            rebuildDerivedFiles()
+            appState.refreshPersistedCreationDates()
+        }
+        .onChange(of: appState.fileCreationDates) { _ in
+            if selectedDateRange != nil { rebuildDerivedFiles() }
+        }
+        .onChange(of: activeAutomaticProcessingItemIDs) { activeIDs in
+            dismissedAutomaticProcessingItemIDs.formIntersection(activeIDs)
         }
         .onChange(of: searchText) { value in
             resetPagination()
+            rebuildDerivedFiles()
             if !isApplyingExternalSearch { scheduleSearch(value) }
         }
-        .onChange(of: category) { _ in resetPagination() }
-        .onChange(of: selectedDateRange) { _ in resetPagination() }
-        .onChange(of: dateField) { _ in resetPagination() }
-        .onChange(of: sortField) { _ in resetPagination() }
-        .onChange(of: sortDirection) { _ in resetPagination() }
+        .onChange(of: searchResults) { _ in
+            resetPagination()
+            rebuildDerivedFiles()
+        }
+        .onChange(of: selectedCategories) { _ in
+            resetPagination()
+            rebuildDerivedFiles()
+            if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if smartSearchEnabled {
+                    startSmartSearch(query: searchText, recordHistory: false)
+                } else {
+                    scheduleSearch(searchText)
+                }
+            }
+        }
+        .onChange(of: selectedDateRange) { _ in
+            resetPagination()
+            rebuildDerivedFiles()
+        }
+        .onChange(of: dateField) { _ in
+            resetPagination()
+            rebuildDerivedFiles()
+        }
+        .onChange(of: sortField) { _ in
+            resetPagination()
+            rebuildDerivedFiles()
+        }
+        .onChange(of: sortDirection) { _ in
+            resetPagination()
+            rebuildDerivedFiles()
+        }
         .onChange(of: appState.librarySearchRequest?.id) { _ in
             applyPendingLibrarySearch()
         }
-        .onDisappear { searchTask?.cancel() }
+        .onDisappear {
+            searchTask?.cancel()
+            semanticSearchTask?.cancel()
+        }
     }
 
     private var libraryContent: some View {
@@ -336,12 +393,16 @@ struct LibraryView: View {
                 HStack(spacing: 10) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 7) {
-                            FilterChip(title: "All", icon: nil, selected: category == nil) {
-                                category = nil
+                            FilterChip(title: "All", icon: nil, selected: selectedCategories.isEmpty) {
+                                selectedCategories.removeAll()
                             }
                             ForEach(FileCategory.allCases) { item in
-                                FilterChip(title: item.label, icon: item.icon, selected: category == item) {
-                                    category = item
+                                FilterChip(title: item.label, icon: item.icon, selected: selectedCategories.contains(item)) {
+                                    if selectedCategories.contains(item) {
+                                        selectedCategories.remove(item)
+                                    } else {
+                                        selectedCategories.insert(item)
+                                    }
                                 }
                             }
                         }
@@ -410,7 +471,7 @@ struct LibraryView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if filteredFiles.isEmpty {
-                EmptyLibraryView(searching: !searchText.isEmpty || category != nil || selectedDateRange != nil)
+                EmptyLibraryView(searching: !searchText.isEmpty || !selectedCategories.isEmpty || selectedDateRange != nil)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
@@ -530,10 +591,7 @@ struct LibraryView: View {
             Button("Try Smart Search") {
                 runSmartSearch()
             }
-            .buttonStyle(.plain)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(FileNestTheme.accent)
-            .pointingHandOnHover()
+            .buttonStyle(InlineActionButtonStyle())
             .help("AI analyzes the query and creates precise retrieval conditions")
         }
         .padding(.horizontal, 11)
@@ -601,7 +659,7 @@ struct LibraryView: View {
             clearSearch()
             return
         }
-        startSearch(query: query, debounceNanoseconds: 300_000_000, recordHistory: false)
+        startSearch(query: query, debounceNanoseconds: 150_000_000, recordHistory: false)
     }
 
     private func startSearch(
@@ -610,6 +668,8 @@ struct LibraryView: View {
         recordHistory: Bool
     ) {
         searchTask?.cancel()
+        semanticSearchTask?.cancel()
+        let categories = selectedCategories
         smartSearchEnabled = false
         smartSearchPlan = nil
         smartSearchUsedAI = false
@@ -628,7 +688,7 @@ struct LibraryView: View {
                 }
             }
             guard !Task.isCancelled else { return }
-            if let cached = appState.cachedLibrarySearch(
+            if categories.isEmpty, let cached = appState.cachedLibrarySearch(
                 matching: query,
                 isSmartSearch: false
             ) {
@@ -644,24 +704,62 @@ struct LibraryView: View {
                 }
                 return
             }
-            let results = await appState.managedSearchResults(matching: query)
+            let results = await appState.managedQuickSearchResults(
+                matching: query,
+                categories: categories
+            )
             guard !Task.isCancelled,
                   activeSearchQuery == query,
                   searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
             searchResults = results
-            appState.saveLibrarySearch(
-                query: query,
-                results: results,
-                recordHistory: recordHistory
-            )
             isSearching = false
             searchTask = nil
+            resetPagination()
+            scheduleSemanticSearch(query: query, categories: categories, recordHistory: recordHistory)
+        }
+    }
+
+    /// Local evidence appears first. Semantic retrieval starts only once typing
+    /// has settled, so stale partial queries never queue local model work.
+    private func scheduleSemanticSearch(
+        query: String,
+        categories: Set<FileCategory>,
+        recordHistory: Bool
+    ) {
+        semanticSearchTask?.cancel()
+        semanticSearchTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 650_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  activeSearchQuery == query,
+                  searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            let results = await appState.managedSearchResults(
+                matching: query,
+                categories: categories
+            )
+            guard !Task.isCancelled,
+                  activeSearchQuery == query,
+                  searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            searchResults = results
+            if categories.isEmpty {
+                appState.saveLibrarySearch(
+                    query: query,
+                    results: results,
+                    recordHistory: recordHistory
+                )
+            }
+            semanticSearchTask = nil
             resetPagination()
         }
     }
 
     private func startSmartSearch(query: String, recordHistory: Bool) {
         searchTask?.cancel()
+        semanticSearchTask?.cancel()
+        let categories = selectedCategories
         smartSearchEnabled = true
         activeSearchQuery = query
         isSearching = true
@@ -671,7 +769,7 @@ struct LibraryView: View {
         sortField = .relevance
         sortDirection = .descending
         searchTask = Task { @MainActor in
-            if let cached = appState.cachedLibrarySearch(
+            if categories.isEmpty, let cached = appState.cachedLibrarySearch(
                 matching: query,
                 isSmartSearch: true
             ) {
@@ -691,6 +789,7 @@ struct LibraryView: View {
             }
             let response = await appState.managedSmartSearchResults(
                 matching: query,
+                categories: categories,
                 onIntentUpdate: { intent in
                     guard !Task.isCancelled,
                           activeSearchQuery == query else { return }
@@ -703,13 +802,15 @@ struct LibraryView: View {
             searchResults = response.results
             smartSearchPlan = response.plan
             smartSearchUsedAI = response.usedAI
-            appState.saveLibrarySearch(
-                query: query,
-                results: response.results,
-                smartPlan: response.plan,
-                usedAI: response.usedAI,
-                recordHistory: recordHistory
-            )
+            if categories.isEmpty {
+                appState.saveLibrarySearch(
+                    query: query,
+                    results: response.results,
+                    smartPlan: response.plan,
+                    usedAI: response.usedAI,
+                    recordHistory: recordHistory
+                )
+            }
             isSearching = false
             searchTask = nil
             resetPagination()
@@ -741,7 +842,9 @@ struct LibraryView: View {
 
     private func clearSearch() {
         searchTask?.cancel()
+        semanticSearchTask?.cancel()
         searchTask = nil
+        semanticSearchTask = nil
         isSearching = false
         smartSearchEnabled = false
         searchResults = nil
@@ -772,21 +875,6 @@ struct LibraryView: View {
         visibleLimit = min(visibleLimit + 20, filteredFiles.count)
     }
 
-    private func refreshCreationDates() {
-        let candidates = sourceFiles.compactMap { file -> LibraryCreationDateCandidate? in
-            guard creationDates[file.path] == nil else { return nil }
-            return LibraryCreationDateCandidate(
-                path: file.path,
-                fallback: file.discoveredAt ?? file.addedAt
-            )
-        }
-        guard !candidates.isEmpty else { return }
-        Task {
-            let values = await LibraryCreationDateCache.shared.dates(for: candidates)
-            creationDates.merge(values) { _, new in new }
-        }
-    }
-
 }
 
 private struct LibrarySearchHistoryPopover: View {
@@ -803,8 +891,7 @@ private struct LibrarySearchHistoryPopover: View {
                 Spacer()
                 if !entries.isEmpty {
                     Button("Clear All", role: .destructive, action: clear)
-                        .buttonStyle(.plain)
-                        .font(.system(size: 11))
+                        .buttonStyle(InlineActionButtonStyle(tint: .red))
                 }
             }
             .padding(14)
@@ -908,7 +995,7 @@ private struct FilterChip: View {
     }
 }
 
-private enum LibraryTableLayout {
+enum LibraryTableLayout {
     static let spacing: CGFloat = 14
     static let iconWidth: CGFloat = 38
     static let nameColumnLeading = iconWidth + spacing
@@ -989,7 +1076,11 @@ private struct LibraryFileRow: View {
         .frame(minHeight: 66)
         .background {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isHovered || isSelected ? FileNestTheme.selection : Color.clear)
+                .fill(
+                    isSelected
+                        ? FileNestTheme.contentSelection
+                        : (isHovered ? FileNestTheme.contentHover : Color.clear)
+                )
         }
         .contentShape(Rectangle())
         .onHover { hovered in
@@ -1013,11 +1104,9 @@ private struct LibraryFileRow: View {
             }
         }
         .contextMenu {
-            if file.supportsPreview {
-                Button("Preview File") { appState.presentFilePreview(file) }
-            }
-            if file.supportsDocumentChat {
-                Button("Chat with Document") { startDocumentChat(file) }
+            Button("View File Details") { appState.toggleFilePreview(file) }
+            if file.supportsFileChat(with: appState.settings) {
+                Button("Chat with File") { startDocumentChat(file) }
             }
             Button("Open") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: file.path))
@@ -1039,6 +1128,14 @@ private struct LibraryFileRow: View {
                     Text(file.name)
                         .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
+                    if file.duplicateOfFileID != nil {
+                        Text(appState.settings.localized("Duplicate"))
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(FileNestTheme.warning)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(FileNestTheme.warning.opacity(0.12), in: Capsule())
+                    }
                     if let searchMatch {
                         ConfidenceBadge(confidence: searchMatch.confidence)
                     }
@@ -1062,22 +1159,22 @@ private struct LibraryFileRow: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            if file.supportsPreview { appState.presentFilePreview(file) }
+            appState.toggleFilePreview(file)
         }
-        .help(file.supportsPreview ? "Click to preview file" : "Preview is not available for this file type")
-        .pointingHandOnHover(file.supportsPreview)
-        .accessibilityAction(named: Text("Preview File")) {
-            if file.supportsPreview { appState.presentFilePreview(file) }
+        .help("Click to view file details")
+        .pointingHandOnHover()
+        .accessibilityAction(named: Text("View File Details")) {
+            appState.toggleFilePreview(file)
         }
     }
 
     private var actionButtons: some View {
         HStack(spacing: 4) {
-            if file.supportsDocumentChat {
+            if file.supportsFileChat(with: appState.settings) {
                 LibraryActionButton(
                     systemName: "doc.text.magnifyingglass",
                     tint: FileNestTheme.accent,
-                    title: "Chat with Document"
+                    title: "Chat with File"
                 ) {
                     startDocumentChat(file)
                 }
@@ -1148,7 +1245,7 @@ private struct LibraryFileRow: View {
     }
 }
 
-private struct ConfidenceBadge: View {
+struct ConfidenceBadge: View {
     @EnvironmentObject private var appState: AppState
     let confidence: Double
 
@@ -1263,13 +1360,12 @@ private struct LibraryCalendarPopover: View {
 
             HStack {
                 Button("Clear Filter", action: clear)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(hasActiveFilter ? Color.secondary : Color.secondary.opacity(0.45))
+                    .buttonStyle(InlineActionButtonStyle(tint: .secondary))
                     .disabled(!hasActiveFilter)
                 Spacer()
                 Button("Apply", action: apply)
                     .buttonStyle(.borderedProminent)
-                    .tint(FileNestTheme.accent)
+                    .tint(FileNestTheme.accentFill)
             }
             .controlSize(.small)
         }
@@ -1380,7 +1476,7 @@ private enum LibraryFileAlert: Identifiable {
     }
 }
 
-private struct LibraryActionButton: View {
+struct LibraryActionButton: View {
     @Environment(\.isEnabled) private var isEnabled
 
     let systemName: String
@@ -1414,6 +1510,268 @@ private struct LibraryActionButton: View {
     }
 }
 
+struct DuplicateFilesWindow: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var selectedPaths = Set<String>()
+    @State private var isTrashConfirmationPresented = false
+    @State private var resultMessage: String?
+
+    private var selectedCount: Int { selectedPaths.count }
+    private var reclaimableBytes: Int64 {
+        appState.duplicateFileGroups
+            .flatMap(\.duplicateFiles)
+            .filter { selectedPaths.contains($0.path) }
+            .reduce(0) { $0 + $1.size }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(appState.settings.localized("Duplicate Files"))
+                        .font(.system(size: 23, weight: .semibold))
+                    Text(appState.settings.localized("Finds files with exactly the same content. Files are never removed until you confirm."))
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 24)
+                if !appState.duplicateFileGroups.isEmpty {
+                    Button {
+                        Task { await appState.scanForDuplicateFiles() }
+                    } label: {
+                        Label(appState.settings.localized("Rescan"), systemImage: "arrow.clockwise")
+                    }
+                    .disabled(appState.isScanningForDuplicates)
+                    .buttonStyle(QuietButtonStyle())
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 22)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Divider()
+
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 18)
+
+            Divider()
+            HStack(spacing: 12) {
+                if let resultMessage {
+                    Text(resultMessage)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else if let progress = appState.duplicateTrashProgress {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(appState.settings.localizedFormat(
+                            "Moving duplicates to Trash… %d of %d",
+                            progress.completedCount,
+                            progress.totalCount
+                        ))
+                        .font(.system(size: 12, weight: .medium))
+                        Text(progress.currentFileName ?? "")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: 280, alignment: .leading)
+                    ProgressView(value: progress.fractionCompleted)
+                        .progressViewStyle(.linear)
+                        .frame(width: 130)
+                } else if selectedCount > 0 {
+                    Text(appState.settings.localizedFormat("%d selected · %@ recoverable", selectedCount, ByteCountFormatter.string(fromByteCount: reclaimableBytes, countStyle: .file)))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if appState.duplicateFileGroups.isEmpty {
+                    if !appState.isScanningForDuplicates {
+                        Button {
+                            Task { await appState.scanForDuplicateFiles() }
+                        } label: {
+                            Label(appState.settings.localized("Rescan"), systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(GradientButtonStyle())
+                        .disabled(appState.isRemovingDuplicates)
+                    }
+                } else {
+                    Button {
+                        isTrashConfirmationPresented = true
+                    } label: {
+                        Label(
+                            appState.settings.localizedFormat("Move %d Duplicates to Trash", selectedCount),
+                            systemImage: "trash"
+                        )
+                    }
+                    .buttonStyle(GradientButtonStyle())
+                    .disabled(selectedCount == 0 || appState.isScanningForDuplicates || appState.isRemovingDuplicates)
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 18)
+        }
+        .frame(minWidth: 680, idealWidth: 760, minHeight: 460, idealHeight: 600)
+        .background(FileNestTheme.surface)
+        .onAppear {
+            appState.loadKnownDuplicateFileGroups()
+            selectedPaths = Set(appState.duplicateFileGroups.flatMap(\.duplicateFiles).map(\.path))
+        }
+        .onChange(of: appState.duplicateFileGroups) { groups in
+            selectedPaths = Set(groups.flatMap(\.duplicateFiles).map(\.path))
+            resultMessage = nil
+        }
+        .confirmationDialog(
+            appState.settings.localized("Move selected duplicates to Trash?"),
+            isPresented: $isTrashConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button(
+                appState.settings.localizedFormat("Move %d Duplicates to Trash", selectedCount),
+                role: .destructive
+            ) {
+                Task {
+                    let result = await appState.moveDuplicateFilesToTrash(paths: selectedPaths)
+                    if result.failedFileNames.isEmpty {
+                        resultMessage = appState.settings.localizedFormat("%d duplicate files moved to Trash", result.movedCount)
+                    } else {
+                        resultMessage = appState.settings.localizedFormat("Failed to move %d duplicate files to Trash", result.failedFileNames.count)
+                    }
+                }
+            }
+        } message: {
+            Text(appState.settings.localized("The selected files will be moved to the macOS Trash. The kept original files are not changed."))
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let progress = appState.duplicateScanProgress {
+            VStack(spacing: 12) {
+                ProgressView(value: progress.fractionCompleted)
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 420)
+                Text(appState.settings.localizedFormat("Scanning files for duplicates… %d of %d", progress.scannedCount, progress.totalCount))
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+        } else if appState.duplicateFileGroups.isEmpty {
+            VStack(spacing: 12) {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 38, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text(appState.settings.localized("No duplicate files to review"))
+                    .font(.system(size: 16, weight: .semibold))
+                Text(appState.settings.localized("Start a scan to calculate SHA-256 hashes and look for exact copies."))
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 460)
+            }
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ForEach(appState.duplicateFileGroups) { group in
+                        DuplicateFileGroupCard(group: group, selectedPaths: $selectedPaths)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .fileNestOverlayScrollStyle()
+        }
+    }
+}
+
+private struct DuplicateFileGroupCard: View {
+    @EnvironmentObject private var appState: AppState
+    let group: DuplicateFileGroup
+    @Binding var selectedPaths: Set<String>
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack {
+                Label(
+                    appState.settings.localizedFormat("%d exact copies", group.files.count),
+                    systemImage: "doc.on.doc"
+                )
+                .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Text(appState.settings.localizedFormat("%@ recoverable", ByteCountFormatter.string(fromByteCount: group.reclaimableBytes, countStyle: .file)))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            DuplicateFileRow(file: group.retainedFile, title: "Keep", isRetained: true, isSelected: .constant(true))
+            ForEach(group.duplicateFiles) { file in
+                DuplicateFileRow(
+                    file: file,
+                    title: "Duplicate copy",
+                    isRetained: false,
+                    isSelected: Binding(
+                        get: { selectedPaths.contains(file.path) },
+                        set: { selected in
+                            if selected { selectedPaths.insert(file.path) }
+                            else { selectedPaths.remove(file.path) }
+                        }
+                    )
+                )
+            }
+        }
+        .padding(14)
+        .background(FileNestTheme.elevatedSurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(FileNestTheme.border, lineWidth: 1)
+        }
+    }
+}
+
+private struct DuplicateFileRow: View {
+    @EnvironmentObject private var appState: AppState
+    let file: FileRecord
+    let title: String
+    let isRetained: Bool
+    @Binding var isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if isRetained {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(FileNestTheme.success)
+                    .frame(width: 18)
+            } else {
+                Toggle("", isOn: $isSelected)
+                    .labelsHidden()
+                    .toggleStyle(.checkbox)
+                    .frame(width: 18)
+            }
+            FileIconView(file: file, size: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(appState.settings.localized(title))
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(isRetained ? FileNestTheme.success : .secondary)
+                    Text(file.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                }
+                Text(file.path)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 private struct EmptyLibraryView: View {
     let searching: Bool
 
@@ -1431,54 +1789,6 @@ private struct EmptyLibraryView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-private struct OrganizationProgressView: View {
-    let progress: OrganizationJobProgress?
-    let title: String
-    let subtitle: String
-
-    var body: some View {
-        VStack(spacing: 18) {
-            Image(systemName: phaseIcon)
-                .font(.system(size: 34, weight: .light))
-                .foregroundStyle(FileNestTheme.accent)
-            Text(LocalizedStringKey(title))
-                .font(.system(size: 18, weight: .semibold))
-            Text(LocalizedStringKey(subtitle))
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-            ProgressView(value: progress?.fractionCompleted ?? 0)
-                .frame(maxWidth: 420)
-            if let progress {
-                Text("\(progress.completed) / \(progress.total)")
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 16) {
-                    Label("\(progress.moved)", systemImage: "folder.badge.plus")
-                    Label("\(progress.skipped)", systemImage: "forward.end")
-                    Label("\(progress.failed)", systemImage: "exclamationmark.triangle")
-                }
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(36)
-    }
-
-    private var phaseIcon: String {
-        switch progress?.phase {
-        case .waitingForStability: return "clock.arrow.circlepath"
-        case .indexing: return "doc.text.magnifyingglass"
-        case .organizing: return "tray.and.arrow.down"
-        case .paused: return "pause.circle"
-        case .stopping, .stopped: return "stop.circle"
-        case .failed: return "exclamationmark.triangle"
-        case .completed: return "checkmark.circle"
-        default: return "sparkles"
-        }
     }
 }
 

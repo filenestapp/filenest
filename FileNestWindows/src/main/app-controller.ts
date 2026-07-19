@@ -1,8 +1,8 @@
 import { app, BrowserWindow, dialog, shell } from 'electron'
-import { basename, dirname } from 'node:path'
-import { stat } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
+import { readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import type { AiConnectivityCheck, AppSnapshot, ChatStreamEvent, FileCategory, FileRecord, LibrarySearchRequest, LibrarySearchResponse, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { AiConnectivityCheck, AppSnapshot, ChatStreamEvent, DuplicateFileGroup, DuplicateScanProgress, DuplicateTrashResult, FileCategory, FileRecord, LibrarySearchRequest, LibrarySearchResponse, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 import { FileNestDatabase } from './database'
 import { AppLogger } from './logger'
 import { ContentExtractor } from './content-extractor'
@@ -12,12 +12,16 @@ import { OrganizerService } from './organizer'
 import { FileWatcherService } from './watcher'
 import { LlmService } from './llm'
 import { ChatService } from './chat'
-import { OllamaManager } from './ollama'
+import { OllamaManager, requiresOllamaService } from './ollama'
 import updater from 'electron-updater'
 import { doclingManager } from './docling'
 import { categoryForExtension, normalizedExtension } from './file-policy'
 import { LibrarySearchService } from './library-search'
 import { normalizeSettingsPatch } from './settings-normalization'
+import { prompts } from './prompts'
+import { RerankerServiceManager } from './reranker-manager'
+import { mediaTranscriptionManager } from './media-transcription'
+import { DuplicateFileService, sha256File } from './duplicate-files'
 
 const { autoUpdater } = updater
 
@@ -31,37 +35,59 @@ export class AppController {
   private readonly watcher = new FileWatcherService(this.database, this.indexer, this.organizer, this.logger)
   private readonly chat = new ChatService(this.database, this.embeddings, new LlmService(), this.logger)
   private readonly librarySearch = new LibrarySearchService(this.database, this.embeddings, this.logger)
+  private readonly duplicateFiles = new DuplicateFileService(this.database)
   private readonly ollamaManager = new OllamaManager()
+  private readonly rerankerManager = new RerankerServiceManager()
   private selectedSessionId: number | null = null
   private readonly runningChatSessionIds = new Set<number>()
   private readonly completedChatSessionIds = new Set<number>()
-  private pendingLibrarySearch: { id: string; query: string } | null = null
+  private pendingLibrarySearch: { id: string; query: string; includeSemantic?: boolean } | null = null
   private quickSearchShortcutError: string | null = null
   private pendingChatAttachmentPath: string | null = null
   private ollama = { reachable: false, models: [] as string[] }
   private indexingProgress: AppSnapshot['indexingProgress'] = null
+  private loadedChatMessageLimit = 40
+  private duplicateFileGroups: DuplicateFileGroup[] = []
+  private duplicateScanProgress: DuplicateScanProgress | null = null
+  private duplicateTrashProgress: AppSnapshot['duplicateTrashProgress'] = null
+  private duplicateScanError: string | null = null
   onChanged?: () => void
   onQuickSearchRequested?: () => void
   onQuickSearchShortcutChanged?: (shortcut: string) => string | null
 
   async initialize(): Promise<void> {
     await this.database.initialize()
+    this.duplicateFileGroups = this.duplicateFiles.knownGroups()
     const settings = this.database.getSettings()
-    this.selectedSessionId = this.database.listChatSessions()[0]?.id ?? null
+    this.selectedSessionId = null
     this.indexer.onProgress = (completed, total, currentName, failed, stage) => {
       this.indexingProgress = total ? { completed, total, currentName, failed, stage } : null
       this.notifyChanged()
     }
     this.watcher.onChanged = () => this.notifyChanged()
-    this.ollama = await this.ollamaManager.refresh(settings)
+    this.rerankerManager.onChanged = () => this.notifyChanged()
+    mediaTranscriptionManager.onChanged = () => this.notifyChanged()
+    this.ollama = requiresOllamaService(settings)
+      ? await this.ollamaManager.start(settings)
+      : await this.ollamaManager.refresh(settings)
+    await this.rerankerManager.refresh()
+    await mediaTranscriptionManager.refresh()
+    if (settings.rerankerSource === 'local') void this.rerankerManager.start().catch((error) => this.logger.log('reranker', 'Unable to start the local reranker', error))
     if (process.platform === 'win32') app.setLoginItemSettings({ openAtLogin: settings.launchAtLogin, path: process.execPath })
     if (settings.onboardingCompleted) await this.watcher.start(settings)
+    if (settings.onboardingCompleted) void this.resumePendingOrganization()
+    void this.backfillFileCreationDates()
+    if (settings.onboardingCompleted) void this.auditManagedContent()
     if (settings.automaticUpdateChecks && app.isPackaged) setTimeout(() => void this.checkForUpdates(), 10_000)
   }
 
   async snapshot(): Promise<AppSnapshot> {
+    if (!this.duplicateScanProgress && !this.duplicateTrashProgress) this.duplicateFileGroups = this.duplicateFiles.knownGroups()
     const sessions = this.database.listChatSessions()
     if (this.selectedSessionId != null && !sessions.some((session) => session.id === this.selectedSessionId)) this.selectedSessionId = sessions[0]?.id ?? null
+    const messagePage = this.selectedSessionId == null
+      ? { messages: [], hasEarlier: false }
+      : this.database.chatMessagePage(this.selectedSessionId, null, this.loadedChatMessageLimit)
     return {
       settings: this.database.getSettings(),
       files: this.database.listFiles(),
@@ -69,7 +95,8 @@ export class AppController {
       chatSessions: sessions,
       selectedSessionId: this.selectedSessionId,
       pendingChatAttachmentPath: this.pendingChatAttachmentPath,
-      messages: this.selectedSessionId == null ? [] : this.database.listMessages(this.selectedSessionId),
+      messages: messagePage.messages,
+      hasEarlierChatMessages: messagePage.hasEarlier,
       runningChatSessionIds: [...this.runningChatSessionIds],
       completedChatSessionIds: [...this.completedChatSessionIds],
       pendingLibrarySearch: this.pendingLibrarySearch,
@@ -79,10 +106,64 @@ export class AppController {
       indexing: this.indexer.isRunning,
       indexingPaused: this.indexer.isPaused,
       indexingProgress: this.indexingProgress,
+      organizing: this.watcher.isManualOrganizationRunning,
+      organizationPaused: this.watcher.isManualOrganizationPaused,
+      automaticProcessingItems: this.watcher.automaticProcessingItems,
+      duplicateFileGroups: this.duplicateFileGroups,
+      duplicateScanProgress: this.duplicateScanProgress,
+      duplicateTrashProgress: this.duplicateTrashProgress,
+      duplicateScanError: this.duplicateScanError,
       watchDirectoryStatuses: await this.watcher.statuses(this.database.getSettings()),
       ollama: this.ollama,
-      docling: await doclingManager.status()
+      docling: await doclingManager.status(),
+      ffmpeg: mediaTranscriptionManager.ffmpeg(),
+      whisper: mediaTranscriptionManager.whisper(),
+      reranker: this.rerankerManager.status()
     }
+  }
+
+  private async backfillFileCreationDates(): Promise<void> {
+    const candidates = this.database.filesMissingCreationDate(256)
+    const values = (await Promise.all(candidates.map(async (file) => {
+      const metadata = await stat(file.path).catch(() => null)
+      return metadata ? { id: file.id, creationDate: metadata.birthtime.toISOString() } : null
+    }))).filter((value): value is { id: number; creationDate: string } => value != null)
+    await this.database.updateCreationDates(values).catch((error) => this.logger.log('database', 'Unable to backfill file creation dates', error))
+    if (candidates.length === 256) setTimeout(() => void this.backfillFileCreationDates(), 250)
+  }
+
+  private async auditManagedContent(force = false): Promise<number> {
+    const timestampKey = 'managed_content_audit.last_completed_at.v1'
+    const cursorKey = 'managed_content_audit.last_file_id.v1'
+    const now = Date.now()
+    const lastCompleted = Number(this.database.getInternalSetting(timestampKey) ?? 0)
+    if (!force && now - lastCompleted < 24 * 60 * 60 * 1000) return 0
+    const settings = this.database.getSettings()
+    const cursor = Number(this.database.getInternalSetting(cursorKey) ?? 0)
+    const fetched = this.database.managedContentAuditCandidates(settings.organizedRoot, settings.vectorizeExtensions, cursor, 256)
+    const maximumBytes = 256 * 1024 * 1024
+    const selected: FileRecord[] = []
+    let selectedBytes = 0
+    for (const file of fetched) {
+      if (selected.length && selectedBytes + Math.max(0, file.size) > maximumBytes) break
+      selected.push(file)
+      selectedBytes += Math.max(0, file.size)
+    }
+    const changedIds: number[] = []
+    for (const file of selected) {
+      try {
+        const currentHash = file.isDirectory ? await this.extractor.hash(file.path, true) : await sha256File(file.path)
+        if (file.contentHash && currentHash !== file.contentHash) changedIds.push(file.id)
+      } catch {
+        // Missing or unreadable files are reconciled by the watcher instead.
+      }
+    }
+    await this.database.invalidateFileIndexes(changedIds)
+    if (selected.at(-1)) await this.database.setInternalSetting(cursorKey, String(selected.at(-1)!.id))
+    else if (cursor > 0) await this.database.setInternalSetting(cursorKey, '0')
+    await this.database.setInternalSetting(timestampKey, String(now))
+    if (changedIds.length) this.notifyChanged()
+    return changedIds.length
   }
 
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
@@ -90,8 +171,16 @@ export class AppController {
     const next = await this.database.updateSettings(normalizeSettingsPatch(patch, previous))
     if ('quickSearchShortcut' in patch) this.quickSearchShortcutError = this.onQuickSearchShortcutChanged?.(next.quickSearchShortcut) ?? null
     if ('launchAtLogin' in patch && process.platform === 'win32') app.setLoginItemSettings({ openAtLogin: next.launchAtLogin, path: process.execPath })
+    if ('rerankerSource' in patch) {
+      if (next.rerankerSource === 'local') void this.rerankerManager.start().catch((error) => this.logger.log('reranker', 'Unable to start the local reranker', error))
+      else await this.rerankerManager.stop()
+    }
     const watcherKeys: Array<keyof Settings> = ['watchDirs', 'enabledExtensions', 'excludeHidden', 'autoOrganize', 'autoOrganizeMode', 'autoOrganizeIntervalSeconds', 'autoOrganizeBatchSize']
     if (watcherKeys.some((key) => JSON.stringify(previous[key]) !== JSON.stringify(next[key])) && this.watcher.isWatching) await this.watcher.start(next)
+    const ollamaKeys: Array<keyof Settings> = ['llmChoice', 'embeddingSource', 'ollamaHost', 'ollamaFlashAttentionEnabled']
+    if (ollamaKeys.some((key) => previous[key] !== next[key])) {
+      this.ollama = requiresOllamaService(next) ? await this.ollamaManager.start(next) : await this.ollamaManager.refresh(next)
+    }
     this.notifyChanged()
     return next
   }
@@ -106,6 +195,16 @@ export class AppController {
     return result.canceled ? null : result.filePaths[0] ?? null
   }
 
+  async chooseOrganizationDirectories(): Promise<string[]> {
+    const result = await dialog.showOpenDialog({
+      title: 'Choose Folders to Organize',
+      message: 'Selected folders are processed once and are not added to monitoring.',
+      buttonLabel: 'Choose',
+      properties: ['openDirectory', 'multiSelections']
+    })
+    return result.canceled ? [] : result.filePaths
+  }
+
   async chooseChatFile(): Promise<string | null> {
     const result = await dialog.showOpenDialog({ title: 'Choose a file to chat with', properties: ['openFile'] })
     const path = result.canceled ? null : result.filePaths[0] ?? null
@@ -118,7 +217,25 @@ export class AppController {
   async scanExisting(directories?: string[]): Promise<void> { await this.watcher.scanExisting(this.database.getSettings(), directories); this.notifyChanged() }
   async preserveExisting(directories?: string[]): Promise<void> { await this.watcher.preserveExisting(this.database.getSettings(), directories); this.notifyChanged() }
   async organizeNow(): Promise<void> { await this.organizer.organizeAll(this.database.getSettings()); this.notifyChanged() }
-  async reindexAll(mode: ReindexMode = 'all'): Promise<void> { await this.indexer.reindexAll(this.database.getSettings(), mode); this.indexingProgress = null; this.notifyChanged() }
+  async organizeDirectoriesOnce(directories: string[], recursively = false): Promise<void> {
+    const normalized = [...new Set(directories.map((path) => path.trim()).filter(Boolean))]
+    if (!normalized.length || this.watcher.isManualOrganizationRunning) return
+    await writeFile(this.pendingOrganizationPath, JSON.stringify({ directories: normalized, recursively }), 'utf8')
+    try {
+      await this.watcher.organizeDirectoriesOnce(this.database.getSettings(), normalized, recursively)
+    } finally {
+      if (!this.watcher.isManualOrganizationRunning) await rm(this.pendingOrganizationPath, { force: true })
+      this.notifyChanged()
+    }
+  }
+  pauseOrganization(): void { this.watcher.pauseManualOrganization(); this.notifyChanged() }
+  resumeOrganization(): void { this.watcher.resumeManualOrganization(); this.notifyChanged() }
+  async cancelOrganization(): Promise<void> {
+    this.watcher.cancelManualOrganization()
+    await rm(this.pendingOrganizationPath, { force: true })
+    this.notifyChanged()
+  }
+  async reindexAll(mode: ReindexMode = 'all', categories: FileCategory[] = []): Promise<void> { await this.indexer.reindexAll(this.database.getSettings(), mode, categories); this.indexingProgress = null; this.notifyChanged() }
   async reindexFile(id: number): Promise<void> {
     const file = this.database.getFile(id)
     if (!file) return
@@ -146,7 +263,7 @@ export class AppController {
   requestLibrarySearch(rawQuery: string): void {
     const query = rawQuery.trim()
     if (!query) return
-    this.pendingLibrarySearch = { id: randomUUID(), query }
+    this.pendingLibrarySearch = { id: randomUUID(), query, includeSemantic: false }
     this.onQuickSearchRequested?.()
     this.notifyChanged()
   }
@@ -173,6 +290,36 @@ export class AppController {
     this.notifyChanged()
   }
 
+  async scanDuplicateFiles(): Promise<DuplicateFileGroup[]> {
+    if (this.duplicateScanProgress || this.duplicateTrashProgress) return this.duplicateFileGroups
+    this.duplicateScanError = null
+    try {
+      this.duplicateFileGroups = await this.duplicateFiles.scan((progress) => {
+        this.duplicateScanProgress = progress
+        this.notifyChanged()
+      })
+      return this.duplicateFileGroups
+    } catch (error) {
+      this.duplicateScanError = error instanceof Error ? error.message : String(error)
+      return []
+    } finally {
+      this.duplicateScanProgress = null
+      this.notifyChanged()
+    }
+  }
+
+  async trashDuplicateFiles(paths: string[]): Promise<DuplicateTrashResult> {
+    if (this.duplicateTrashProgress || this.duplicateScanProgress) return { movedCount: 0, failedFileNames: [] }
+    const result = await this.duplicateFiles.moveToTrash(paths, (path) => shell.trashItem(path), (completedCount, totalCount, currentFileName) => {
+      this.duplicateTrashProgress = { completedCount, totalCount, currentFileName }
+      this.notifyChanged()
+    })
+    this.duplicateTrashProgress = null
+    this.duplicateFileGroups = this.duplicateFiles.knownGroups()
+    this.notifyChanged()
+    return result
+  }
+
   async saveFileNote(id: number, note: string): Promise<void> {
     await this.database.updateFile(id, { note })
     const file = this.database.getFile(id)
@@ -186,7 +333,8 @@ export class AppController {
     return this.chat.summarize(file, this.database.getSettings())
   }
 
-  getDocumentChunks(id: number) { return this.database.listDocumentChunks(id) }
+  getDocumentChunks(id: number, offset = 0, limit?: number) { return this.database.listDocumentChunks(id, offset, limit) }
+  getDocumentChunkCount(id: number): number { return this.database.documentChunkCount(id) }
 
   previewUrl(path: string): string {
     const allowed = this.database.getFileByPath(path)
@@ -214,7 +362,8 @@ export class AppController {
     this.notifyChanged()
   }
 
-  selectChat(id: number) { this.selectedSessionId = id; this.pendingChatAttachmentPath = null; this.completedChatSessionIds.delete(id); this.notifyChanged(); return this.database.listMessages(id) }
+  selectChat(id: number) { this.selectedSessionId = id; this.loadedChatMessageLimit = 40; this.pendingChatAttachmentPath = null; this.completedChatSessionIds.delete(id); this.notifyChanged(); return this.database.chatMessagePage(id, null, this.loadedChatMessageLimit).messages }
+  loadEarlierChatMessages(): void { if (this.selectedSessionId != null) this.loadedChatMessageLimit += 40; this.notifyChanged() }
   markChatSeen(id: number): void { this.completedChatSessionIds.delete(id); this.notifyChanged() }
   async deleteChat(id: number): Promise<void> { await this.database.deleteChat(id); this.runningChatSessionIds.delete(id); this.completedChatSessionIds.delete(id); if (this.selectedSessionId === id) this.selectedSessionId = this.database.listChatSessions()[0]?.id ?? null; this.notifyChanged() }
   async clearChats(): Promise<void> { await this.database.clearChats(); this.selectedSessionId = null; this.runningChatSessionIds.clear(); this.completedChatSessionIds.clear(); this.notifyChanged() }
@@ -256,6 +405,15 @@ export class AppController {
     this.notifyChanged()
     try { await task } finally { this.notifyChanged() }
   }
+  async installFfmpeg(): Promise<void> { await mediaTranscriptionManager.installFfmpeg(); this.notifyChanged() }
+  async installWhisper(): Promise<void> { await mediaTranscriptionManager.installWhisper(); this.notifyChanged() }
+  async downloadWhisperModel(model: string): Promise<void> { await mediaTranscriptionManager.downloadWhisperModel(model); this.notifyChanged() }
+  async deleteWhisperModel(model: string): Promise<void> { await mediaTranscriptionManager.deleteWhisperModel(model); this.notifyChanged() }
+  async refreshReranker(): Promise<void> { await this.rerankerManager.refresh(); this.notifyChanged() }
+  async installReranker(): Promise<void> { await this.rerankerManager.install(); this.notifyChanged() }
+  async startReranker(): Promise<void> { await this.rerankerManager.start(); this.notifyChanged() }
+  async stopReranker(): Promise<void> { await this.rerankerManager.stop(); this.notifyChanged() }
+  async deleteReranker(): Promise<void> { await this.rerankerManager.deleteModel(); this.notifyChanged() }
 
   async testAiConnections(): Promise<AiConnectivityCheck[]> {
     const settings = this.database.getSettings()
@@ -266,8 +424,8 @@ export class AppController {
       const provider = new LlmService().provider(settings)
       try {
         await new LlmService().complete([
-          { role: 'system', content: 'Return only OK.' },
-          { role: 'user', content: 'Connection test' }
+          { role: 'system', content: prompts.connectivity.system },
+          { role: 'user', content: prompts.connectivity.user }
         ], settings, 15_000)
         results.push({ capability: 'chat', provider: provider.name, success: true, detail: provider.model })
       } catch (error) {
@@ -275,7 +433,7 @@ export class AppController {
       }
     }
     try {
-      const vector = await this.embeddings.embed('FileNest connection test', settings)
+      const vector = await this.embeddings.embed(prompts.connectivity.embedding, settings)
       results.push({ capability: 'embedding', provider: this.embeddings.modelName(settings), success: vector.length > 0, detail: `${vector.length} dimensions` })
     } catch (error) {
       results.push({ capability: 'embedding', provider: this.embeddings.modelName(settings), success: false, detail: error instanceof Error ? error.message : String(error) })
@@ -315,7 +473,19 @@ export class AppController {
   async shutdown(): Promise<void> {
     this.indexer.cancel()
     await this.watcher.stop()
+    await this.ollamaManager.stop()
+    await this.rerankerManager.shutdown()
     await this.database.flush()
+  }
+
+  private get pendingOrganizationPath(): string { return join(app.getPath('userData'), 'pending-organization-job.json') }
+
+  private async resumePendingOrganization(): Promise<void> {
+    const job = await readFile(this.pendingOrganizationPath, 'utf8')
+      .then((value) => JSON.parse(value) as { directories?: unknown; recursively?: unknown })
+      .catch(() => null)
+    if (!job || !Array.isArray(job.directories) || !job.directories.every((path) => typeof path === 'string')) return
+    await this.organizeDirectoriesOnce(job.directories, job.recursively === true)
   }
 
   private async ensureAttachedFile(path: string): Promise<FileRecord> {

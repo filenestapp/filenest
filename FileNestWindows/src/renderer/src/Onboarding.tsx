@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   Bot,
+  AudioLines,
   CheckCircle2,
   FileText,
   FolderPlus,
@@ -23,6 +24,7 @@ export function Onboarding({
   const [organizeExisting, setOrganizeExisting] = useState(false);
   const [doclingBusy, setDoclingBusy] = useState(false);
   const [modelBusy, setModelBusy] = useState(false);
+  const [mediaBusy, setMediaBusy] = useState(false);
   const [generationModel, setGenerationModel] = useState(snapshot.settings.ollamaModel);
   const [embeddingModel, setEmbeddingModel] = useState(snapshot.settings.ollamaEmbeddingModel);
   const t = (value: string): string =>
@@ -45,6 +47,20 @@ export function Onboarding({
       await onComplete();
     } finally {
       setModelBusy(false);
+    }
+  };
+  const setupMediaTranscription = async (): Promise<void> => {
+    setMediaBusy(true);
+    try {
+      await update({ mediaTranscriptionEnabled: true });
+      if (snapshot.ffmpeg.state !== "ready") await window.fileNest.installFfmpeg();
+      if (snapshot.whisper.version == null) await window.fileNest.installWhisper();
+      if (!snapshot.whisper.installedModels.includes(snapshot.settings.whisperModel)) {
+        await window.fileNest.downloadWhisperModel(snapshot.settings.whisperModel);
+      }
+      await onComplete();
+    } finally {
+      setMediaBusy(false);
     }
   };
   return (
@@ -234,6 +250,11 @@ export function Onboarding({
                   ? `Docling ${snapshot.docling.version ?? ""} Installed`
                   : t("Install Docling Document Parsing (Optional)")}
               </button>
+              <button className="text-action" disabled={mediaBusy} onClick={() => void setupMediaTranscription().catch((error) => alert(error instanceof Error ? error.message : String(error)))}>
+                {mediaBusy ? <LoaderCircle className="spin" size={16} /> : snapshot.settings.mediaTranscriptionEnabled && snapshot.ffmpeg.state === "ready" && snapshot.whisper.installedModels.includes(snapshot.settings.whisperModel) ? <CheckCircle2 size={16} /> : <AudioLines size={16} />}
+                {t("Set Up Audio & Video Transcription")}
+              </button>
+              <small>{t("Install the local decoder and OpenAI Whisper model used to turn media into searchable transcripts.")}</small>
             </div>
           )}
           {step === 3 && (

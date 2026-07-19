@@ -34,28 +34,37 @@ struct RulesView: View {
         VStack(spacing: 0) {
             HStack(alignment: .center, spacing: 18) {
                 VStack(alignment: .leading, spacing: embeddedInSettings ? 3 : 6) {
-                    Text("Organization Rules")
+                    Text(verbatim: appState.settings.localized("Organization Rules"))
                         .font(.system(size: embeddedInSettings ? 18 : 24, weight: .semibold))
-                    Text("Automatically organize and classify files with rules.")
+                    Text(verbatim: appState.settings.localized("Automatically organize and classify files with rules."))
                         .font(.system(size: embeddedInSettings ? 11 : 13))
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 20)
                 HStack(spacing: 12) {
-                    Picker("Strategy", selection: Binding(
+                    Picker(selection: Binding(
                         get: { appState.settings.classifyStrategy },
                         set: { appState.settings.setClassifyStrategy($0) }
                     )) {
-                        Text("Hybrid").tag(ClassificationStrategy.hybrid.rawValue)
-                        Text("Rules Only").tag(ClassificationStrategy.rule.rawValue)
+                        Text(verbatim: appState.settings.localized("Hybrid"))
+                            .tag(ClassificationStrategy.hybrid.rawValue)
+                        Text(verbatim: appState.settings.localized("Rules Only"))
+                            .tag(ClassificationStrategy.rule.rawValue)
+                    } label: {
+                        Text(verbatim: appState.settings.localized("Strategy"))
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 150)
+                    .help(appState.settings.localized(strategyDescriptionKey))
 
                     Button {
                         presentedSheet = .aiGenerator
                     } label: {
-                        Label("Generate with AI", systemImage: "sparkles")
+                        Label {
+                            Text(verbatim: appState.settings.localized("Generate with AI"))
+                        } icon: {
+                            Image(systemName: "sparkles")
+                        }
                     }
                     .buttonStyle(.bordered)
                     .keyboardShortcut("n", modifiers: [.command, .shift])
@@ -66,10 +75,14 @@ struct RulesView: View {
                     Button {
                         presentedSheet = .editor(newRule)
                     } label: {
-                        Label("New Rule", systemImage: "plus")
+                        Label {
+                            Text(verbatim: appState.settings.localized("New Rule"))
+                        } icon: {
+                            Image(systemName: "plus")
+                        }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(FileNestTheme.accent)
+                    .tint(FileNestTheme.accentFill)
                     .keyboardShortcut("n", modifiers: [.command])
                     .simultaneousGesture(TapGesture().onEnded {
                         presentedSheet = .editor(newRule)
@@ -106,20 +119,17 @@ struct RulesView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "folder")
                         .foregroundStyle(FileNestTheme.accent)
-                    Text("Organization Destination")
+                    Text(verbatim: appState.settings.localized("Organization Destination"))
                         .font(.system(size: 11, weight: .medium))
                     Text(appState.organizer.organizeRoot.tildeAbbreviatedPath)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                     Spacer()
-                    Text(LocalizedStringKey(
-                        appState.settings.classifyStrategy == ClassificationStrategy.rule.rawValue
-                            ? "Unmatched files remain in place"
-                            : "Unmatched files are classified by extension"
-                    ))
+                    Text(verbatim: appState.settings.localized(strategyDescriptionKey))
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
                 }
                 .padding(.horizontal, 28)
                 .frame(height: 54)
@@ -162,18 +172,26 @@ struct RulesView: View {
         try? appState.store.deleteRule(id: id)
         appState.rules = (try? appState.store.allRules()) ?? []
     }
+
+    private var strategyDescriptionKey: String {
+        appState.settings.classifyStrategy == ClassificationStrategy.rule.rawValue
+            ? "Rules Only: only matching enabled rules organize files; unmatched files stay in place."
+            : "Hybrid: matching rules take priority; unmatched files are organized by file type and AI topic."
+    }
 }
 
 private struct RuleColumnHeader: View {
+    @EnvironmentObject private var appState: AppState
+
     var body: some View {
         HStack(spacing: 12) {
-            Text("Rule Name").frame(maxWidth: .infinity, alignment: .leading)
-            Text("Type").frame(width: 110, alignment: .leading)
-            Text("Condition").frame(width: 220, alignment: .leading)
-            Text("Action").frame(width: 130, alignment: .leading)
-            Text("Priority").frame(width: 62, alignment: .center)
-            Text("Enabled").frame(width: 54, alignment: .center)
-            Text("Actions").frame(width: 54, alignment: .center)
+            Text(verbatim: appState.settings.localized("Rule Name")).frame(maxWidth: .infinity, alignment: .leading)
+            Text(verbatim: appState.settings.localized("Type")).frame(width: 110, alignment: .leading)
+            Text(verbatim: appState.settings.localized("Condition")).frame(width: 220, alignment: .leading)
+            Text(verbatim: appState.settings.localized("Action")).frame(width: 130, alignment: .leading)
+            Text(verbatim: appState.settings.localized("Priority")).frame(width: 62, alignment: .center)
+            Text(verbatim: appState.settings.localized("Enabled")).frame(width: 54, alignment: .center)
+            Text(verbatim: appState.settings.localized("Actions")).frame(width: 54, alignment: .center)
         }
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(.secondary)
@@ -187,6 +205,7 @@ private struct RuleColumnHeader: View {
 }
 
 private struct RuleRow: View {
+    @EnvironmentObject private var appState: AppState
     let rule: Rule
     let setEnabled: (Bool) -> Void
     let edit: () -> Void
@@ -199,7 +218,9 @@ private struct RuleRow: View {
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(LocalizedStringKey(rule.typeEnum == .rule ? "Rule (by extension)" : "AI Generated"))
+            Text(verbatim: appState.settings.localized(
+                rule.typeEnum == .rule ? "Rule (by extension)" : "AI Generated"
+            ))
                 .frame(width: 110, alignment: .leading)
 
             Text(rule.pattern)
@@ -210,7 +231,7 @@ private struct RuleRow: View {
 
             Label {
                 if rule.actionEnum == .ignore {
-                    Text("Do Not Process")
+                    Text(verbatim: appState.settings.localized("Do Not Process"))
                 } else {
                     Text(rule.targetFolder)
                 }
@@ -233,9 +254,9 @@ private struct RuleRow: View {
             .frame(width: 54)
 
             Menu {
-                Button("Edit", action: edit)
+                Button(appState.settings.localized("Edit"), action: edit)
                 Divider()
-                Button("Delete", role: .destructive, action: delete)
+                Button(appState.settings.localized("Delete"), role: .destructive, action: delete)
             } label: {
                 Image(systemName: "ellipsis")
                     .frame(width: 30, height: 30)
@@ -247,8 +268,8 @@ private struct RuleRow: View {
         .frame(minHeight: 58)
         .contentShape(Rectangle())
         .contextMenu {
-            Button("Edit", action: edit)
-            Button("Delete", role: .destructive, action: delete)
+            Button(appState.settings.localized("Edit"), action: edit)
+            Button(appState.settings.localized("Delete"), role: .destructive, action: delete)
         }
     }
 }
@@ -281,7 +302,9 @@ struct RuleEditor: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(LocalizedStringKey(rule.id == nil ? "New Organization Rule" : "Edit Organization Rule"))
+                Text(verbatim: appState.settings.localized(
+                    rule.id == nil ? "New Organization Rule" : "Edit Organization Rule"
+                ))
                     .font(.system(size: 20, weight: .semibold))
                 Spacer()
             }
@@ -292,33 +315,47 @@ struct RuleEditor: View {
             }
 
             Form {
-                TextField("Rule Name", text: $rule.name)
+                TextField(appState.settings.localized("Rule Name"), text: $rule.name)
 
-                LabeledContent("Type") {
-                    Text(LocalizedStringKey(rule.type == RuleType.rule.rawValue ? "Rule (by extension)" : "AI Generated (Deterministic Rule)"))
+                LabeledContent {
+                    Text(verbatim: appState.settings.localized(
+                        rule.type == RuleType.rule.rawValue
+                            ? "Rule (by extension)"
+                            : "AI Generated (Deterministic Rule)"
+                    ))
                         .foregroundStyle(.secondary)
+                } label: {
+                    Text(verbatim: appState.settings.localized("Type"))
                 }
 
-                TextField("Matching Extensions", text: $rule.pattern)
-                Text("Separate extensions with commas; higher-priority rules match first.")
+                TextField(appState.settings.localized("Matching Extensions"), text: $rule.pattern)
+                Text(verbatim: appState.settings.localized("Separate extensions with commas; higher-priority rules match first."))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
 
-                Picker("When Matched", selection: $rule.action) {
-                    Text("Organize into Folder").tag(RuleAction.organize.rawValue)
-                    Text("Do Not Process").tag(RuleAction.ignore.rawValue)
+                Picker(selection: $rule.action) {
+                    Text(verbatim: appState.settings.localized("Organize into Folder"))
+                        .tag(RuleAction.organize.rawValue)
+                    Text(verbatim: appState.settings.localized("Do Not Process"))
+                        .tag(RuleAction.ignore.rawValue)
+                } label: {
+                    Text(verbatim: appState.settings.localized("When Matched"))
                 }
                 .pickerStyle(.segmented)
 
                 if rule.actionEnum == .organize {
-                    TextField("Destination Folder", text: $rule.targetFolder)
+                    TextField(appState.settings.localized("Destination Folder"), text: $rule.targetFolder)
                     if !rule.targetFolder.isEmpty && validatedTargetFolder == nil {
-                        Text("The destination must be one folder name and cannot contain /, \\, :, . or ...")
+                        Text(verbatim: appState.settings.localized(
+                            "The destination must be one folder name and cannot contain /, \\, :, . or ..."
+                        ))
                             .font(.system(size: 10))
                             .foregroundStyle(.red)
                     }
                 } else {
-                    Text("Matched files stay in their original location and are excluded from automatic organization.")
+                    Text(verbatim: appState.settings.localized(
+                        "Matched files stay in their original location and are excluded from automatic organization."
+                    ))
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
@@ -328,7 +365,9 @@ struct RuleEditor: View {
                     value: $rule.priority,
                     in: 0...100
                 )
-                Toggle("Enabled", isOn: $rule.enabled)
+                Toggle(isOn: $rule.enabled) {
+                    Text(verbatim: appState.settings.localized("Enabled"))
+                }
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
@@ -347,7 +386,9 @@ struct RuleEditor: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 } else {
-                    Text("Enter a rule name, extensions, and a valid destination folder to save.")
+                    Text(verbatim: appState.settings.localized(
+                        "Enter a rule name, extensions, and a valid destination folder to save."
+                    ))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -364,10 +405,10 @@ struct RuleEditor: View {
             .padding(.horizontal, 24)
 
             HStack(spacing: 12) {
-                Button("Cancel") { dismiss() }
+                Button(appState.settings.localized("Cancel")) { dismiss() }
                     .buttonStyle(QuietButtonStyle())
                 Spacer()
-                Button("Save Rule") {
+                Button(appState.settings.localized("Save Rule")) {
                     var saved = rule
                     saved.name = saved.name.trimmingCharacters(in: .whitespacesAndNewlines)
                     saved.targetFolder = validatedTargetFolder ?? saved.targetFolder
@@ -409,9 +450,11 @@ private struct AIRuleGeneratorSheet: View {
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(FileNestTheme.accent)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("AI Organization Rule")
+                    Text(verbatim: appState.settings.localized("AI Organization Rule"))
                         .font(.system(size: 20, weight: .semibold))
-                    Text("Describe your organization habits and AI will create a reviewable extension rule that runs automatically.")
+                    Text(verbatim: appState.settings.localized(
+                        "Describe your organization habits and AI will create a reviewable extension rule that runs automatically."
+                    ))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -424,11 +467,13 @@ private struct AIRuleGeneratorSheet: View {
             }
 
             Form {
-                Section("Rule Description") {
+                Section {
                     TextEditor(text: $request)
                         .font(.system(size: 12))
                         .frame(minHeight: 74)
-                    Text("Example: Move PDF, Word, and Excel contracts to ‘Client Contracts’ with priority 90.")
+                    Text(verbatim: appState.settings.localized(
+                        "Example: Move PDF, Word, and Excel contracts to ‘Client Contracts’ with priority 90."
+                    ))
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
 
@@ -438,24 +483,28 @@ private struct AIRuleGeneratorSheet: View {
                         if isGenerating {
                             HStack(spacing: 7) {
                                 ProgressView().controlSize(.small)
-                                Text("Generating")
+                                Text(verbatim: appState.settings.localized("Generating"))
                             }
                         } else {
                             Label {
-                                Text(LocalizedStringKey(draft == nil ? "Generate Rule" : "Regenerate"))
+                                Text(verbatim: appState.settings.localized(
+                                    draft == nil ? "Generate Rule" : "Regenerate"
+                                ))
                             } icon: {
                                 Image(systemName: "sparkles")
                             }
                         }
                     }
                     .disabled(isGenerating || request.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                } header: {
+                    Text(verbatim: appState.settings.localized("Rule Description"))
                 }
 
                 if let draftBinding = Binding($draft) {
-                    Section("Generated Result (editable before saving)") {
-                        TextField("Rule Name", text: draftBinding.name)
-                        TextField("Extensions (comma-separated)", text: draftBinding.pattern)
-                        TextField("Destination Folder", text: draftBinding.targetFolder)
+                    Section {
+                        TextField(appState.settings.localized("Rule Name"), text: draftBinding.name)
+                        TextField(appState.settings.localized("Extensions (comma-separated)"), text: draftBinding.pattern)
+                        TextField(appState.settings.localized("Destination Folder"), text: draftBinding.targetFolder)
                         Stepper(
                             appState.settings.localizedFormat(
                                 "Priority %d",
@@ -464,8 +513,14 @@ private struct AIRuleGeneratorSheet: View {
                             value: draftBinding.priority,
                             in: 0...100
                         )
-                        Toggle("Enable Rule", isOn: draftBinding.enabled)
-                        Toggle("Organize Existing Files After Saving", isOn: $applyImmediately)
+                        Toggle(isOn: draftBinding.enabled) {
+                            Text(verbatim: appState.settings.localized("Enable Rule"))
+                        }
+                        Toggle(isOn: $applyImmediately) {
+                            Text(verbatim: appState.settings.localized("Organize Existing Files After Saving"))
+                        }
+                    } header: {
+                        Text(verbatim: appState.settings.localized("Generated Result (editable before saving)"))
                     }
                 }
 
@@ -482,10 +537,10 @@ private struct AIRuleGeneratorSheet: View {
             .scrollContentBackground(.hidden)
 
             HStack {
-                Button("Cancel") { dismiss() }
+                Button(appState.settings.localized("Cancel")) { dismiss() }
                     .buttonStyle(QuietButtonStyle())
                 Spacer()
-                Button("Save & Enable") {
+                Button(appState.settings.localized("Save & Enable")) {
                     guard var draft else { return }
                     draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
                     draft.targetFolder = OrganizationTarget.folderName(from: draft.targetFolder) ?? draft.targetFolder

@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import Carbon
 @testable import FileNest
 
@@ -20,8 +21,27 @@ final class AppSettingsTests: XCTestCase {
         temporaryDirectory = nil
     }
 
+    @MainActor
+    func testGlobalScrollerStyleUsesCompactLowContrastOverlayScrollers() {
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let scrollView = NSScrollView(frame: root.bounds)
+        scrollView.scrollerStyle = .legacy
+        scrollView.autohidesScrollers = false
+        scrollView.hasVerticalScroller = true
+        root.addSubview(scrollView)
+
+        FileNestScrollerStyleCoordinator.shared.applyRecursively(to: root)
+
+        XCTAssertEqual(scrollView.scrollerStyle, .overlay)
+        XCTAssertTrue(scrollView.autohidesScrollers)
+        XCTAssertEqual(scrollView.verticalScroller?.controlSize, .mini)
+        XCTAssertEqual(scrollView.verticalScroller?.alphaValue ?? -1, 0.30, accuracy: 0.001)
+    }
+
     func testSettingsPersistAcrossInstances() {
         let settings = AppSettings(store: store)
+        settings.setMediaTranscriptionEnabled(true)
+        settings.setWhisperModel("small")
         settings.setWatchDirs(["/tmp/Downloads", "/tmp/Desktop"])
         settings.setEnabledExtensions(["pdf", "md"])
         settings.setExcludeHidden(false)
@@ -97,6 +117,8 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(reloaded.vectorRetrievalChunkTokens, 320)
         XCTAssertEqual(reloaded.vectorChunkOverlap, 50)
         XCTAssertFalse(reloaded.doclingEnabled)
+        XCTAssertTrue(reloaded.mediaTranscriptionEnabled)
+        XCTAssertEqual(reloaded.whisperModel, "small")
         XCTAssertEqual(reloaded.embeddingSource, AppSettings.EmbeddingSource.cloud.rawValue)
         XCTAssertEqual(reloaded.ollamaEmbeddingModel, "qwen3-embedding:4b")
         XCTAssertEqual(reloaded.cloudEmbeddingBaseURL, "https://embed.example/v1")
@@ -201,6 +223,26 @@ final class AppSettingsTests: XCTestCase {
         let output = Data("ollama version is 0.32.1\n".utf8)
 
         XCTAssertEqual(OllamaServiceManager.version(fromCommandOutput: output), "0.32.1")
+    }
+
+    func testOllamaAutomaticStartupPolicyFollowsActiveProviders() {
+        let settings = AppSettings(store: store)
+        XCTAssertTrue(settings.requiresOllamaService)
+
+        settings.setLLMChoice(AppSettings.LLMChoice.cloud.rawValue)
+        settings.setEmbeddingSource(AppSettings.EmbeddingSource.cloud.rawValue)
+        XCTAssertFalse(settings.requiresOllamaService)
+
+        settings.setEmbeddingSource(AppSettings.EmbeddingSource.ollama.rawValue)
+        XCTAssertTrue(settings.requiresOllamaService)
+    }
+
+    func testOllamaAutomaticStartupOnlyTargetsLocalHosts() {
+        XCTAssertTrue(OllamaServiceManager.isLocalServiceHost("http://127.0.0.1:11434"))
+        XCTAssertTrue(OllamaServiceManager.isLocalServiceHost("http://localhost:11434"))
+        XCTAssertTrue(OllamaServiceManager.isLocalServiceHost("http://[::1]:11434"))
+        XCTAssertFalse(OllamaServiceManager.isLocalServiceHost("https://ollama.example.com"))
+        XCTAssertFalse(OllamaServiceManager.isLocalServiceHost("not a URL"))
     }
 
     func testOnboardingIsIncompleteUntilExplicitlyFinished() {
@@ -388,8 +430,13 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertTrue(settings.shouldVectorize(extension: "pptx"))
         XCTAssertTrue(settings.shouldVectorize(extension: "epub"))
         XCTAssertTrue(settings.shouldVectorize(extension: "odt"))
+        XCTAssertFalse(settings.shouldVectorize(extension: "mp4"))
+        settings.setMediaTranscriptionEnabled(true)
+        XCTAssertTrue(settings.shouldTranscribeMedia(extension: "MP4"))
+        XCTAssertTrue(settings.shouldVectorize(extension: "m4a"))
         settings.setAutoVectorize(false)
         XCTAssertFalse(settings.shouldVectorize(extension: "pdf"))
+        XCTAssertFalse(settings.shouldVectorize(extension: "mp4"))
     }
 
     func testEmbeddingAndContentSignaturesTrackDifferentKindsOfChanges() {

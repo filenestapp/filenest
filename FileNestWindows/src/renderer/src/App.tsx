@@ -7,12 +7,15 @@ import { SettingsPage } from "./SettingsPage";
 import { FileInspector } from "./components";
 import { Onboarding } from "./Onboarding";
 import { resolveLanguage } from "./i18n";
+import { translate } from "./i18n";
 import { QuickSearchPanel } from "./QuickSearchPanel";
+import { RefreshCw, X } from "lucide-react";
 
 export default function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [page, setPage] = useState<Page>("chat");
   const [inspectedFile, setInspectedFile] = useState<FileRecord | null>(null);
+  const [dismissedProcessingIds, setDismissedProcessingIds] = useState<Set<number>>(new Set());
   const refresh = useCallback(
     async (): Promise<void> => setSnapshot(await window.fileNest.refresh()),
     [],
@@ -33,6 +36,11 @@ export default function App(): React.JSX.Element {
       setInspectedFile(null);
     }
   }, [snapshot?.pendingLibrarySearch?.id]);
+  const activeProcessingIds = snapshot?.automaticProcessingItems.map((item) => item.id) ?? [];
+  useEffect(() => {
+    const active = new Set(activeProcessingIds);
+    setDismissedProcessingIds((current) => new Set([...current].filter((id) => active.has(id))));
+  }, [activeProcessingIds.join(",")]);
   if (location.hash === "#quick-search") return <QuickSearchPanel language={snapshot?.settings.appLanguage ?? "system"} />;
   if (!snapshot)
     return (
@@ -72,6 +80,8 @@ export default function App(): React.JSX.Element {
     setInspectedFile(file);
     await refresh();
   };
+  const visibleProcessingItems = snapshot.automaticProcessingItems.filter((item) => !dismissedProcessingIds.has(item.id));
+  const t = (value: string): string => translate(value, snapshot.settings.appLanguage);
   return (
     <div className={`app-shell ${inspectedFile ? "with-inspector" : ""}`}>
       <Sidebar
@@ -117,6 +127,19 @@ export default function App(): React.JSX.Element {
           language={snapshot.settings.appLanguage}
           onClose={() => setInspectedFile(null)}
         />
+      )}
+      {visibleProcessingItems.length > 0 && (
+        <aside className="automatic-processing-tip" aria-label={t("Automatic processing status")}>
+          <header>
+            <RefreshCw className="spin" size={15} />
+            <strong>{t("Processing files")}</strong>
+            <span>{snapshot.automaticProcessingItems.length}</span>
+            <button aria-label={t("Dismiss Processing Status")} onClick={() => setDismissedProcessingIds(new Set(activeProcessingIds))}><X size={13} /></button>
+          </header>
+          {visibleProcessingItems.slice(0, 2).map((item) => (
+            <div key={item.id}><RefreshCw className="spin" size={13} /><span>{item.name}</span><small>{t(item.stage === "indexing" ? "Indexing file" : item.stage === "transcribing" ? "Transcribing audio or video" : item.stage === "waiting" ? "Waiting to organize" : "Organizing file")}</small></div>
+          ))}
+        </aside>
       )}
     </div>
   );

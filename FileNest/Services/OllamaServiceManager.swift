@@ -547,6 +547,18 @@ final class OllamaServiceManager: ObservableObject {
             return
         }
 
+        if let process = launchedProcess, process.isRunning {
+            state = .starting
+            lastError = nil
+            if await waitUntilReady(host: host, process: process) {
+                await refresh(host: host)
+                Self.log("Ollama became ready pid=\(process.processIdentifier)")
+            } else {
+                markStartupFailure(host: host)
+            }
+            return
+        }
+
         guard let executable = Self.resolveExecutable() else {
             let message = "Ollama was not found. Install Ollama first."
             state = .failed(message)
@@ -590,26 +602,36 @@ final class OllamaServiceManager: ObservableObject {
                 }
             }
 
-            for _ in 0..<24 {
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                if (try? await fetchModels(host: host)) != nil {
-                    await refresh(host: host)
-                    Self.log("Ollama started pid=\(process.processIdentifier)")
-                    return
-                }
-                if !process.isRunning { break }
+            if await waitUntilReady(host: host, process: process) {
+                await refresh(host: host)
+                Self.log("Ollama started pid=\(process.processIdentifier)")
+                return
             }
-
-            let message = "The service started but could not connect to \(host)。"
-            state = .failed(message)
-            lastError = message
-            Self.log(message, level: .error)
+            markStartupFailure(host: host)
         } catch {
             let message = "Unable to start Ollama: \(error.localizedDescription)"
             state = .failed(message)
             lastError = message
             Self.log(message, level: .error)
         }
+    }
+
+    private func waitUntilReady(host: String, process: Process) async -> Bool {
+        // Cold starts may take longer while Ollama initializes its runtime. Keep this async
+        // so application launch and the main window remain responsive.
+        for _ in 0..<60 {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if (try? await fetchModels(host: host)) != nil { return true }
+            if !process.isRunning { return false }
+        }
+        return false
+    }
+
+    private func markStartupFailure(host: String) {
+        let message = "The service started but could not connect to \(host)."
+        state = .failed(message)
+        lastError = message
+        Self.log(message, level: .error)
     }
 
     func stop(host: String) async {
@@ -965,6 +987,15 @@ final class OllamaServiceManager: ObservableObject {
     private static func ollamaHostEnvironment(from host: String) -> String? {
         guard let components = URLComponents(string: host), let hostname = components.host else { return nil }
         return components.port.map { "\(hostname):\($0)" } ?? hostname
+    }
+
+    nonisolated static func isLocalServiceHost(_ host: String) -> Bool {
+        guard let rawHostname = URLComponents(string: host)?.host?.lowercased() else { return false }
+        let hostname = rawHostname.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return hostname == "localhost"
+            || hostname == "127.0.0.1"
+            || hostname == "::1"
+            || hostname == "0.0.0.0"
     }
 }
 

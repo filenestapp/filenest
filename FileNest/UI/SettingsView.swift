@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var selectedModelProfileID = OllamaModelRecommendation.defaultProfile.id
     @State private var modelPendingDeletion: OllamaModelInfo?
     @State private var isShowingDeleteRerankerConfirmation = false
+    @State private var whisperModelPendingDeletion: String?
     @State private var vectorExtensionsDraft = ""
     @State private var updateFeedDraft = ""
     @State private var isShowingClearLogsConfirmation = false
@@ -27,23 +28,23 @@ struct SettingsView: View {
             header
 
             TabView(selection: $selectedSection) {
-                generalSettings
+                DeferredSettingsPage { generalSettings }
                     .tabItem { Label("General", systemImage: "gearshape") }
                     .tag(SettingsSection.general)
 
-                indexSettings
+                DeferredSettingsPage { indexSettings }
                     .tabItem { Label("Index & Organize", systemImage: "externaldrive.badge.magnifyingglass") }
                     .tag(SettingsSection.indexing)
 
-                aiSettings
+                DeferredSettingsPage { aiSettings }
                     .tabItem { Label("AI Models", systemImage: "cpu") }
                     .tag(SettingsSection.aiModels)
 
-                StatisticsView(embeddedInSettings: true)
+                DeferredSettingsPage { StatisticsView(embeddedInSettings: true) }
                     .tabItem { Label("Statistics", systemImage: "chart.bar.xaxis") }
                     .tag(SettingsSection.statistics)
 
-                RulesView(embeddedInSettings: true)
+                DeferredSettingsPage { RulesView(embeddedInSettings: true) }
                     .tabItem { Label("Organization Rules", systemImage: "list.bullet.rectangle.portrait") }
                     .tag(SettingsSection.rules)
             }
@@ -93,6 +94,26 @@ struct SettingsView: View {
             Text(appState.settings.localizedFormat(
                 "%@ will be permanently removed from this Mac. You can download it again later.",
                 model.name
+            ))
+        }
+        .confirmationDialog(
+            "Delete Whisper Model?",
+            isPresented: Binding(
+                get: { whisperModelPendingDeletion != nil },
+                set: { if !$0 { whisperModelPendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: whisperModelPendingDeletion
+        ) { model in
+            Button(appState.settings.localizedFormat("Delete %@", model), role: .destructive) {
+                appState.whisper.deleteModel(model)
+                whisperModelPendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { model in
+            Text(appState.settings.localizedFormat(
+                "The Whisper %@ model will be removed from this Mac. You can download it again later.",
+                model
             ))
         }
         .confirmationDialog(
@@ -489,7 +510,11 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
 
-                Text("Folder structure: file type / AI topic / file. AI considers the title, note, and extractable content.")
+                Text(verbatim: appState.settings.localized(
+                    appState.settings.classifyStrategy == ClassificationStrategy.rule.rawValue
+                        ? "Rules Only: only matching enabled rules organize files; unmatched files stay in place."
+                        : "Hybrid: matching rules take priority; unmatched files are organized by file type and AI topic."
+                ))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -1165,6 +1190,8 @@ struct SettingsView: View {
                 }
             }
 
+            mediaTranscriptionSettings
+
             Section("Service Updates") {
                 HStack(spacing: 8) {
                     Label("Automatic Version Detection", systemImage: "clock.arrow.circlepath")
@@ -1173,7 +1200,7 @@ struct SettingsView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
-                Text("Checks Ollama, PaddleOCR, and Docling when this page opens, and skips repeated checks for 24 hours.")
+                Text("Checks Ollama, PaddleOCR, and Docling for updates, and refreshes FFmpeg and Whisper status when this page opens.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -1194,6 +1221,110 @@ struct SettingsView: View {
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return appState.settings.localizedFormat("Last checked: %@", formatter.string(from: checkedAt))
+    }
+
+    private var mediaTranscriptionSettings: some View {
+        Section("Audio & Video Transcription") {
+            Toggle("Transcribe audio and video for search and chat", isOn: Binding(
+                get: { appState.settings.mediaTranscriptionEnabled },
+                set: { appState.settings.setMediaTranscriptionEnabled($0) }
+            ))
+
+            Text("When enabled, FileNest transcribes supported media locally with OpenAI Whisper, creates time-coded chunks, and sends those chunks through the configured Embedding pipeline.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+
+            LabeledContent("FFmpeg") {
+                HStack(spacing: 8) {
+                    Image(systemName: appState.ffmpeg.executablePath == nil
+                          ? "circle.dashed"
+                          : "checkmark.circle.fill")
+                        .foregroundStyle(appState.ffmpeg.executablePath == nil
+                                         ? Color.secondary
+                                         : FileNestTheme.success)
+                    Text(appState.ffmpeg.executablePath == nil
+                         ? "Not installed"
+                         : (appState.ffmpeg.version.map { "FFmpeg \($0)" } ?? "Ready"))
+                    if appState.ffmpeg.executablePath == nil, !appState.ffmpeg.isInstalling {
+                        Button("Install") { Task { await appState.ffmpeg.install() } }
+                    }
+                }
+            }
+
+            if appState.ffmpeg.isInstalling {
+                SettingsOperationProgress(
+                    status: appState.ffmpeg.installStatus,
+                    progress: appState.ffmpeg.installProgress
+                )
+            } else if let error = appState.ffmpeg.lastError {
+                Label(appState.settings.localizedRuntimeMessage(error), systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(FileNestTheme.warning)
+            }
+
+            LabeledContent("Whisper Runtime") {
+                HStack(spacing: 8) {
+                    Image(systemName: appState.whisper.installedVersion == nil
+                          ? "circle.dashed"
+                          : "checkmark.circle.fill")
+                        .foregroundStyle(appState.whisper.installedVersion == nil
+                                         ? Color.secondary
+                                         : FileNestTheme.success)
+                    Text(appState.whisper.installedVersion.map { "Whisper \($0)" } ?? "Not installed")
+                    if appState.whisper.installedVersion == nil, !appState.whisper.isInstalling {
+                        Button("Install") { Task { await appState.whisper.installRuntime() } }
+                    }
+                }
+            }
+
+            Picker("Transcription Model", selection: Binding(
+                get: { appState.settings.whisperModel },
+                set: { appState.settings.setWhisperModel($0) }
+            )) {
+                ForEach(WhisperModelCatalog.models) { model in
+                    Text("\(model.id) · \(model.parameters) · \(model.approximateSize)")
+                        .tag(model.id)
+                }
+            }
+
+            let selectedModel = WhisperModelCatalog.option(appState.settings.whisperModel)
+            HStack(spacing: 10) {
+                Text(LocalizedStringKey(selectedModel.detail))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if appState.whisper.isModelInstalled(selectedModel.id) {
+                    InstalledModelLabel()
+                    Button(role: .destructive) {
+                        whisperModelPendingDeletion = selectedModel.id
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                } else if !appState.whisper.isInstalling {
+                    Button {
+                        Task { await appState.whisper.downloadModel(selectedModel.id) }
+                    } label: {
+                        Label("Download Model", systemImage: "arrow.down.circle")
+                    }
+                }
+            }
+
+            if appState.whisper.isInstalling {
+                SettingsOperationProgress(
+                    status: appState.whisper.installStatus,
+                    progress: appState.whisper.installProgress
+                )
+            } else if let error = appState.whisper.lastError {
+                Label(appState.settings.localizedRuntimeMessage(error), systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(FileNestTheme.warning)
+            }
+
+            Label("Audio and video stay on this Mac during transcription. FFmpeg is used only for media decoding.",
+                  systemImage: "lock.shield")
+                .font(.system(size: 10))
+                .foregroundStyle(FileNestTheme.success)
+        }
     }
 
     private var rerankerServiceSettings: some View {
@@ -1956,6 +2087,20 @@ struct SettingsView: View {
 
 }
 
+/// Keeps inactive settings tabs cheap to construct. Native `TabView` can retain
+/// every child hierarchy even though only one page is visible.
+private struct DeferredSettingsPage<Content: View>: View {
+    private let content: () -> Content
+
+    init(@ViewBuilder content: @escaping () -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        content()
+    }
+}
+
 private struct ManagedServiceUpdateControls: View {
     @EnvironmentObject private var appState: AppState
 
@@ -2040,6 +2185,7 @@ private struct ManagedServiceUpdateControls: View {
 }
 
 private struct SettingsOperationProgress: View {
+    @EnvironmentObject private var appState: AppState
     let status: String
     let progress: Double?
 
@@ -2049,7 +2195,7 @@ private struct SettingsOperationProgress: View {
                 if progress == nil {
                     ProgressView().controlSize(.small)
                 }
-                Text(LocalizedStringKey(status))
+                Text(verbatim: appState.settings.localizedRuntimeMessage(status))
                     .lineLimit(1)
                 Spacer()
                 if let progress {

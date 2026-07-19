@@ -20,7 +20,8 @@ The macOS implementation is the normative baseline. “Platform equivalent” me
 | Multiple watched folders | Cover Desktop, Downloads, and work folders | Onboarding, Settings | watcher | settings | High |
 | Existing-item choice | Avoid unexpectedly moving existing files | Onboarding and folder-add flow | watcher baseline | baseline table | High |
 | Stable file detection | Avoid partial indexing and moves | background watcher | stability tracker | runtime snapshot | High |
-| Stable directory detection | Treat a project folder as one managed item | background watcher | directory inspector/tracker | files | High |
+| Stable directory detection | Treat a project folder as one managed item without unbounded tree enumeration | background watcher | budgeted directory inspector/tracker | files | High |
+| Managed-content audit | Detect byte changes even when size and modification time were preserved | bounded daily startup audit | organizer/store | files, vectors, audit cursor | High |
 | Offline reconciliation | Detect changes while the app was stopped | watcher restart/manual reconcile | watcher + organizer | files, vectors | High |
 | Eligibility policy | Ignore locks, hidden files, temporary downloads, and unsupported types | watcher | policy | settings | High |
 | Watch status and recovery | Explain missing or inaccessible folders | sidebar/menu/settings | watcher status | runtime status | High |
@@ -32,16 +33,17 @@ The macOS implementation is the normative baseline. “Platform equivalent” me
 | Native extraction | Search PDF, Office, OpenDocument, EPUB, RTF, text, code, and image metadata | automatic/manual indexing | extractor | files, chunks | High |
 | Docling parsing | Better structured document parsing | Index settings | Docling manager/processor | chunks | High |
 | OCR | Search scanned pages and images | Index settings | local/Ollama/cloud OCR | files, chunks | High |
+| Audio/video transcription | Turn supported media into time-coded searchable text before embedding | onboarding, AI settings, automatic/manual indexing | FFmpeg + managed OpenAI Whisper runtime | files, transcript chunks, embeddings | High on macOS and Windows |
 | Configurable index scope | Limit indexed extensions | Index settings | indexer/settings | settings | High |
 | Configurable chunks | Control chunk size and overlap | Index settings | indexer | settings, chunks | High |
-| Structured chunks | Preserve title/text/table/list/picture/note metadata, section and page range | inspector and retrieval | vector store | document chunks | High |
-| Parent–Child retrieval | Retrieve compact children and return complete source sections to the answer model | indexing/chat | indexer/vector store | document parents, chunks, embeddings | High on macOS |
-| Exact entity lane | Recover identifiers, emails, dates, and amounts that semantic similarity can miss | search/chat | indexer/ChatService | chunk entity terms | High on macOS |
+| Structured chunks | Preserve title/text/table/list/picture/transcript/note metadata, section, page range, and media time range | inspector and retrieval | vector store | document chunks | High |
+| Parent–Child retrieval | Retrieve compact children and return complete source sections to the answer model | indexing/chat | indexer/vector store | document parents, chunks, embeddings | High on macOS and Windows |
+| Exact entity lane | Recover identifiers, emails, dates, and amounts that semantic similarity can miss | search/chat | indexer/ChatService | chunk entity terms | High on macOS and Windows |
 | Atomic replacement | Keep old vectors if a rebuild fails | indexer | vector store | embeddings, chunks | High |
 | Content mutation guard | Reject stale results if source changes during indexing | indexer | hash/snapshot | files | High |
 | Per-file concurrency control | Prevent older work from overwriting newer work | indexer | task coordinator/revisions | runtime + vectors | High |
 | Pause/resume/stop/restart | Control long rebuilds | command/menu/settings/library | indexer gate | runtime state | High |
-| Selective reindex | Re-embed, index new files, or rebuild selected processing categories | confirmation flow | AppState/indexer | settings signatures | High |
+| Selective reindex | Re-embed, index new files, rebuild selected processing categories, or limit source rebuilds to selected file categories | confirmation flow | AppState/indexer | settings signatures | High |
 | Progress and failure counts | Show stage, file, completed, total, and failures | global status UI | indexer | runtime state | High |
 
 ## Organization
@@ -77,22 +79,24 @@ The macOS implementation is the normative baseline. “Platform equivalent” me
 | AI summary | Generate an editable concise note | inspector | summary service | files | High |
 | Indexed chunk inspection | Inspect chunk kinds and locations | inspector | store | document chunks | High |
 | Open/reveal/copy path/trash | Perform native file actions | row/inspector | shell integration | files | Platform-specific |
+| Duplicate management | Find byte-identical files, keep the original, and safely reclaim duplicate copies | Library duplicate manager | content hasher/store/native trash | files, content hashes, duplicate links | High on macOS and Windows |
 
 ## Chat and retrieval
 
 | Feature | User value | Entry point | Domain/service | Data | Confidence |
 | --- | --- | --- | --- | --- | --- |
 | Persistent sessions | Continue prior conversations | sidebar | ChatService/store | sessions, messages | High |
+| Paged chat history | Load the latest 40 messages first and request older pages on demand | conversation | ChatService/store | messages | High on macOS and Windows |
 | Background conversation continuity | Keep streaming when navigating away and surface running/completed state in the sidebar | main window/sidebar | `AppState`, `MainView`, `ChatView` | runtime state | High |
 | Lazy chat creation | Avoid empty sessions | New Chat/composer | AppState/ChatService | sessions | High |
 | Streaming answers | Immediate feedback | Chat composer | LLM provider | messages | High |
 | Retrieval progress | Explain search and AI stages | conversation | ChatService | runtime state | High |
-| File citations | Open matched files from answers | assistant response | ChatService | related IDs | High |
+| File citations | Open matched files from answers and retain the confidence shown when the answer was produced | assistant response | ChatService | related IDs + confidence matches | High |
 | Retrieval-only fallback | Keep file finding useful without a model | composer/fallback dialog | ChatService | messages | High |
 | Cloud failure fallback | Offer local results after configured cloud failure | composer alert | ChatService | messages | High |
 | Configurable result count | Tune RAG breadth from 1 to 30 files | AI settings | ChatService | settings | High |
-| Fused retrieval and reranking | Combine lexical, entity, and semantic ranks with RRF; optionally rerank through a compatible local/cloud API | AI settings/search/chat | ChatService/reranker provider | settings, search traces | High on macOS |
-| Stable citations | Bind answer claims to selected file/parent evidence and validate citation IDs | Find with Chat | prompt/context/verifier | runtime context | High on macOS |
+| Fused retrieval and reranking | Combine lexical, entity, and semantic ranks with RRF; optionally rerank through a compatible managed-local/cloud API | AI settings/search/chat | ChatService/reranker provider | settings, search traces | High on macOS and Windows |
+| Stable citations | Bind answer claims to selected file/parent evidence and validate citation IDs | Find with Chat | prompt/context/verifier | runtime context | High on macOS and Windows |
 | Bounded model context | Respect known/overridden context windows | AI settings | context planner | settings | High |
 | Retry/regenerate | Replace the answer for the same question | message actions | ChatService | messages | High |
 | Cancel generation | Stop active streaming | composer | provider task | runtime state | High |
@@ -111,6 +115,7 @@ The macOS implementation is the normative baseline. “Platform equivalent” me
 | Model discovery/pull/delete | Manage Ollama locally and cache model metadata for fast display | AI settings/onboarding | Ollama manager | model files + runtime cache | High |
 | Onboarding model choice | Select generation and embedding downloads, defaulting to Qwen 9B and Qwen Embedding 0.6B | onboarding | settings/Ollama manager | settings | High |
 | Docling and local OCR install/update | Manage isolated local tools | AI/index settings | managed service managers | service files | High |
+| FFmpeg and Whisper management | Detect/install media decoding, install the isolated OpenAI Whisper runtime, and download/delete transcription models | onboarding and AI settings | managed media service managers | service files + model files | High on macOS and Windows |
 | Verified managed updates | Resolve official Ollama assets and verify Ollama, Docling, and PaddleOCR updates before activation | AI/index settings | update/service managers | service files | High |
 | Connectivity checks | Test every configured capability | AI settings | connectivity tester | none | High |
 | Statistics | Understand files, index health, tokens, activity, categories, and storage | Statistics | store | files, vectors, usage | High |

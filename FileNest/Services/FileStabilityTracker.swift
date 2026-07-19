@@ -54,6 +54,14 @@ struct DirectoryInspection {
     let topLevelNames: [String]
 }
 
+struct DirectoryInspectionBudget: Sendable {
+    let maximumEntries: Int
+    let maximumDuration: TimeInterval
+
+    static let watcher = DirectoryInspectionBudget(maximumEntries: 10_000, maximumDuration: 0.35)
+    static let indexing = DirectoryInspectionBudget(maximumEntries: 50_000, maximumDuration: 2)
+}
+
 /// Creates a recursive snapshot for an added folder. Hidden content, especially .git, participates in stability checks,
 /// preventing premature processing while a git clone is still updating its object database.
 enum DirectoryInspector {
@@ -65,8 +73,14 @@ enum DirectoryInspector {
         "pom.xml", "build.gradle", "build.gradle.kts", "composer.json", "gemfile"
     ]
 
-    static func inspect(_ root: URL) -> DirectoryInspection? {
+    static func inspect(
+        _ root: URL,
+        budget: DirectoryInspectionBudget = .indexing
+    ) -> DirectoryInspection? {
         let fm = FileManager.default
+        let startedAt = Date()
+        let maximumEntries = max(1, budget.maximumEntries)
+        let maximumDuration = max(0.05, budget.maximumDuration)
         let keys: Set<URLResourceKey> = [
             .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
             .contentModificationDateKey, .fileSizeKey
@@ -88,6 +102,11 @@ enum DirectoryInspector {
         )
 
         while let url = enumerator.nextObject() as? URL {
+            guard entries.count < maximumEntries else { return nil }
+            if entries.count.isMultiple(of: 128),
+               Date().timeIntervalSince(startedAt) >= maximumDuration {
+                return nil
+            }
             guard let values = try? url.resourceValues(forKeys: keys) else { continue }
             if values.isSymbolicLink == true { enumerator.skipDescendants() }
             let relativePath = String(url.path.dropFirst(root.path.count + 1))

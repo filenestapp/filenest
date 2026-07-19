@@ -4,8 +4,8 @@ import type { FileCategory, Settings } from '../shared/types'
 const categories: Record<FileCategory, Set<string>> = {
   documents: new Set(['pdf', 'doc', 'docx', 'docm', 'txt', 'md', 'markdown', 'rtf', 'rtfd', 'pages', 'xls', 'xlsx', 'xlsm', 'ppt', 'pptx', 'ppsx', 'csv', 'key', 'keynote', 'numbers', 'epub', 'odt', 'ods', 'odp']),
   images: new Set(['png', 'jpg', 'jpeg', 'gif', 'heic', 'tiff', 'tif', 'bmp', 'svg', 'webp', 'psd', 'sketch']),
-  videos: new Set(['mp4', 'mov', 'avi', 'mkv', 'm4v', 'wmv', 'flv', 'webm']),
-  audio: new Set(['mp3', 'wav', 'aac', 'flac', 'm4a', 'ogg', 'aiff']),
+  videos: new Set(['mp4', 'mov', 'avi', 'mkv', 'm4v', 'wmv', 'flv', 'webm', 'mpeg', 'mpg']),
+  audio: new Set(['mp3', 'wav', 'aac', 'flac', 'm4a', 'ogg', 'opus', 'aiff', 'aif', 'wma']),
   code: new Set(['swift', 'py', 'js', 'ts', 'tsx', 'jsx', 'java', 'kt', 'go', 'rs', 'c', 'cpp', 'h', 'hpp', 'cs', 'rb', 'php', 'sh', 'sql', 'json', 'yaml', 'yml', 'html', 'css', 'vue', 'lua', 'r']),
   archives: new Set(['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'dmg', 'iso']),
   other: new Set()

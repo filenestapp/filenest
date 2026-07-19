@@ -1,14 +1,18 @@
 import { randomUUID } from 'node:crypto'
-import type { ChatMessage, ChatSession, ChatStreamEvent, DocumentChunk, FileRecord, SendChatRequest, Settings } from '../shared/types'
+import type { ChatMessage, ChatRelatedFileMatch, ChatSession, ChatStreamEvent, DocumentChunk, FileRecord, SendChatRequest, Settings } from '../shared/types'
 import { FileNestDatabase } from './database'
 import { EmbeddingService, type SearchHit } from './embedding'
 import { estimateTokens, LlmService, type LlmTurn } from './llm'
 import { AppLogger } from './logger'
-import { resolveSmartSearchPlan, type SmartSearchPlan } from './smart-search-plan'
+import { hasStructuredSearchFilters, matchesSmartSearchPlan, resolveSmartSearchPlan, type SmartSearchPlan } from './smart-search-plan'
+import { extractEntityTerms } from './indexer'
+import { dynamicallyAcceptedSemanticHits, rerankDocuments, rerankerConfiguration, weightedReciprocalRankFusion } from './reranker'
+import { prompts } from './prompts'
 
 interface RetrievedFile {
   file: FileRecord
   chunks: DocumentChunk[]
+  confidence?: number
 }
 
 export class ChatService {
@@ -37,7 +41,7 @@ export class ChatService {
     if (settings.llmChoice === 'none') return content.slice(0, 600)
     const parts: string[] = []
     const turns: LlmTurn[] = [
-      { role: 'system', content: 'You are a local file summary assistant. Summarize the key points concisely in the current interface language and do not fabricate details.' },
+      { role: 'system', content: file.category === 'images' ? prompts.summary.imageSystem : prompts.summary.system },
       { role: 'user', content: `File: ${file.name}\n\n${content}` }
     ]
     const stream = file.category === 'images'
@@ -51,7 +55,7 @@ export class ChatService {
     if (settings.llmChoice === 'none') return heuristicRules(prompt)
     const parts: string[] = []
     for await (const delta of this.llm.stream([
-      { role: 'system', content: "Convert the user's file-organization request into a JSON array. Each item has name, pattern, targetFolder, priority, and action. Use *.ext or a keyword for pattern; action must be organize or ignore; the target must be a safe relative path. Return JSON only." },
+      { role: 'system', content: prompts.rules.system },
       { role: 'user', content: prompt }
     ], settings, new AbortController().signal)) parts.push(delta)
     const match = parts.join('').match(/\[[\s\S]*\]/)
@@ -66,7 +70,6 @@ export class ChatService {
       const startedAt = performance.now()
       const session = await this.ensureSession(request)
       activeSessionId = session.id
-      emit({ requestId, type: 'session', sessionId: session.id })
       const retryTarget = this.findRetryTarget(session.id, request.retryAssistantMessageId)
       const question = retryTarget?.question ?? request.content.trim()
       if (!question) throw new Error('Enter a question before sending')
@@ -76,6 +79,7 @@ export class ChatService {
           await this.database.updateChat(session.id, { title: question.slice(0, 42) || 'New Chat' })
         }
       }
+      emit({ requestId, type: 'session', sessionId: session.id })
 
       let searchPlan: SmartSearchPlan | null = null
       if (!session.attachedFilePath) {
@@ -86,8 +90,11 @@ export class ChatService {
         if (signal.aborted) throw new DOMException('Generation stopped', 'AbortError')
       }
       emit({ requestId, type: 'progress', sessionId: session.id, stage: 'searching', searchIntent: searchPlan?.intent })
-      const related = await this.retrieve(question, session, settings, searchPlan)
+      const related = await this.retrieve(question, session, settings, searchPlan, () => {
+        emit({ requestId, type: 'progress', sessionId: session.id, stage: 'reranking', searchIntent: searchPlan?.intent })
+      })
       const relatedFileIds = related.map((item) => item.file.id)
+      const relatedFileMatches: ChatRelatedFileMatch[] = related.map((item) => ({ fileId: item.file.id, confidence: item.confidence ?? 0 }))
       emit({ requestId, type: 'progress', sessionId: session.id, stage: 'retrieved', relatedFileIds })
       if (signal.aborted) throw new DOMException('Generation stopped', 'AbortError')
 
@@ -118,6 +125,11 @@ export class ChatService {
         }
       }
 
+      if (settings.llmChoice !== 'none') {
+        emit({ requestId, type: 'progress', sessionId: session.id, stage: 'verifying', relatedFileIds })
+        content = validateCitations(content, related)
+      }
+
       const completedAt = performance.now()
       const metrics = {
         inputTokens,
@@ -128,8 +140,8 @@ export class ChatService {
         responseModel: provider.model
       }
       const message = retryTarget
-        ? await this.database.replaceAssistantMessage(retryTarget.message.id, content, relatedFileIds, metrics)
-        : await this.database.addMessage(session.id, 'assistant', content, relatedFileIds, metrics)
+        ? await this.database.replaceAssistantMessage(retryTarget.message.id, content, relatedFileIds, metrics, relatedFileMatches)
+        : await this.database.addMessage(session.id, 'assistant', content, relatedFileIds, metrics, relatedFileMatches)
       await this.database.recordUsage(provider.name, provider.model, inputTokens, metrics.outputTokens, session.id)
       emit({ requestId, type: 'done', sessionId: session.id, message, relatedFileIds })
     } catch (error) {
@@ -171,7 +183,14 @@ export class ChatService {
     return this.database.createChat(request.attachedFilePath ?? null)
   }
 
-  private async retrieve(query: string, session: ChatSession, settings: Settings, plan: SmartSearchPlan | null): Promise<RetrievedFile[]> {
+  private async retrieve(
+    query: string,
+    session: ChatSession,
+    settings: Settings,
+    plan: SmartSearchPlan | null,
+    onReranking?: () => void
+  ): Promise<RetrievedFile[]> {
+    const startedAt = performance.now()
     const limit = Math.max(1, Math.min(30, settings.ragResultLimit))
     if (session.attachedFilePath) {
       const file = this.database.getFileByPath(session.attachedFilePath)
@@ -180,17 +199,34 @@ export class ChatService {
       try { hits = await this.embeddings.search(query, settings, Math.min(limit * 2, 40), file.id) } catch (error) {
         await this.logger.log('chat', 'File semantic search failed; using stored document chunks', error)
       }
-      return [{ file, chunks: selectNeighborChunks(this.database.listDocumentChunks(file.id), hits, limit) }]
+      return [{ file, chunks: selectParentChunks(this.database.listDocumentChunks(file.id), hits, limit), confidence: 1 }]
     }
 
-    let hits: SearchHit[] = []
+    let semanticHits: SearchHit[] = []
+    let semanticThreshold: number | null = null
     try {
-      hits = await this.embeddings.search(plan?.semanticQuery || query, settings, Math.min(limit * 4, 80))
+      const accepted = dynamicallyAcceptedSemanticHits(await this.embeddings.search(plan?.semanticQuery || query, settings, Math.min(limit * 6, 120)))
+      semanticThreshold = accepted.threshold
+      semanticHits = accepted.hits
+      if (rerankerConfiguration(settings) && semanticHits.length > 1) {
+        onReranking?.()
+        const candidates = semanticHits.slice(0, 24)
+        try {
+          const reranked = await rerankDocuments(plan?.semanticQuery || query, candidates.map((hit) => hit.chunkText), settings)
+          const scoreByIndex = new Map(reranked.map((item) => [item.index, item.score]))
+          const values = candidates.flatMap((hit, index) => scoreByIndex.has(index)
+            ? [{ ...hit, score: Math.min(1, Math.max(0, scoreByIndex.get(index)!)) }]
+            : [])
+          if (values.length) semanticHits = values.sort((left, right) => right.score - left.score)
+        } catch (error) {
+          await this.logger.log('chat', 'Reranker unavailable; fused retrieval order remains active', error)
+        }
+      }
     } catch (error) {
       await this.logger.log('chat', 'Semantic search failed; falling back to keyword search', error)
     }
     const candidates = new Map<number, { file: FileRecord; hits: SearchHit[] }>()
-    for (const hit of hits) {
+    for (const hit of semanticHits) {
       const file = this.database.getFile(hit.fileId)
       if (!file) continue
       if (!matchesPlan(file, plan)) continue
@@ -198,25 +234,75 @@ export class ChatService {
       existing.hits.push(hit)
       candidates.set(file.id, existing)
     }
-    for (const keyword of [...query.split(/[\s，。！？、,.;:]+/), ...(plan?.keywords ?? [])].filter((item) => item.length > 1)) {
+    const lexicalIds: number[] = []
+    const keywords = [...new Set([...query.split(/[\s，。！？、,.;:]+/), ...(plan?.keywords ?? [])].filter((item) => item.length > 1))]
+    for (const keyword of keywords) {
       for (const file of this.database.searchFiles(keyword, null, limit * 2)) {
+        if (!matchesPlan(file, plan)) continue
+        if (!lexicalIds.includes(file.id)) lexicalIds.push(file.id)
+        if (!candidates.has(file.id)) candidates.set(file.id, { file, hits: [] })
+      }
+    }
+    const entityMatches = this.database.entityChunkMatches(extractEntityTerms(query), Math.max(20, Math.min(limit * 2, 60)))
+      .filter((match) => {
+        const file = this.database.getFile(match.fileId)
+        return file != null && matchesPlan(file, plan)
+      })
+    const entityIds: number[] = []
+    for (const match of entityMatches) {
+      const file = this.database.getFile(match.fileId)!
+      if (!entityIds.includes(file.id)) entityIds.push(file.id)
+      const existing = candidates.get(file.id) ?? { file, hits: [] }
+      existing.hits.push({ fileId: file.id, chunkIndex: match.chunkIndex, chunkText: match.chunk.contextualText, score: 1 })
+      candidates.set(file.id, existing)
+    }
+    if (hasStructuredSearchFilters(plan)) {
+      for (const file of this.database.listFiles()) {
         if (matchesPlan(file, plan) && !candidates.has(file.id)) candidates.set(file.id, { file, hits: [] })
       }
     }
-    return [...candidates.values()].slice(0, limit).map(({ file, hits: fileHits }) => ({
-      file,
-      chunks: selectNeighborChunks(this.database.listDocumentChunks(file.id), fileHits, Math.max(3, Math.ceil(limit / 2)))
-    }))
+    const semanticIds = [...new Set(semanticHits.map((hit) => hit.fileId))]
+    const fused = weightedReciprocalRankFusion([
+      { weight: 0.36, ids: lexicalIds },
+      { weight: 0.44, ids: semanticIds },
+      { weight: 0.20, ids: entityIds }
+    ])
+    const selected = [...candidates.values()]
+      .sort((left, right) => (fused.get(right.file.id) ?? 0) - (fused.get(left.file.id) ?? 0) || left.file.name.localeCompare(right.file.name))
+      .slice(0, limit)
+      .map(({ file, hits: fileHits }) => ({
+        file,
+        chunks: selectParentChunks(this.database.listDocumentChunks(file.id), fileHits, 4),
+        confidence: entityIds.includes(file.id)
+          ? 0.98
+          : lexicalIds.includes(file.id)
+            ? 0.90
+            : semanticConfidence(Math.max(...fileHits.map((hit) => hit.score), -1))
+      }))
+    const visible = applyRetrievedDisplayConfidencePolicy(selected)
+    await this.database.recordRAGSearchTrace({
+      query, semanticQuery: plan?.semanticQuery || query, lexicalCandidates: lexicalIds.length,
+      semanticCandidates: semanticHits.length, entityCandidates: entityIds.length, fusedCandidates: fused.size,
+      returnedResults: visible.length, semanticThreshold, reranker: rerankerConfiguration(settings)?.name ?? null,
+      durationMs: performance.now() - startedAt
+    })
+    return visible
   }
 }
 
+function applyRetrievedDisplayConfidencePolicy(results: RetrievedFile[]): RetrievedFile[] {
+  const confident = results.filter((result) => (result.confidence ?? 0) >= 0.50)
+  const requiredCount = Math.min(3, results.length)
+  if (confident.length >= requiredCount) return confident
+  return confident.concat(results.filter((result) => (result.confidence ?? 0) < 0.50).slice(0, requiredCount - confident.length))
+}
+
+function semanticConfidence(score: number): number {
+  return Math.min(1, Math.max(0, (score + 1) / 2))
+}
+
 function matchesPlan(file: FileRecord, plan: SmartSearchPlan | null): boolean {
-  if (!plan) return true
-  if (plan.categories.length && !plan.categories.includes(file.category)) return false
-  const modified = new Date(file.mtime)
-  if (plan.dateFrom && modified < plan.dateFrom) return false
-  if (plan.dateTo && modified > plan.dateTo) return false
-  return true
+  return matchesSmartSearchPlan(file, plan)
 }
 
 function buildTurns(history: ChatMessage[], related: RetrievedFile[], settings: Settings): LlmTurn[] {
@@ -224,11 +310,18 @@ function buildTurns(history: ChatMessage[], related: RetrievedFile[], settings: 
   const contextBudget = Math.max(512, Math.floor(maxTokens * 0.55))
   const perFileBudget = Math.max(160, Math.floor(contextBudget / Math.max(1, related.length)))
   const context = related.map(({ file, chunks }, index) => {
-    const rawText = chunks.length ? chunks.map((chunk) => chunk.contextualText).join('\n\n') : (file.contentText ?? '')
-    const text = truncateToTokens(rawText, perFileBudget)
-    return `[File ${index + 1} | ID ${file.id}]\nName: ${file.name}\nPath: ${file.path}\nTitle: ${file.title ?? ''}\nNote: ${file.note ?? ''}\nRelevant content:\n${text}`
+    let remaining = perFileBudget
+    const evidence = chunks.slice(0, 4).flatMap((chunk) => {
+      if (remaining <= 0) return []
+      const text = truncateToTokens(chunk.parentText || chunk.text, remaining)
+      remaining -= estimateTokens([{ content: text }])
+      const location = [chunk.sectionPath.join(' > '), chunk.pageStart == null ? '' : `p.${chunk.pageStart}${chunk.pageEnd && chunk.pageEnd !== chunk.pageStart ? `-${chunk.pageEnd}` : ''}`].filter(Boolean).join(' · ')
+      return [`Relevant evidence${location ? ` (${location})` : ''} [F${index + 1}:P${chunk.parentIndex + 1}]: ${text}`]
+    }).join('\n')
+    return `FILE START\nSource ID: [F${index + 1}]\nName: ${file.name}\nTitle: ${file.title ?? ''}\nUser note: ${file.note ?? ''}\nMetadata: type=${file.ext || 'none'}; category=${file.category}; size=${file.size} bytes\nLocation: ${file.path}\n${evidence}\nFILE END`
   }).join('\n\n---\n\n')
-  const system: LlmTurn = { role: 'system', content: `You are FileNest, a local file-retrieval assistant. Answer only from the supplied local-file context, state uncertainty clearly, and use exact file names when citing files. Context:\n\n${context || 'No relevant files were retrieved.'}` }
+  const instructions = related.length ? prompts.chat.libraryAnswer : `${prompts.chat.libraryAnswer}\n${prompts.chat.emptyLibrary}`
+  const system: LlmTurn = { role: 'system', content: `${instructions}\n\nRETRIEVED FILES START\n${context}\nRETRIEVED FILES END` }
   const responseReserve = Math.max(2_048, Math.floor(maxTokens * 0.15))
   const historyBudget = Math.max(512, maxTokens - estimateTokens([system]) - responseReserve)
   return [
@@ -262,24 +355,35 @@ export function planChatHistory(history: ChatMessage[], maxTokens: number): LlmT
   const planned: LlmTurn[] = recent.map((message) => ({ role: message.role as 'user' | 'assistant', content: truncateToTokens(message.content, Math.max(128, Math.floor(budget * 0.45))) }))
   if (omitted.length) {
     const selected = [omitted[0], ...omitted.slice(-7)].filter((value, index, values) => values.findIndex((item) => item.id === value.id) === index)
-    const summary = ['Earlier conversation (automatically compressed; recent messages take precedence):', ...selected.map((message) => `- ${message.role === 'user' ? 'User' : 'Assistant'}: ${truncateToTokens(message.content.replace(/\s+/g, ' '), 180)}`)].join('\n')
+    const summary = [prompts.chat.compressedHistoryHeader, ...selected.map((message) => `- ${message.role === 'user' ? 'User' : 'Assistant'}: ${truncateToTokens(message.content.replace(/\s+/g, ' '), 180)}`)].join('\n')
     planned.unshift({ role: 'system', content: truncateToTokens(summary, Math.max(256, Math.floor(budget * 0.25))) })
   }
   return planned
 }
 
-function selectNeighborChunks(chunks: DocumentChunk[], hits: SearchHit[], limit: number): DocumentChunk[] {
+function selectParentChunks(chunks: DocumentChunk[], hits: SearchHit[], limit: number): DocumentChunk[] {
   if (!chunks.length) return []
-  if (!hits.length) return chunks.slice(0, limit)
+  if (!hits.length) return deduplicateParents(chunks).slice(0, limit)
   const selected = new Map<number, DocumentChunk>()
   for (const hit of hits) {
-    for (const index of [hit.chunkIndex - 1, hit.chunkIndex, hit.chunkIndex + 1]) {
-      const chunk = chunks.find((item) => item.index === index)
-      if (chunk) selected.set(chunk.index, chunk)
-      if (selected.size >= limit) return [...selected.values()].sort((left, right) => left.index - right.index)
-    }
+    const chunk = chunks.find((item) => item.index === hit.chunkIndex)
+    if (chunk) selected.set(chunk.parentIndex, chunk)
+    if (selected.size >= limit) break
   }
-  return [...selected.values()].sort((left, right) => left.index - right.index)
+  return [...selected.values()]
+}
+
+function deduplicateParents(chunks: DocumentChunk[]): DocumentChunk[] {
+  return [...new Map(chunks.map((chunk) => [chunk.parentIndex, chunk])).values()]
+}
+
+export function validateCitations(content: string, related: RetrievedFile[]): string {
+  const valid = new Set<string>()
+  related.forEach((item, fileIndex) => {
+    valid.add(`F${fileIndex + 1}`)
+    for (const chunk of item.chunks) valid.add(`F${fileIndex + 1}:P${chunk.parentIndex + 1}`)
+  })
+  return content.replace(/\[(F\d+(?::P\d+)?)\]/g, (value, identifier: string) => valid.has(identifier) ? value : '')
 }
 
 function truncateToTokens(value: string, maxTokens: number): string {

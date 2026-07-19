@@ -128,3 +128,5 @@ Automated coverage verifies:
 - startup cleanup of unreferenced parent rows.
 
 Primary evidence is in `FileNest/Services/IndexerService.swift`, `FileNest/App/AppSettings.swift`, `FileNest/App/AppState.swift`, `FileNest/Storage/SQLiteStore.swift`, and their corresponding tests under `FileNestTests/`.
+
+The Windows equivalent is implemented in `FileNestWindows/src/main/indexer.ts`, `database.ts`, `chat.ts`, `library-search.ts`, `reranker.ts`, and `reranker-manager.ts`. Its parity suite verifies the same parent/child persistence contract, semantic settings limits, entity lane, fusion, reranking contract, retrieval traces, and stable evidence IDs. Native Windows runtime acceptance for the managed Python environment remains part of the Windows release gate.

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
+  ChevronUp,
   Clipboard,
   FilePlus2,
   FolderOpen,
@@ -96,6 +97,9 @@ export function ChatPage({
         if (event.type === "progress") {
           setProgressStage(event.stage);
           if (event.searchIntent) setSearchIntent(event.searchIntent);
+        }
+        if (event.type === "session") {
+          void onRefresh().then(() => setPendingQuestion(null));
         }
         if (event.type === "done") {
           deltaBuffer.current = "";
@@ -254,6 +258,11 @@ export function ChatPage({
           <EmptyChat t={t} onChoose={() => void chooseFile()} />
         ) : (
           <div className="conversation">
+            {snapshot.hasEarlierChatMessages && (
+              <button className="load-earlier-button" onClick={() => void window.fileNest.loadEarlierChatMessages().then(onRefresh)}>
+                <ChevronUp size={15} /> {t("Load Earlier Messages")}
+              </button>
+            )}
             {snapshot.messages.map((message) => (
               <Message
                 key={message.id}
@@ -273,6 +282,7 @@ export function ChatPage({
                   content: pendingQuestion,
                   timestamp: new Date().toISOString(),
                   relatedFileIds: [],
+                  relatedFileMatches: [],
                 }}
                 files={snapshot.files}
                 language={snapshot.settings.appLanguage}
@@ -298,7 +308,11 @@ export function ChatPage({
                     <div className="thinking-line">
                       <span />
                       <span />
-                      <span /> {progressStage === "generating"
+                      <span /> {progressStage === "verifying"
+                        ? t("Verifying answer citations…")
+                        : progressStage === "reranking"
+                          ? t("Reranking the strongest matches…")
+                      : progressStage === "generating"
                         ? t("Generating response…")
                         : progressStage === "retrieved"
                           ? t("Preparing relevant context…")
@@ -319,8 +333,10 @@ export function ChatPage({
       <div className="composer-wrap">
         {attachedFile && (
           <div className="attachment-chip">
-            <FileTypeIcon file={attachedFile} size={16} />
-            <span>{attachedFile.name}</span>
+            <button className="attachment-preview-button" aria-label={t("Show file details")} onClick={() => onInspect(attachedFile)}>
+              <FileTypeIcon file={attachedFile} size={16} />
+              <span>{attachedFile.name}</span>
+            </button>
             <IconButton label={t("Cancel")} onClick={() => setAttachment(null)}>
               <X size={14} />
             </IconButton>
@@ -468,6 +484,7 @@ function Message({
   const related = message.relatedFileIds
     .map((id) => files.find((file) => file.id === id))
     .filter((file): file is FileRecord => Boolean(file));
+  const confidenceByFileId = new Map((message.relatedFileMatches ?? []).map((match) => [match.fileId, match.confidence]));
   if (message.role === "user")
     return (
       <div className="user-message">
@@ -510,7 +527,10 @@ function Message({
                 {formatDate(file.mtime, language)} · {formatBytes(file.size)}
               </small>
             </div>
-            {index === 0 && <span className="relevance">✦ {t("Best Match")}</span>}
+            <span className="relevance">
+              {index === 0 ? `✦ ${t("Best Match")}` : t("Related")}
+              {confidenceByFileId.has(file.id) ? ` · ${Math.round(confidenceByFileId.get(file.id)! * 100)}%` : ""}
+            </span>
             <span
               className="file-action"
               role="button"

@@ -296,6 +296,25 @@ final class OrganizerServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: organizedDirectory.path))
     }
 
+    func testDirectoryInspectionStopsAtConfiguredEntryBudget() throws {
+        let directory = sourceDirectory.appendingPathComponent("large-tree", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for index in 0..<4 {
+            try Data("entry".utf8).write(
+                to: directory.appendingPathComponent("entry-\(index).txt")
+            )
+        }
+
+        XCTAssertNil(DirectoryInspector.inspect(
+            directory,
+            budget: DirectoryInspectionBudget(maximumEntries: 2, maximumDuration: 1)
+        ))
+        XCTAssertNotNil(DirectoryInspector.inspect(
+            directory,
+            budget: DirectoryInspectionBudget(maximumEntries: 10, maximumDuration: 1)
+        ))
+    }
+
     func testReconcileManagedFilesMirrorsRecursiveDirectoryAndRemovesStaleManagedRows() throws {
         let topicDirectory = organizedDirectory
             .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
@@ -444,6 +463,61 @@ final class OrganizerServiceTests: XCTestCase {
         XCTAssertNil(updated.indexedAt)
         XCTAssertNil(updated.indexSignature)
         XCTAssertEqual(updated.contentHash, originalHash)
+    }
+
+    func testManagedContentAuditHonorsTTLUnlessForced() async throws {
+        let topicDirectory = organizedDirectory
+            .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
+            .appendingPathComponent("Reports", isDirectory: true)
+        try FileManager.default.createDirectory(at: topicDirectory, withIntermediateDirectories: true)
+        let managedURL = topicDirectory.appendingPathComponent("daily.txt")
+        try Data("alpha".utf8).write(to: managedURL)
+        let values = try managedURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let originalMTime = values.contentModificationDate ?? Date()
+        let originalHash = try FileContentHasher.sha256(of: managedURL)
+        let id = try store.upsertFile(FileRecord(
+            id: nil,
+            path: managedURL.path,
+            name: managedURL.lastPathComponent,
+            ext: managedURL.pathExtension,
+            size: Int64(values.fileSize ?? 0),
+            mtime: originalMTime,
+            category: FileCategory.documents.rawValue,
+            sourceDir: sourceDirectory.path,
+            indexedAt: Date(),
+            contentHash: originalHash,
+            title: "Daily",
+            contentText: "alpha",
+            indexSignature: "embedding-space"
+        ))
+        let organizer = OrganizerService(
+            store: store,
+            settings: AppSettings(store: store),
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid
+        )
+        let firstRun = Date(timeIntervalSince1970: 1_800_000_000)
+
+        let initialResult = await organizer.invalidateChangedManagedFileIndexes(now: firstRun)
+        XCTAssertEqual(initialResult, 0)
+
+        try Data("bravo".utf8).write(to: managedURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: originalMTime],
+            ofItemAtPath: managedURL.path
+        )
+        let skippedResult = await organizer.invalidateChangedManagedFileIndexes(
+            now: firstRun.addingTimeInterval(60 * 60)
+        )
+        XCTAssertEqual(skippedResult, 0)
+        XCTAssertNotNil(try store.file(id: id)?.indexedAt)
+
+        let forcedResult = await organizer.invalidateChangedManagedFileIndexes(
+            force: true,
+            now: firstRun.addingTimeInterval(60 * 60)
+        )
+        XCTAssertEqual(forcedResult, 1)
+        XCTAssertNil(try store.file(id: id)?.indexedAt)
     }
 
     func testBatchedAutoOrganizeRunsWhenFileThresholdIsReached() async throws {

@@ -10,6 +10,7 @@ struct MainView: View {
     @State private var isSidebarToggleHovered = false
     @State private var isNewChatHovered = false
     @State private var restoreSidebarAfterPreview = false
+    @State private var toolbarVerticalOffset: CGFloat = 0
 
     enum SidebarItem: String, CaseIterable, Identifiable {
         case library
@@ -43,7 +44,7 @@ struct MainView: View {
                 FileNestSidebar(
                     selection: Binding(
                         get: { selection },
-                        set: { selection = $0 }
+                        set: { setMainSelection($0) }
                     ),
                     openSettings: openSettings
                 )
@@ -56,40 +57,25 @@ struct MainView: View {
                     .transition(.opacity)
             }
 
-            ZStack {
+            Group {
+                // Keep the inactive destination out of the hierarchy. Chat contains a
+                // Markdown-heavy transcript and an AppKit text editor; retaining it
+                // behind an opacity modifier makes every unrelated AppState update
+                // participate in its layout work.
+                if selection == .chat {
                 ChatView(
-                    isActive: selection == .chat,
                     returnFromFileChat: {
                         if appState.returnFromFileChat() == .library {
-                            selection = .library
+                            setMainSelection(.library)
                         }
                     }
                 )
-                    .opacity(selection == .chat ? 1 : 0)
-                    .allowsHitTesting(selection == .chat)
-                    .disabled(selection != .chat)
-                    .accessibilityHidden(selection != .chat)
-
-                if selection == .library {
+                } else {
                     LibraryView(startDocumentChat: startDocumentChat)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(FileNestTheme.surface)
-            .overlay(alignment: .topTrailing) {
-                if appState.hasActiveAutomaticFileProcessing {
-                    AutomaticProcessingQueueView(appState: appState, maximumItems: 2)
-                        .padding(12)
-                        .frame(width: 286, alignment: .leading)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(FileNestTheme.border, lineWidth: 1)
-                        }
-                        .padding(16)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
-            }
 
             if let previewedFile = appState.previewedFile {
                 Rectangle()
@@ -106,10 +92,9 @@ struct MainView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .background(.ultraThinMaterial)
+        .background(FileNestTheme.sidebarSurface)
         .animation(.easeInOut(duration: 0.18), value: isSidebarCollapsed)
         .animation(.easeInOut(duration: 0.2), value: appState.previewedFile?.path)
-        .animation(.easeInOut(duration: 0.2), value: appState.hasActiveAutomaticFileProcessing)
         .toolbar {
             if #available(macOS 26.0, *) {
                 ToolbarItem(placement: .navigation) {
@@ -123,7 +108,12 @@ struct MainView: View {
             }
         }
         .onAppear {
-            appState.refreshChatSessions()
+            if !FileNestEnvironment.isUIPreview,
+               appState.prepareInitialMainViewChatIfNeeded() {
+                selection = .chat
+            } else {
+                appState.refreshChatSessions()
+            }
             if appState.settings.onboardingCompleted && !appState.isWatching {
                 appState.startWatching()
             }
@@ -150,6 +140,11 @@ struct MainView: View {
             }
         }
         .frame(height: 28, alignment: .center)
+        .background {
+            TitleBarControlAlignmentReader(verticalOffset: $toolbarVerticalOffset)
+                .allowsHitTesting(false)
+        }
+        .offset(y: toolbarVerticalOffset)
     }
 
     private var sidebarToggleButton: some View {
@@ -194,15 +189,27 @@ struct MainView: View {
     }
 
     private func createChat() {
-        selection = .chat
         guard !FileNestEnvironment.isUIPreview else { return }
         appState.newChat()
+        setMainSelection(.chat)
     }
 
     private func startDocumentChat(_ file: FileRecord) {
-        selection = .chat
         guard !FileNestEnvironment.isUIPreview else { return }
         appState.startFileChat(attachedFilePath: file.path, returnDestination: .library)
+        setMainSelection(.chat)
+    }
+
+    private func setMainSelection(_ destination: SidebarItem) {
+        switch destination {
+        case .library:
+            appState.closeFilePreview()
+        case .chat:
+            appState.closeFilePreviewUnlessMatchingAttachment(
+                appState.currentChatAttachmentPath
+            )
+        }
+        selection = destination
     }
 
     private func coordinateSidebar(withPreviewPath previewPath: String?) {
@@ -226,7 +233,7 @@ struct MainView: View {
 
     private func routePendingLibrarySearch() {
         guard appState.librarySearchRequest != nil else { return }
-        selection = .library
+        setMainSelection(.library)
     }
 
     private func openSettings(_ section: SettingsSection) {
@@ -319,17 +326,26 @@ private struct FileNestSidebar: View {
             HStack(spacing: 12) {
                 Image(systemName: item.icon)
                     .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(
+                        selection == item
+                            ? FileNestTheme.sidebarSelectedIcon
+                            : Color.secondary
+                    )
                     .frame(width: 20)
                 Text(LocalizedStringKey(item.label))
                     .font(.system(size: 14, weight: selection == item ? .medium : .regular))
+                    .foregroundStyle(
+                        selection == item
+                            ? FileNestTheme.sidebarSelectedText
+                            : Color.primary.opacity(0.86)
+                    )
                 Spacer()
             }
-            .foregroundStyle(selection == item ? FileNestTheme.accent : Color.primary.opacity(0.86))
             .padding(.horizontal, 14)
             .frame(height: 40)
             .contentShape(Rectangle())
             .background(
-                selection == item ? FileNestTheme.selection : Color.clear,
+                selection == item ? FileNestTheme.sidebarSelection : Color.clear,
                 in: RoundedRectangle(cornerRadius: 9, style: .continuous)
             )
         }
@@ -380,19 +396,19 @@ private struct FileNestSidebar: View {
     }
 
     private func createChat() {
-        selection = .chat
         guard !FileNestEnvironment.isUIPreview else { return }
         appState.newChat()
+        selection = .chat
     }
 
     private func openChat(_ id: Int64) {
-        selection = .chat
         if FileNestEnvironment.isUIPreview {
             previewSelectionID = id
         } else {
             appState.selectChat(id)
             appState.markChatSeen(id)
         }
+        selection = .chat
     }
 
 }
@@ -407,7 +423,7 @@ private struct RecentChatRow: View {
         HStack(spacing: 9) {
             Image(systemName: session.attachedFilePath == nil ? "bubble.left" : "doc.text")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(selected ? FileNestTheme.accent : .secondary)
+                .foregroundStyle(selected ? FileNestTheme.sidebarSelectedIcon : Color.secondary)
                 .frame(width: 16)
             Text(LocalizedStringKey(session.title))
                 .font(.system(size: 12, weight: selected ? .medium : .regular))
@@ -425,12 +441,12 @@ private struct RecentChatRow: View {
                     .help("New response available")
             }
         }
-        .foregroundStyle(selected ? FileNestTheme.accent : Color.primary.opacity(0.82))
+        .foregroundStyle(selected ? FileNestTheme.sidebarSelectedText : Color.primary.opacity(0.82))
         .padding(.horizontal, 10)
         .frame(height: 32)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            selected ? FileNestTheme.selection : Color.clear,
+            selected ? FileNestTheme.sidebarSelection : Color.clear,
             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
         )
         .contentShape(Rectangle())
@@ -465,7 +481,9 @@ private struct SidebarStatusBar: View {
     @State private var dismissTask: Task<Void, Never>?
 
     private var isIndexing: Bool {
-        appState.indexingState.isActive || appState.hasActiveAutomaticFileProcessing
+        appState.organizationState.isActive ||
+            appState.indexingState.isActive ||
+            appState.hasActiveAutomaticFileProcessing
     }
 
     private var watchIcon: String {
@@ -488,6 +506,16 @@ private struct SidebarStatusBar: View {
     }
 
     private var indexIcon: String {
+        if appState.organizationState.isActive {
+            switch appState.organizationProgress?.phase {
+            case .indexing: return "doc.text.magnifyingglass"
+            case .organizing: return "tray.and.arrow.down"
+            case .waitingForStability: return "clock.arrow.circlepath"
+            case .paused: return "pause.circle.fill"
+            case .stopping: return "stop.circle"
+            default: return "arrow.triangle.2.circlepath"
+            }
+        }
         if appState.hasActiveAutomaticFileProcessing { return "arrow.triangle.2.circlepath" }
         switch appState.indexingState {
         case .running: return "arrow.triangle.2.circlepath"
@@ -501,6 +529,9 @@ private struct SidebarStatusBar: View {
     }
 
     private var indexColor: Color {
+        if appState.organizationState.isActive {
+            return appState.organizationState == .paused ? .secondary : FileNestTheme.accentBlue
+        }
         if appState.hasActiveAutomaticFileProcessing { return FileNestTheme.accentBlue }
         switch appState.indexingState {
         case .running, .stopping: return FileNestTheme.accentBlue
@@ -512,13 +543,15 @@ private struct SidebarStatusBar: View {
     }
 
     private var indexTitle: String {
-        appState.hasActiveAutomaticFileProcessing
+        if appState.organizationState.isActive { return appState.organizationStatusTitle }
+        return appState.hasActiveAutomaticFileProcessing
             ? appState.automaticProcessingStatusTitle
             : appState.indexingStatusTitle
     }
 
     private var indexedSubtitle: String {
-        appState.hasActiveAutomaticFileProcessing
+        if appState.organizationState.isActive { return appState.organizationStatusSubtitle }
+        return appState.hasActiveAutomaticFileProcessing
             ? appState.automaticProcessingStatusSubtitle
             : appState.indexingStatusSubtitle
     }
@@ -593,7 +626,7 @@ private struct SidebarStatusBar: View {
             icon: indexIcon,
             color: indexColor,
             label: localized(isIndexing ? indexTitle : "Index Status"),
-            isAnimating: appState.indexingState.isAnimating || appState.hasActiveAutomaticFileProcessing,
+            isAnimating: appState.organizationState.isAnimating || appState.indexingState.isAnimating || appState.hasActiveAutomaticFileProcessing,
             popoverArrowEdge: .bottom,
             isPresented: panelBinding(for: .indexing),
             onActivate: { toggle(.indexing) },
@@ -684,7 +717,7 @@ private struct SidebarStatusBar: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(appState.isWatching ? FileNestTheme.warning : FileNestTheme.accent)
+                .tint(appState.isWatching ? FileNestTheme.warning : FileNestTheme.accentFill)
 
                 Button {
                     openSettings(.indexing)
@@ -716,10 +749,22 @@ private struct SidebarStatusBar: View {
             color: indexColor,
             title: localized(indexTitle),
             subtitle: localized(indexedSubtitle),
-            isAnimating: appState.indexingState.isAnimating || appState.hasActiveAutomaticFileProcessing
+            isAnimating: appState.organizationState.isAnimating || appState.indexingState.isAnimating || appState.hasActiveAutomaticFileProcessing,
+            showsStatusIcon: !appState.organizationState.isActive,
+            showsHeader: !appState.organizationState.isActive
         ) {
+            if appState.organizationState.isActive {
+                ManualOrganizationQueueView(
+                    appState: appState,
+                    maximumItems: 10,
+                    showsActivitySymbol: false
+                )
+            } else {
             if !appState.automaticFileProcessingItems.isEmpty {
-                AutomaticProcessingQueueView(appState: appState)
+                AutomaticProcessingQueueView(
+                    appState: appState,
+                    showsHeader: false
+                )
             }
 
             IndexingStatusProgressView(
@@ -739,7 +784,7 @@ private struct SidebarStatusBar: View {
                     IndexingButtonLabel(defaultTitle: "Reindex", appState: appState)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(FileNestTheme.accent)
+                .tint(FileNestTheme.accentFill)
                 .disabled(appState.reindexButtonsDisabled)
 
                 Button {
@@ -754,6 +799,7 @@ private struct SidebarStatusBar: View {
                 .buttonStyle(.bordered)
             }
             .controlSize(.small)
+            }
         }
     }
 
@@ -811,7 +857,7 @@ private struct SidebarStatusBar: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .tint(FileNestTheme.accent)
+            .tint(FileNestTheme.accentFill)
             .controlSize(.small)
         }
     }
@@ -918,13 +964,83 @@ private struct SidebarIconSurface: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .frame(width: 16, height: 16)
-            .frame(width: 28, height: 28)
+            .frame(width: 16, height: 16, alignment: .center)
+            .frame(width: 28, height: 28, alignment: .center)
             .background(
                 isHovered ? Color.primary.opacity(0.08) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 7, style: .continuous)
             )
             .contentShape(Rectangle())
+            .fixedSize()
+    }
+}
+
+/// Reads the native close-button centerline and applies only the vertical
+/// correction needed by the SwiftUI toolbar group. Hidden-title-bar windows do
+/// not expose a stable toolbar baseline across macOS versions and display scales.
+private struct TitleBarControlAlignmentReader: NSViewRepresentable {
+    @Binding var verticalOffset: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(verticalOffset: $verticalOffset)
+    }
+
+    func makeNSView(context: Context) -> TitleBarAlignmentProbeView {
+        let view = TitleBarAlignmentProbeView(frame: .zero)
+        view.onLayout = { [weak coordinator = context.coordinator] probe in
+            coordinator?.scheduleMeasurement(from: probe)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: TitleBarAlignmentProbeView, context: Context) {
+        context.coordinator.verticalOffset = $verticalOffset
+        context.coordinator.scheduleMeasurement(from: nsView)
+    }
+
+    final class Coordinator {
+        var verticalOffset: Binding<CGFloat>
+        private var measurementScheduled = false
+
+        init(verticalOffset: Binding<CGFloat>) {
+            self.verticalOffset = verticalOffset
+        }
+
+        func scheduleMeasurement(from view: NSView) {
+            guard !measurementScheduled else { return }
+            measurementScheduled = true
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self else { return }
+                self.measurementScheduled = false
+                guard let view,
+                      let window = view.window,
+                      let closeButton = window.standardWindowButton(.closeButton),
+                      let buttonSuperview = closeButton.superview else { return }
+
+                let probeMidY = view.convert(view.bounds, to: nil).midY
+                let closeButtonMidY = buttonSuperview.convert(closeButton.frame, to: nil).midY
+                let correction = probeMidY - closeButtonMidY
+                guard abs(correction) > 0.5 else { return }
+
+                let correctedOffset = self.verticalOffset.wrappedValue + correction
+                guard abs(correctedOffset - self.verticalOffset.wrappedValue) > 0.25 else { return }
+                self.verticalOffset.wrappedValue = correctedOffset
+            }
+        }
+    }
+}
+
+private final class TitleBarAlignmentProbeView: NSView {
+    var onLayout: ((NSView) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onLayout?(self)
+    }
+
+    override func layout() {
+        super.layout()
+        onLayout?(self)
     }
 }
 
@@ -940,32 +1056,38 @@ private struct StatusPopoverLayout<Content: View>: View {
     let title: String
     let subtitle: String
     var isAnimating = false
+    var showsStatusIcon = true
+    var showsHeader = true
     @ViewBuilder let content: () -> Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                IndexingActivitySymbol(
-                    systemName: icon,
-                    isAnimating: isAnimating,
-                    size: 16,
-                    weight: .semibold
-                )
-                    .foregroundStyle(color)
-                    .frame(width: 30, height: 30)
-                    .background(color.opacity(0.11), in: RoundedRectangle(cornerRadius: 8))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(verbatim: title)
-                        .font(.system(size: 13, weight: .semibold))
-                    Text(verbatim: subtitle)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+            if showsHeader {
+                HStack(spacing: 10) {
+                    if showsStatusIcon {
+                        IndexingActivitySymbol(
+                            systemName: icon,
+                            isAnimating: isAnimating,
+                            size: 16,
+                            weight: .semibold
+                        )
+                            .foregroundStyle(color)
+                            .frame(width: 30, height: 30)
+                            .background(color.opacity(0.11), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: title)
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(verbatim: subtitle)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
-            }
 
-            Divider()
+                Divider()
+            }
 
             content()
         }

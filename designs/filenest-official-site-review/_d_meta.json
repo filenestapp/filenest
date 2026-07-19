@@ -1,0 +1,24 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "FileNest Official Site Prototype Review": {
+      "versions": [
+        {
+          "path": "index.html",
+          "createdAt": "2026-07-18T09:43:42.493Z",
+          "status": "needs-review",
+          "subtitle": "Selected native direction with local AI, privacy, and security proof",
+          "viewport": {
+            "width": 1440,
+            "height": 900
+          },
+          "section": "Website prototypes"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-07-18T09:43:42.498Z",
+  "updatedAt": "2026-07-18T10:39:48.223Z"
+}

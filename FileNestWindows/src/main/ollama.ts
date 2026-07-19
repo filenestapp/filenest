@@ -1,10 +1,13 @@
 import { shell } from 'electron'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Settings } from '../shared/types'
 
 export class OllamaManager {
+  private launchedProcess: ReturnType<typeof spawn> | null = null
+  private startTask: Promise<{ reachable: boolean; models: string[] }> | null = null
+
   async refresh(settings: Settings): Promise<{ reachable: boolean; models: string[] }> {
     try {
       const response = await fetch(new URL('/api/tags', settings.ollamaHost.replace(/\/+$/, '') + '/'), { signal: AbortSignal.timeout(3_000) })
@@ -36,18 +39,71 @@ export class OllamaManager {
       const local = process.env.LOCALAPPDATA
       const executable = local ? join(local, 'Programs', 'Ollama', 'ollama.exe') : ''
       if (executable && existsSync(executable)) {
-        const service = spawn(executable, ['serve'], {
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: true,
-          env: { ...process.env, OLLAMA_FLASH_ATTENTION: settings?.ollamaFlashAttentionEnabled === false ? '0' : '1' }
-        })
-        service.unref()
+        await this.start(settings ?? ({} as Settings))
       }
     } catch {
       await shell.openExternal('https://ollama.com/download/windows')
     }
   }
+
+  start(settings: Settings): Promise<{ reachable: boolean; models: string[] }> {
+    if (this.startTask) return this.startTask
+    this.startTask = this.performStart(settings).finally(() => { this.startTask = null })
+    return this.startTask
+  }
+
+  async stop(): Promise<void> {
+    const process = this.launchedProcess
+    this.launchedProcess = null
+    if (!process?.pid) return
+    if (globalThis.process.platform === 'win32') await run('taskkill', ['/pid', String(process.pid), '/T', '/F'], 15_000).catch(() => undefined)
+    else { try { process.kill('SIGTERM') } catch { /* The process already stopped. */ } }
+  }
+
+  private async performStart(settings: Settings): Promise<{ reachable: boolean; models: string[] }> {
+    const current = await this.refresh(settings)
+    if (current.reachable || !requiresOllamaService(settings) || !isLocalOllamaHost(settings.ollamaHost)) return current
+    if (this.launchedProcess && this.launchedProcess.exitCode == null) return this.waitUntilReady(settings, this.launchedProcess)
+    const executable = resolveOllamaExecutable()
+    if (!executable) return current
+    const process = spawn(executable, ['serve'], {
+      stdio: 'ignore',
+      windowsHide: true,
+      env: { ...globalThis.process.env, OLLAMA_FLASH_ATTENTION: settings.ollamaFlashAttentionEnabled === false ? '0' : '1' }
+    })
+    this.launchedProcess = process
+    process.once('exit', () => { if (this.launchedProcess === process) this.launchedProcess = null })
+    return this.waitUntilReady(settings, process)
+  }
+
+  private async waitUntilReady(settings: Settings, process: ReturnType<typeof spawn>): Promise<{ reachable: boolean; models: string[] }> {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const current = await this.refresh(settings)
+      if (current.reachable) return current
+      if (process.exitCode != null) break
+    }
+    return { reachable: false, models: [] }
+  }
+}
+
+export function requiresOllamaService(settings: Pick<Settings, 'llmChoice' | 'embeddingSource'>): boolean {
+  return settings.llmChoice === 'ollama' || settings.embeddingSource === 'ollama'
+}
+
+export function isLocalOllamaHost(host: string): boolean {
+  try {
+    const hostname = new URL(host).hostname.replace(/^\[|\]$/g, '').toLocaleLowerCase()
+    return ['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(hostname)
+  } catch { return false }
+}
+
+function resolveOllamaExecutable(): string | null {
+  const local = globalThis.process.env.LOCALAPPDATA
+  const installed = local ? join(local, 'Programs', 'Ollama', 'ollama.exe') : ''
+  if (installed && existsSync(installed)) return installed
+  const probe = spawnSync(globalThis.process.platform === 'win32' ? 'where.exe' : 'which', ['ollama'], { encoding: 'utf8', windowsHide: true })
+  return probe.status === 0 ? probe.stdout.split(/\r?\n/).map((value) => value.trim()).find(Boolean) ?? null : null
 }
 
 function run(command: string, args: string[], timeoutMs: number): Promise<void> {
