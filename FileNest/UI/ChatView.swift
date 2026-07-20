@@ -23,6 +23,7 @@ struct ChatView: View {
     @State private var isLoadingEarlierMessages = false
 
     private var messages: [ChatMessage] {
+        if FileNestEnvironment.isFileChatPreview { return UIShowcaseData.fileChatMessages }
         if FileNestEnvironment.isUIPreview { return UIShowcaseData.messages }
         guard let sessionID = appState.selectedChatSessionID else { return appState.chatMessages }
         return appState.presentedChatMessages(
@@ -54,7 +55,15 @@ struct ChatView: View {
     }
 
     private var isFileChat: Bool {
-        !(appState.currentChatAttachmentPath?.isEmpty ?? true)
+        if FileNestEnvironment.isFileChatPreview { return true }
+        if FileNestEnvironment.isUIPreview { return false }
+        return !(appState.currentChatAttachmentPath?.isEmpty ?? true)
+    }
+
+    private var fileChatPath: String? {
+        if FileNestEnvironment.isFileChatPreview { return UIShowcaseData.files.first?.path }
+        if FileNestEnvironment.isUIPreview { return nil }
+        return appState.currentChatAttachmentPath
     }
 
     var body: some View {
@@ -117,7 +126,7 @@ struct ChatView: View {
                         .fixedSize(horizontal: true, vertical: false)
                         .layoutPriority(2)
 
-                    if let path = appState.currentChatAttachmentPath {
+                    if let path = fileChatPath {
                         FileContextPill(
                             path: path,
                             preview: { appState.presentAttachedFilePreview(path: path) }
@@ -1282,7 +1291,8 @@ private struct MessageRow: View {
                 if editingText == nil, isUser || !message.content.isEmpty {
                     MessageActionBar(
                         message: message,
-                        feedback: $feedback,
+                        feedback: feedback,
+                        setFeedback: saveFeedback,
                         retry: retry,
                         edit: edit,
                         showsLastUserActions: showsLastUserActions,
@@ -1298,6 +1308,20 @@ private struct MessageRow: View {
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 18)
+        .onAppear {
+            feedback = MessageFeedback(rawValue: message.feedback ?? "")
+        }
+        .onChange(of: message.id) { _ in
+            feedback = MessageFeedback(rawValue: message.feedback ?? "")
+        }
+    }
+
+    private func saveFeedback(_ value: MessageFeedback?) {
+        feedback = value
+        guard message.id != nil else { return }
+        var updated = message
+        updated.feedback = value?.rawValue
+        try? appState.store.updateChatMessage(updated)
     }
 }
 
@@ -1664,26 +1688,42 @@ enum ChatMarkdownNormalizer {
     }
 }
 
-private enum MessageFeedback {
+private enum MessageFeedback: String {
     case helpful, notHelpful
 }
 
 private struct MessageActionBar: View {
+    @EnvironmentObject private var appState: AppState
     let message: ChatMessage
-    @Binding var feedback: MessageFeedback?
+    let feedback: MessageFeedback?
+    let setFeedback: (MessageFeedback?) -> Void
     let retry: () -> Void
     let edit: () -> Void
     let showsLastUserActions: Bool
     let startFileChat: (() -> Void)?
 
+    @State private var isCopied = false
+
     private var isUser: Bool { message.role == ChatRole.user.rawValue }
 
     var body: some View {
         HStack(spacing: 3) {
-            actionButton("doc.on.doc", help: "Copy") {
+            actionButton(
+                isCopied ? "checkmark" : "doc.on.doc",
+                help: isCopied ? "Copied" : "Copy",
+                isActive: isCopied
+            ) {
                 let pasteboard = NSPasteboard.general
                 pasteboard.clearContents()
                 pasteboard.setString(message.content, forType: .string)
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.6)) {
+                    isCopied = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        isCopied = false
+                    }
+                }
             }
 
             if isUser && showsLastUserActions {
@@ -1702,34 +1742,44 @@ private struct MessageActionBar: View {
 
                 actionButton(
                     feedback == .helpful ? "hand.thumbsup.fill" : "hand.thumbsup",
-                    help: "Helpful"
+                    help: feedback == .helpful
+                        ? "Remove helpful feedback"
+                        : "Mark this answer as helpful (saved locally)",
+                    isActive: feedback == .helpful
                 ) {
-                    feedback = feedback == .helpful ? nil : .helpful
+                    setFeedback(feedback == .helpful ? nil : .helpful)
                 }
                 actionButton(
                     feedback == .notHelpful ? "hand.thumbsdown.fill" : "hand.thumbsdown",
-                    help: "Not helpful"
+                    help: feedback == .notHelpful
+                        ? "Remove not helpful feedback"
+                        : "Mark this answer as not helpful (saved locally)",
+                    isActive: feedback == .notHelpful
                 ) {
-                    feedback = feedback == .notHelpful ? nil : .notHelpful
+                    setFeedback(feedback == .notHelpful ? nil : .notHelpful)
                 }
             }
             Spacer()
         }
-        .foregroundStyle(.secondary)
     }
 
     private func actionButton(_ systemImage: String,
                               help: String,
+                              isActive: Bool = false,
                               action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 11, weight: .medium))
                 .frame(width: 27, height: 25)
                 .contentShape(Rectangle())
+                .scaleEffect(isActive ? 1.12 : 1)
+                .animation(.spring(response: 0.24, dampingFraction: 0.6), value: isActive)
         }
         .buttonStyle(.plain)
+        .foregroundStyle(isActive ? FileNestTheme.accent : .secondary)
         .background(Color.primary.opacity(0.001))
-        .help(Text(LocalizedStringKey(help)))
+        .help(appState.settings.localized(help))
+        .pointingHandOnHover()
     }
 }
 

@@ -1,6 +1,6 @@
 # FileNest Website
 
-The official FileNest product website is a dependency-free static site with English as the default language and optional Simplified Chinese localization.
+The official FileNest product website for `filenestapp.com` is a dependency-free static site with English as the default language and optional Simplified Chinese localization.
 
 ## Preview
 
@@ -14,11 +14,13 @@ Then open `http://localhost:4173`.
 
 ## Structure
 
-- `index.html` contains the semantic page structure and English fallback copy.
+- `index.html` contains the main marketing site, semantic page structure, and English fallback copy.
+- `download.html` is the public release-status page. It intentionally contains no installer URL until signed release artifacts are available.
 - `styles.css` contains the responsive visual system and motion behavior.
 - `script.js` manages localization, the mobile menu, platform tabs, the hero interaction, and five replayable product demos.
 - `locales/` contains user-facing translations.
-- `assets/` contains product artwork and screenshots captured from the current FileNest build using its privacy-safe showcase mode.
+- `assets/` contains product artwork, the social-sharing card, and screenshots captured from the current FileNest build using its privacy-safe showcase mode.
+- `robots.txt` and `sitemap.xml` use `https://filenestapp.com` as the canonical public origin.
 
 The interactive demos use a fictional Northstar Studio workspace. They cover local indexing, direct search, Smart Search, chat-based file discovery, and grounded chat with a selected file. Autoplay pauses when the demo leaves the viewport, and reduced-motion preferences disable the sequence animations.
 

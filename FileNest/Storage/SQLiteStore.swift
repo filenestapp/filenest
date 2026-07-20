@@ -611,6 +611,9 @@ final class SQLiteStore: @unchecked Sendable {
             if !chatColumns.contains("response_model") {
                 try db.execute(sql: "ALTER TABLE chat_messages ADD COLUMN response_model TEXT")
             }
+            if !chatColumns.contains("feedback") {
+                try db.execute(sql: "ALTER TABLE chat_messages ADD COLUMN feedback TEXT")
+            }
             try db.create(
                 index: "idx_chat_messages_session",
                 on: "chat_messages",
@@ -2296,7 +2299,7 @@ final class SQLiteStore: @unchecked Sendable {
                 "role", "content", "ts", "related_file_ids", "session_id",
                 "related_file_matches",
                 "input_tokens", "output_tokens", "first_response_duration",
-                "total_response_duration", "response_provider", "response_model",
+                "total_response_duration", "response_provider", "response_model", "feedback",
             ])
         }
     }

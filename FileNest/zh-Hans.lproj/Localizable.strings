@@ -235,6 +235,11 @@
 "You" = "你";
 "Thinking and generating…" = "正在思考并生成回答…";
 "Copy" = "复制";
+"Copied" = "已复制";
+"Mark this answer as helpful (saved locally)" = "标记此回答有帮助（仅保存在本机）";
+"Remove helpful feedback" = "取消“有帮助”反馈";
+"Mark this answer as not helpful (saved locally)" = "标记此回答没有帮助（仅保存在本机）";
+"Remove not helpful feedback" = "取消“没有帮助”反馈";
 "Regenerate" = "重新生成";
 "Chat with cited file" = "与引用文件聊天";
 "Chat with Document" = "与文档聊天";

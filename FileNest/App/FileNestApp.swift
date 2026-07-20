@@ -94,13 +94,56 @@ final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegat
 @MainActor
 final class FileNestAppDelegate: NSObject, NSApplicationDelegate {
     private var isTerminating = false
+    private var previewWindow: NSWindow?
+    private var previewAppState: AppState?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        if FileNestEnvironment.isUIPreview {
+            presentPreviewWindow()
+            return
+        }
         FileNestScrollerStyleCoordinator.shared.start()
         DispatchQueue.main.async {
             MainWindowPresenter.shared.present()
         }
+    }
+
+    private func presentPreviewWindow() {
+        let appState = AppLifecycleCoordinator.shared.appState ?? previewAppState ?? AppState(startAutomatically: false)
+        previewAppState = appState
+
+        let rootView: AnyView
+        if FileNestEnvironment.isSettingsModelsPreview {
+            rootView = AnyView(
+                SettingsView()
+                    .environmentObject(appState)
+                    .fileNestEnvironment(appState.settings)
+                    .fileNestOverlayScrollStyle()
+            )
+        } else {
+            rootView = AnyView(
+                MainView()
+                    .environmentObject(appState)
+                    .fileNestEnvironment(appState.settings)
+                    .fileNestOverlayScrollStyle()
+                    .frame(minWidth: 980, minHeight: 700)
+            )
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1180, height: 840),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "FileNest"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.contentView = NSHostingView(rootView: rootView)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        previewWindow = window
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func applicationShouldHandleReopen(
@@ -180,7 +223,9 @@ final class MainWindowPresenter {
 @main
 struct FileNestApp: App {
     @NSApplicationDelegateAdaptor(FileNestAppDelegate.self) private var appDelegate
-    @StateObject private var appState = AppState()
+    @StateObject private var appState = AppState(
+        startAutomatically: !FileNestEnvironment.isUIPreview
+    )
 
     var body: some Scene {
         MenuBarExtra {

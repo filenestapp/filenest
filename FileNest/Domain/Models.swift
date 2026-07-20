@@ -373,6 +373,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var totalResponseDuration: TimeInterval? = nil
     var responseProvider: String? = nil
     var responseModel: String? = nil
+    var feedback: String? = nil
 }
 
 extension ChatMessage: FetchableRecord, MutablePersistableRecord {
@@ -388,6 +389,7 @@ extension ChatMessage: FetchableRecord, MutablePersistableRecord {
         case totalResponseDuration = "total_response_duration"
         case responseProvider = "response_provider"
         case responseModel = "response_model"
+        case feedback
     }
     mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
 }

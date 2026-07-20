@@ -297,7 +297,28 @@ enum FileNestEnvironment {
     }
 
     static var isUIPreview: Bool {
-        debugPreview("main")
+        debugPreview("main") ||
+            debugPreview("library") ||
+            debugPreview("indexing") ||
+            debugPreview("search") ||
+            debugPreview("file-chat") ||
+            debugPreview("settings-models")
+    }
+
+    static var isLibraryPreview: Bool {
+        debugPreview("library")
+    }
+
+    static var isIndexingPreview: Bool {
+        debugPreview("indexing")
+    }
+
+    static var isSearchPreview: Bool {
+        debugPreview("search")
+    }
+
+    static var isFileChatPreview: Bool {
+        debugPreview("file-chat")
     }
 
     static var isMenuPreview: Bool {
@@ -1088,6 +1109,23 @@ enum UIShowcaseData {
         return [user, assistant]
     }()
 
+    static let fileChatMessages: [ChatMessage] = [
+        ChatMessage(
+            id: -201,
+            role: ChatRole.user.rawValue,
+            content: "What is the renewal term and notice period?",
+            ts: showcaseDate,
+            relatedFileIds: nil
+        ),
+        ChatMessage(
+            id: -202,
+            role: ChatRole.assistant.rawValue,
+            content: "The renewal term is 12 months. Either party may give 30 days’ written notice before renewal.",
+            ts: showcaseDate,
+            relatedFileIds: nil
+        )
+    ]
+
     private static func file(_ name: String, ext: String, size: Int64, daysAgo: Int, folder: String) -> FileRecord {
         let stableID = name.utf8.reduce(Int64(17)) { partial, byte in
             (partial * 31 + Int64(byte)) % 1_000_000_000
@@ -1095,7 +1133,7 @@ enum UIShowcaseData {
         return FileRecord(
             id: -stableID,
             path: FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("FileNestOrganized")
+                .appendingPathComponent("FileNest Demo Workspace")
                 .appendingPathComponent(folder)
                 .appendingPathComponent(name).path,
             name: name,
@@ -1103,7 +1141,7 @@ enum UIShowcaseData {
             size: size,
             mtime: Calendar.current.date(byAdding: .day, value: -daysAgo, to: showcaseDate) ?? showcaseDate,
             category: FileCategory.documents.rawValue,
-            sourceDir: "~/Downloads",
+            sourceDir: "~/FileNest Demo Workspace",
             indexedAt: showcaseDate,
             contentHash: nil,
             title: nil,

@@ -235,6 +235,11 @@
 "You" = "You";
 "Thinking and generating…" = "Thinking and generating…";
 "Copy" = "Copy";
+"Copied" = "Copied";
+"Mark this answer as helpful (saved locally)" = "Mark this answer as helpful (saved locally)";
+"Remove helpful feedback" = "Remove helpful feedback";
+"Mark this answer as not helpful (saved locally)" = "Mark this answer as not helpful (saved locally)";
+"Remove not helpful feedback" = "Remove not helpful feedback";
 "Regenerate" = "Regenerate";
 "Chat with cited file" = "Chat with cited file";
 "Chat with Document" = "Chat with Document";

@@ -5,7 +5,10 @@ import SwiftUI
 struct MainView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
-    @SceneStorage("FileNest.mainSelection") private var selectionRawValue = SidebarItem.chat.rawValue
+    @SceneStorage("FileNest.mainSelection") private var selectionRawValue = (FileNestEnvironment.isLibraryPreview ||
+        FileNestEnvironment.isIndexingPreview || FileNestEnvironment.isSearchPreview)
+        ? SidebarItem.library.rawValue
+        : SidebarItem.chat.rawValue
     @SceneStorage("FileNest.sidebarCollapsed") private var isSidebarCollapsed = false
     @State private var isSidebarToggleHovered = false
     @State private var isNewChatHovered = false
@@ -475,13 +478,13 @@ private struct SidebarStatusBar: View {
     let placement: Placement
     let openSettings: (SettingsSection) -> Void
     @State private var settingsHovered = false
-    @State private var activePanel: Panel?
+    @State private var activePanel: Panel? = FileNestEnvironment.isIndexingPreview ? .indexing : nil
     @State private var hoveredPanel: Panel?
     @State private var isPopoverHovered = false
     @State private var dismissTask: Task<Void, Never>?
 
     private var isIndexing: Bool {
-        appState.organizationState.isActive ||
+        FileNestEnvironment.isIndexingPreview || appState.organizationState.isActive ||
             appState.indexingState.isActive ||
             appState.hasActiveAutomaticFileProcessing
     }
@@ -499,13 +502,14 @@ private struct SidebarStatusBar: View {
     }
 
     private var watchPaths: [String] {
-        if FileNestEnvironment.isUIPreview { return ["~/Desktop", "~/Downloads"] }
+        if FileNestEnvironment.isUIPreview { return ["~/FileNest Demo Workspace"] }
         return appState.settings.watchDirs.map {
             URL(fileURLWithPath: $0).tildeAbbreviatedPath
         }
     }
 
     private var indexIcon: String {
+        if FileNestEnvironment.isIndexingPreview { return "arrow.triangle.2.circlepath" }
         if appState.organizationState.isActive {
             switch appState.organizationProgress?.phase {
             case .indexing: return "doc.text.magnifyingglass"
@@ -529,6 +533,7 @@ private struct SidebarStatusBar: View {
     }
 
     private var indexColor: Color {
+        if FileNestEnvironment.isIndexingPreview { return FileNestTheme.accentBlue }
         if appState.organizationState.isActive {
             return appState.organizationState == .paused ? .secondary : FileNestTheme.accentBlue
         }
@@ -543,6 +548,7 @@ private struct SidebarStatusBar: View {
     }
 
     private var indexTitle: String {
+        if FileNestEnvironment.isIndexingPreview { return "Indexing 3 files" }
         if appState.organizationState.isActive { return appState.organizationStatusTitle }
         return appState.hasActiveAutomaticFileProcessing
             ? appState.automaticProcessingStatusTitle
@@ -550,6 +556,7 @@ private struct SidebarStatusBar: View {
     }
 
     private var indexedSubtitle: String {
+        if FileNestEnvironment.isIndexingPreview { return "3 of 3 files indexed" }
         if appState.organizationState.isActive { return appState.organizationStatusSubtitle }
         return appState.hasActiveAutomaticFileProcessing
             ? appState.automaticProcessingStatusSubtitle

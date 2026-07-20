@@ -88,6 +88,16 @@ remove_transient_app_bundles() {
         -path '*/Build/Products/*/FileNest.app' -print0 2>/dev/null
     )
   done
+
+  # Older installers retained renamed app bundles alongside the live app.
+  # They register as separate Launchpad entries, so remove them on every install.
+  while IFS= read -r -d '' candidate; do
+    "$LSREGISTER" -u "$candidate" >/dev/null 2>&1 || true
+    rm -rf "$candidate"
+  done < <(
+    find "$HOME/Applications" -maxdepth 1 -type d \
+      -name "$APP_NAME.app.previous*" -print0 2>/dev/null
+  )
 }
 
 unregister_stale_launch_services_entries() {

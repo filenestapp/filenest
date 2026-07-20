@@ -595,7 +595,8 @@ final class SQLiteStoreTests: XCTestCase {
             firstResponseDuration: 0.42,
             totalResponseDuration: 1.75,
             responseProvider: "ollama",
-            responseModel: "qwen3.5:9b"
+            responseModel: "qwen3.5:9b",
+            feedback: "helpful"
         ))
 
         let stored = try XCTUnwrap(store.chatMessages(sessionId: try XCTUnwrap(session.id)).first)
@@ -606,6 +607,7 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(stored.totalResponseDuration), 1.75, accuracy: 0.001)
         XCTAssertEqual(stored.responseProvider, "ollama")
         XCTAssertEqual(stored.responseModel, "qwen3.5:9b")
+        XCTAssertEqual(stored.feedback, "helpful")
     }
 
     func testChatHistoryPagesLoadNewestMessagesFirstWithoutReadingWholeSession() throws {

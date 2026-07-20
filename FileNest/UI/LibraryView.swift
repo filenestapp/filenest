@@ -100,7 +100,7 @@ struct LibraryView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
     let startDocumentChat: (FileRecord) -> Void
-    @State private var searchText = ""
+    @State private var searchText = FileNestEnvironment.isSearchPreview ? "renewal term" : ""
     @State private var selectedCategories = Set<FileCategory>()
     @State private var searchResults: [LibrarySearchResult]?
     @State private var isSearching = false
@@ -133,7 +133,11 @@ struct LibraryView: View {
     }
 
     private var sourceFiles: [FileRecord] {
-        searchResults?.map(\.file) ?? appState.files
+        searchResults?.map(\.file) ?? availableFiles
+    }
+
+    private var availableFiles: [FileRecord] {
+        FileNestEnvironment.isUIPreview ? UIShowcaseData.files : appState.files
     }
 
     private var searchMatchesByPath: [String: LibrarySearchResult] {
@@ -152,10 +156,10 @@ struct LibraryView: View {
     /// an input changes, never as a side effect of a SwiftUI body invalidation.
     private func rebuildDerivedFiles() {
         let matches = Dictionary(uniqueKeysWithValues: (searchResults ?? []).map { ($0.file.path, $0) })
-        let files = searchResults?.map(\.file) ?? appState.files
+        let files = searchResults?.map(\.file) ?? availableFiles
         let matchingFiles = files.filter { file in
             (selectedCategories.isEmpty || selectedCategories.contains(file.categoryEnum)) &&
-            (searchText.isEmpty || searchResults != nil ||
+            (searchText.isEmpty || FileNestEnvironment.isSearchPreview || searchResults != nil ||
              file.name.localizedCaseInsensitiveContains(searchText) ||
              (file.title ?? "").localizedCaseInsensitiveContains(searchText))
         }
