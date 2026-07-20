@@ -176,7 +176,8 @@ async function rebuildTrayMenu(): Promise<void> {
     snapshot.indexingPaused
       ? { label: 'Resume Indexing', click: () => controller.resumeIndexing() }
       : { label: 'Pause Indexing', enabled: snapshot.indexing, click: () => controller.pauseIndexing() },
-    { label: 'Organize Now', click: () => void controller.organizeNow() },
+    { label: 'Organize New Files', click: () => void controller.organizeNow() },
+    { label: 'Organize Existing Files', click: () => void controller.organizeExisting() },
     ...(recent.length ? [
       { type: 'separator' as const },
       { label: 'Recently Organized', enabled: false },

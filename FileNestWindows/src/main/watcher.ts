@@ -12,7 +12,10 @@ export class FileWatcherService {
   private watcher: FSWatcher | null = null
   private directoryCandidates = new Set<string>()
   private organizeQueue = new Set<number>()
+  private expectedRemovalPaths = new Map<string, number>()
   private batchTimer: ReturnType<typeof setInterval> | null = null
+  private watchReconcileTimer: ReturnType<typeof setInterval> | null = null
+  private watchReconcileRunning = false
   private currentSettings: Settings | null = null
   private processingItems = new Map<number, AutomaticProcessingItem>()
   private runGeneration = 0
@@ -64,6 +67,12 @@ export class FileWatcherService {
     this.watcher = chokidar.watch(settings.watchDirs, {
       ignoreInitial: true,
       persistent: true,
+      // Windows file-system notifications can be dropped for folders synced by
+      // OneDrive or updated by download managers. Polling is a deliberate
+      // fallback there; Chokidar still uses native events on other platforms.
+      usePolling: process.platform === 'win32',
+      interval: 1_000,
+      binaryInterval: 1_500,
       awaitWriteFinish: { stabilityThreshold: 2_000, pollInterval: 250 },
       ignored: (path, info) => shouldIgnore(path, info?.isDirectory() ?? false, settings)
     })
@@ -77,10 +86,12 @@ export class FileWatcherService {
     this.watcher.on('unlink', (path) => void this.handleRemoval(path, generation))
     this.watcher.on('unlinkDir', (path) => void this.handleRemoval(path, generation))
     this.watcher.on('error', (error) => void this.logger.log('watcher', 'Watcher error', error))
+    await this.waitForWatcherReady(this.watcher)
     this.configureBatchTimer(settings, generation)
     await this.reconcileOrganizedLibrary(settings, generation)
     await this.reconcileManagedItems(settings, generation)
     await this.reconcileWatchRoots(settings, generation)
+    this.configureWatchReconciliation(settings, generation)
     await this.logger.log('watcher', `Started watching: ${settings.watchDirs.join(', ')}`)
     this.onChanged?.()
   }
@@ -89,12 +100,20 @@ export class FileWatcherService {
     this.runGeneration += 1
     if (this.batchTimer) clearInterval(this.batchTimer)
     this.batchTimer = null
+    if (this.watchReconcileTimer) clearInterval(this.watchReconcileTimer)
+    this.watchReconcileTimer = null
+    this.watchReconcileRunning = false
     this.organizeQueue.clear()
+    this.expectedRemovalPaths.clear()
     this.processingItems.clear()
     await this.watcher?.close()
     this.watcher = null
     this.directoryCandidates.clear()
     this.onChanged?.()
+  }
+
+  private async waitForWatcherReady(watcher: FSWatcher): Promise<void> {
+    await new Promise<void>((resolve) => watcher.once('ready', resolve))
   }
 
   async preserveExisting(settings: Settings, directories = settings.watchDirs): Promise<void> {
@@ -119,7 +138,20 @@ export class FileWatcherService {
     if (generation === this.runGeneration) await this.flushOrganizeQueue(generation)
   }
 
-  async organizeDirectoriesOnce(settings: Settings, directories: string[], recursively = false): Promise<void> {
+  async organizePending(settings: Settings): Promise<void> {
+    await this.organizeDirectoriesOnce(settings, settings.watchDirs, false, false)
+  }
+
+  async organizeExisting(settings: Settings, directories = settings.watchDirs): Promise<void> {
+    await this.organizeDirectoriesOnce(settings, directories, false, true)
+  }
+
+  async organizeDirectoriesOnce(
+    settings: Settings,
+    directories: string[],
+    recursively = false,
+    includePreservedEntries = true
+  ): Promise<void> {
     if (this.manualOrganizationRunning) return
     const roots = [...new Set(directories)].filter((root) => !isInside(settings.organizedRoot, root))
     if (!roots.length) return
@@ -129,7 +161,13 @@ export class FileWatcherService {
     this.onChanged?.()
     try {
       const candidates: Array<{ path: string; sourceDir: string; isDirectory: boolean }> = []
-      for (const root of roots) candidates.push(...await collectManualCandidates(root, settings, recursively))
+      for (const root of roots) {
+        const discovered = await collectManualCandidates(root, settings, recursively)
+        candidates.push(...discovered.filter((candidate) => {
+          if (includePreservedEntries) return true
+          return !this.database.isWatchDirectoryBaselineEntry(root, topLevelEntry(root, candidate.path))
+        }))
+      }
       this.updateManualQueue(candidates)
       for (let index = 0; index < candidates.length; index += 1) {
         await this.waitWhileManualOrganizationPaused()
@@ -173,7 +211,7 @@ export class FileWatcherService {
         }
         this.setProcessing(current, 'organizing')
         try {
-          await this.organizer.organize(current, { ...settings, autoOrganize: true })
+          await this.organizeWithRemovalProtection(current, { ...settings, autoOrganize: true })
         } catch (error) {
           await this.logger.log('organizer', `One-time organization failed: ${candidate.path}`, error)
         } finally {
@@ -375,6 +413,7 @@ export class FileWatcherService {
 
   private async handleRemoval(path: string, generation: number): Promise<void> {
     if (generation !== this.runGeneration) return
+    if (this.isExpectedRemoval(path)) return
     const file = this.database.getFileByPath(path)
     if (!file) return
     await this.database.deleteFile(file.id)
@@ -385,7 +424,7 @@ export class FileWatcherService {
     if (generation !== this.runGeneration) return
     if (settings.autoOrganizeMode === 'immediate') {
       this.setProcessing(file, 'organizing')
-      try { await this.organizer.organize(file, settings) } finally { this.clearProcessing(file.id) }
+      try { await this.organizeWithRemovalProtection(file, settings) } finally { this.clearProcessing(file.id) }
       return
     }
     this.organizeQueue.add(file.id)
@@ -400,6 +439,17 @@ export class FileWatcherService {
     }
   }
 
+  private configureWatchReconciliation(settings: Settings, generation: number): void {
+    if (this.watchReconcileTimer) clearInterval(this.watchReconcileTimer)
+    this.watchReconcileTimer = null
+    if (process.platform !== 'win32') return
+    this.watchReconcileTimer = setInterval(() => {
+      if (this.watchReconcileRunning || generation !== this.runGeneration) return
+      this.watchReconcileRunning = true
+      void this.reconcileWatchRoots(settings, generation).finally(() => { this.watchReconcileRunning = false })
+    }, 2_000)
+  }
+
   private async flushOrganizeQueue(generation: number): Promise<void> {
     const settings = this.currentSettings
     if (!settings || generation !== this.runGeneration || !this.organizeQueue.size) return
@@ -410,7 +460,7 @@ export class FileWatcherService {
       const file = this.database.getFile(id)
       if (file) {
         this.setProcessing(file, 'organizing')
-        try { await this.organizer.organize(file, settings) } catch (error) {
+        try { await this.organizeWithRemovalProtection(file, settings) } catch (error) {
           await this.logger.log('organizer', `Batch organization failed: ${file.path}`, error)
         } finally { this.clearProcessing(id) }
       } else this.clearProcessing(id)
@@ -425,6 +475,30 @@ export class FileWatcherService {
 
   private clearProcessing(id: number): void {
     if (this.processingItems.delete(id)) this.onChanged?.()
+  }
+
+  private async organizeWithRemovalProtection(file: FileRecord, settings: Settings): Promise<FileRecord> {
+    const source = canonicalPath(file.path)
+    this.expectedRemovalPaths.set(source, Date.now() + 10_000)
+    try {
+      const organized = await this.organizer.organize(file, settings)
+      if (canonicalPath(organized.path) === source) this.expectedRemovalPaths.delete(source)
+      return organized
+    } catch (error) {
+      this.expectedRemovalPaths.delete(source)
+      throw error
+    }
+  }
+
+  private isExpectedRemoval(path: string): boolean {
+    const key = canonicalPath(path)
+    const expiresAt = this.expectedRemovalPaths.get(key)
+    if (expiresAt == null) return false
+    if (expiresAt <= Date.now()) {
+      this.expectedRemovalPaths.delete(key)
+      return false
+    }
+    return true
   }
 }
 

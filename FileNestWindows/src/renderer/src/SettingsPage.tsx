@@ -195,10 +195,10 @@ function GeneralSettings({
           </button>
           <button
             className="secondary-button"
-            onClick={() => void window.fileNest.scanExisting().then(onRefresh)}
+            onClick={() => void window.fileNest.organizeExisting().then(onRefresh)}
           >
             <Play size={16} />
-            Process Existing Files
+            {t("Organize Existing Files Now")}
           </button>
         </div>
       </SettingsSection>

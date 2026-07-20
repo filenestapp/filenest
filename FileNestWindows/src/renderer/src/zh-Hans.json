@@ -524,6 +524,7 @@
   "Organize Existing Files Now": "立即整理现有文件",
   "Organize Existing Files in Watched Folders Now?": "立即整理监控目录中的现有文件？",
   "Organize Existing Files in Watched Folders…": "整理监控目录中的现有文件…",
+  "Organize New Files": "整理新增文件",
   "Organize Now": "立即整理",
   "Organize early when the file threshold is reached; otherwise organize at the maximum wait time. The minimum interval is 30 seconds.": "达到数量阈值会提前整理；否则在最长等待时间到达时整理。定时最短为 30 秒。",
   "Organize immediately after indexing": "索引完成后立即整理",

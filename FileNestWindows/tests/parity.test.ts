@@ -432,6 +432,67 @@ describe('safe organization and chat persistence', () => {
     await watcher.stop()
   })
 
+  it('organizes only new watched files when the manual action is requested', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const root = join(testRoot, 'ManualPending')
+    const preserved = join(root, 'pre-existing.txt')
+    const pending = join(root, 'new-arrival.txt')
+    await mkdir(root, { recursive: true })
+    await writeFile(preserved, 'This file existed before monitoring began.', 'utf8')
+    await writeFile(pending, 'This file arrived after monitoring began.', 'utf8')
+    const settings = {
+      ...database.getSettings(),
+      watchDirs: [root],
+      organizedRoot: join(testRoot, 'ManualPendingOrganized'),
+      llmChoice: 'none' as const,
+      autoOrganize: false,
+      embeddingSource: 'local' as const,
+      doclingEnabled: false,
+      ocrSource: 'disabled' as const
+    }
+    await database.replaceWatchDirectoryBaseline(root, [preserved])
+    const logger = new AppLogger()
+    const watcher = new FileWatcherService(database, new IndexerService(database, new ContentExtractor(), new EmbeddingService(database), logger), new OrganizerService(database, logger), logger)
+
+    await watcher.organizePending(settings)
+
+    expect((await stat(preserved)).isFile()).toBe(true)
+    expect(database.listFiles().some((file) => file.name === 'new-arrival.txt' && file.organizedAt != null)).toBe(true)
+  })
+
+  it('processes a file added after watching starts', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const root = join(testRoot, 'LiveWatcher')
+    const pending = join(root, 'live-arrival.txt')
+    await mkdir(root, { recursive: true })
+    const settings = {
+      ...database.getSettings(),
+      watchDirs: [root],
+      organizedRoot: join(testRoot, 'LiveWatcherOrganized'),
+      llmChoice: 'none' as const,
+      autoOrganize: true,
+      autoOrganizeMode: 'immediate' as const,
+      embeddingSource: 'local' as const,
+      doclingEnabled: false,
+      ocrSource: 'disabled' as const
+    }
+    const logger = new AppLogger()
+    const watcher = new FileWatcherService(database, new IndexerService(database, new ContentExtractor(), new EmbeddingService(database), logger), new OrganizerService(database, logger), logger)
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+
+    try {
+      Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
+      await watcher.start(settings)
+      await writeFile(pending, 'This file was created while watching.', 'utf8')
+      await waitFor(() => database.listFiles().some((file) => file.name === 'live-arrival.txt' && file.organizedAt != null))
+    } finally {
+      await watcher.stop()
+      if (platformDescriptor) Object.defineProperty(process, 'platform', platformDescriptor)
+    }
+  }, 12_000)
+
   it('organizes selected folders recursively while skipping source-control repositories', async () => {
     const database = new FileNestDatabase()
     await database.initialize()
@@ -511,4 +572,13 @@ function sendAndWait(service: ChatService, request: Parameters<ChatService['send
       if (event.type === 'error') reject(new Error(event.error))
     })
   })
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 8_000): Promise<void> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    if (condition()) return
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+  }
+  throw new Error('Timed out while waiting for the expected result')
 }

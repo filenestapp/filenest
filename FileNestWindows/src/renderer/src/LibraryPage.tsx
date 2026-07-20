@@ -159,7 +159,11 @@ export function LibraryPage({
         <div className="page-actions">
           <button className="primary-button" disabled={busy || snapshot.organizing} onClick={() => void run(() => window.fileNest.organizeNow())}>
             <WandSparkles size={17} />
-            {t("Organize Now")}
+            {t("Organize New Files")}
+          </button>
+          <button className="secondary-button" disabled={busy || snapshot.organizing} onClick={() => void run(() => window.fileNest.organizeExisting())}>
+            <WandSparkles size={17} />
+            {t("Organize Existing Files Now")}
           </button>
           <button className="secondary-button" disabled={busy || snapshot.organizing} onClick={() => void organizeSelectedFolders()}>
             <FolderPlus size={17} />

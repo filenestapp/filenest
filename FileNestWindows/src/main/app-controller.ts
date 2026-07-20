@@ -216,7 +216,8 @@ export class AppController {
   async stopWatching(): Promise<void> { await this.watcher.stop(); this.notifyChanged() }
   async scanExisting(directories?: string[]): Promise<void> { await this.watcher.scanExisting(this.database.getSettings(), directories); this.notifyChanged() }
   async preserveExisting(directories?: string[]): Promise<void> { await this.watcher.preserveExisting(this.database.getSettings(), directories); this.notifyChanged() }
-  async organizeNow(): Promise<void> { await this.organizer.organizeAll(this.database.getSettings()); this.notifyChanged() }
+  async organizeNow(): Promise<void> { await this.watcher.organizePending(this.database.getSettings()); this.notifyChanged() }
+  async organizeExisting(directories?: string[]): Promise<void> { await this.watcher.organizeExisting(this.database.getSettings(), directories); this.notifyChanged() }
   async organizeDirectoriesOnce(directories: string[], recursively = false): Promise<void> {
     const normalized = [...new Set(directories.map((path) => path.trim()).filter(Boolean))]
     if (!normalized.length || this.watcher.isManualOrganizationRunning) return

@@ -15,6 +15,7 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle('watcher:scan-existing', (_event, directories?: string[]) => controller.scanExisting(directories))
   ipcMain.handle('watcher:preserve-existing', (_event, directories?: string[]) => controller.preserveExisting(directories))
   ipcMain.handle('organizer:run', () => controller.organizeNow())
+  ipcMain.handle('organizer:run-existing', (_event, directories?: string[]) => controller.organizeExisting(directories))
   ipcMain.handle('organizer:run-directories', (_event, directories: string[], recursively?: boolean) => controller.organizeDirectoriesOnce(directories, recursively))
   ipcMain.handle('organizer:pause', () => controller.pauseOrganization())
   ipcMain.handle('organizer:resume', () => controller.resumeOrganization())

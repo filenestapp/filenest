@@ -15,6 +15,7 @@ const api: FileNestApi = {
   scanExisting: (directories?: string[]) => ipcRenderer.invoke('watcher:scan-existing', directories),
   preserveExisting: (directories?: string[]) => ipcRenderer.invoke('watcher:preserve-existing', directories),
   organizeNow: () => ipcRenderer.invoke('organizer:run'),
+  organizeExisting: (directories?: string[]) => ipcRenderer.invoke('organizer:run-existing', directories),
   organizeDirectoriesOnce: (directories: string[], recursively?: boolean) => ipcRenderer.invoke('organizer:run-directories', directories, recursively),
   pauseOrganization: () => ipcRenderer.invoke('organizer:pause'),
   resumeOrganization: () => ipcRenderer.invoke('organizer:resume'),

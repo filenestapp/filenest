@@ -323,6 +323,7 @@ export interface FileNestApi {
   scanExisting(directories?: string[]): Promise<void>
   preserveExisting(directories?: string[]): Promise<void>
   organizeNow(): Promise<void>
+  organizeExisting(directories?: string[]): Promise<void>
   organizeDirectoriesOnce(directories: string[], recursively?: boolean): Promise<void>
   pauseOrganization(): Promise<void>
   resumeOrganization(): Promise<void>
