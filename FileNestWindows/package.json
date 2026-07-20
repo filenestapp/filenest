@@ -1,6 +1,6 @@
 {
   "name": "filenest-windows",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "FileNest for Windows - local-first intelligent file organizer and search assistant",
   "main": "out/main/index.js",
   "author": "FileNest",
@@ -38,7 +38,7 @@
     "@types/sql.js": "^1.4.9",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^43.1.1",
-    "electron-builder": "^26.15.3",
+    "electron-builder": "26.15.7",
     "electron-vite": "^5.0.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.6",

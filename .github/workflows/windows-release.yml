@@ -40,6 +40,26 @@ jobs:
       - name: Build Windows packages
         run: npm run package:win
 
+      - name: Validate Universal installer installation
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $installer = Resolve-Path "release/FileNest-Setup-$version.exe"
+          $process = Start-Process -FilePath $installer -ArgumentList @('/S', '/currentuser') -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Universal installer failed with exit code $($process.ExitCode)"
+          }
+
+          $mainExecutable = Join-Path $env:LOCALAPPDATA "Programs\FileNest\FileNest.exe"
+          if (-not (Test-Path $mainExecutable -PathType Leaf)) {
+            throw "Installed main executable is missing: $mainExecutable"
+          }
+
+          & $mainExecutable --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed main executable failed its smoke test with exit code $LASTEXITCODE"
+          }
+
       - name: Verify release layout and checksums
         shell: pwsh
         run: |
