@@ -1,6 +1,6 @@
 {
   "name": "filenest-windows",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "FileNest for Windows - local-first intelligent file organizer and search assistant",
   "main": "out/main/index.js",
   "author": "FileNest",

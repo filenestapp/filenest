@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const testRoot = await mkdtemp(join(tmpdir(), 'filenest-windows-parity-'))
@@ -485,7 +485,7 @@ async function addFile(database: FileNestDatabase, path: string, extension = 'tx
   const info = await stat(path)
   return database.upsertFile({
     path,
-    name: path.split('/').at(-1)!,
+    name: basename(path),
     ext: extension,
     size: info.size,
     mtime: info.mtime.toISOString(),
