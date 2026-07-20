@@ -56,6 +56,8 @@ export interface ChatRelatedFileMatch {
   confidence: number
 }
 
+export type ChatFeedback = 'helpful' | 'notHelpful'
+
 export type DocumentChunkKind = 'title' | 'text' | 'table' | 'list' | 'picture' | 'transcript' | 'note' | 'metadata'
 
 export interface DocumentChunk {
@@ -108,6 +110,7 @@ export interface ChatMessage {
   totalResponseDuration?: number | null
   responseProvider?: string | null
   responseModel?: string | null
+  feedback?: ChatFeedback | null
 }
 
 export interface Settings {
@@ -351,6 +354,7 @@ export interface FileNestApi {
   beginChat(attachedFilePath?: string | null): Promise<void>
   selectChat(id: number): Promise<ChatMessage[]>
   loadEarlierChatMessages(): Promise<void>
+  saveChatFeedback(messageId: number, feedback: ChatFeedback | null): Promise<void>
   markChatSeen(id: number): Promise<void>
   deleteChat(id: number): Promise<void>
   clearChats(): Promise<void>

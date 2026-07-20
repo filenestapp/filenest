@@ -87,6 +87,7 @@ The macOS implementation is the normative baseline. “Platform equivalent” me
 | --- | --- | --- | --- | --- | --- |
 | Persistent sessions | Continue prior conversations | sidebar | ChatService/store | sessions, messages | High |
 | Paged chat history | Load the latest 40 messages first and request older pages on demand | conversation | ChatService/store | messages | High on macOS and Windows |
+| Local answer feedback | Retain helpful/not-helpful ratings across restarts and confirm successful message copying | assistant response actions | ChatService/store | message feedback | High on macOS and Windows |
 | Background conversation continuity | Keep streaming when navigating away and surface running/completed state in the sidebar | main window/sidebar | `AppState`, `MainView`, `ChatView` | runtime state | High |
 | Lazy chat creation | Avoid empty sessions | New Chat/composer | AppState/ChatService | sessions | High |
 | Streaming answers | Immediate feedback | Chat composer | LLM provider | messages | High |

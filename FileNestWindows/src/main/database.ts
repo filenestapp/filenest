@@ -4,7 +4,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import type { AppStatistics, ChatMessage, ChatRelatedFileMatch, ChatSession, DocumentChunk, FileCategory, FileRecord, Rule, Settings } from '../shared/types'
+import type { AppStatistics, ChatFeedback, ChatMessage, ChatRelatedFileMatch, ChatSession, DocumentChunk, FileCategory, FileRecord, Rule, Settings } from '../shared/types'
 import { CANONICAL_TOKENIZER_PROFILE, CANONICAL_TOKENIZER_VERSION, estimateCanonicalTokens, GENERATION_FALLBACK_PROFILE } from './token-counter'
 import { CATEGORY_FOLDERS, createDefaultSettings } from './defaults'
 
@@ -105,7 +105,7 @@ export class FileNestDatabase {
         id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
         role TEXT NOT NULL, content TEXT NOT NULL, ts TEXT NOT NULL, related_file_ids TEXT NOT NULL DEFAULT '[]',
         input_tokens INTEGER, output_tokens INTEGER, first_response_duration REAL, total_response_duration REAL,
-        response_provider TEXT, response_model TEXT, related_file_matches TEXT NOT NULL DEFAULT '[]'
+        response_provider TEXT, response_model TEXT, related_file_matches TEXT NOT NULL DEFAULT '[]', feedback TEXT
       );
       CREATE TABLE IF NOT EXISTS token_usage (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
@@ -144,7 +144,7 @@ export class FileNestDatabase {
       ['input_tokens', 'INTEGER'], ['output_tokens', 'INTEGER'],
       ['first_response_duration', 'REAL'], ['total_response_duration', 'REAL'],
       ['response_provider', 'TEXT'], ['response_model', 'TEXT'],
-      ['related_file_matches', "TEXT NOT NULL DEFAULT '[]'"]
+      ['related_file_matches', "TEXT NOT NULL DEFAULT '[]'"], ['feedback', 'TEXT']
     ]
     for (const [name, type] of messageMigrations) {
       if (!messageColumns.includes(name)) this.db.run(`ALTER TABLE chat_messages ADD COLUMN ${name} ${type}`)
@@ -614,6 +614,11 @@ export class FileNestDatabase {
     return { messages: newestFirst.slice(0, boundedLimit).reverse(), hasEarlier: newestFirst.length > boundedLimit }
   }
 
+  async updateChatMessageFeedback(messageId: number, feedback: ChatFeedback | null): Promise<void> {
+    this.db.run("UPDATE chat_messages SET feedback=? WHERE id=? AND role='assistant'", [feedback, messageId])
+    await this.flush()
+  }
+
   async addMessage(
     sessionId: number,
     role: ChatMessage['role'],
@@ -761,7 +766,8 @@ function mapMessage(row: Record<string, unknown>): ChatMessage {
     firstResponseDuration: row.first_response_duration == null ? null : Number(row.first_response_duration),
     totalResponseDuration: row.total_response_duration == null ? null : Number(row.total_response_duration),
     responseProvider: row.response_provider == null ? null : String(row.response_provider),
-    responseModel: row.response_model == null ? null : String(row.response_model)
+    responseModel: row.response_model == null ? null : String(row.response_model),
+    feedback: row.feedback === 'helpful' || row.feedback === 'notHelpful' ? row.feedback : null
   }
 }
 

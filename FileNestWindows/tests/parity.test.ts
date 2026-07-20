@@ -303,6 +303,17 @@ describe('library query behavior', () => {
 })
 
 describe('safe organization and chat persistence', () => {
+  it('persists assistant feedback locally', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const session = await database.createChat()
+    const message = await database.addMessage(session.id, 'assistant', 'A locally generated answer')
+    await database.updateChatMessageFeedback(message.id, 'helpful')
+    expect(database.listMessages(session.id)[0].feedback).toBe('helpful')
+    await database.updateChatMessageFeedback(message.id, null)
+    expect(database.listMessages(session.id)[0].feedback).toBeNull()
+  })
+
   it('pages chat history newest-first internally while returning chronological messages', async () => {
     const database = new FileNestDatabase()
     await database.initialize()

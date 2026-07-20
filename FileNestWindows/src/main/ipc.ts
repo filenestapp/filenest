@@ -1,5 +1,5 @@
 import { BrowserWindow, ipcMain } from 'electron'
-import type { FileCategory, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { ChatFeedback, FileCategory, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 import { AppController } from './app-controller'
 
 export function registerIpc(controller: AppController): void {
@@ -49,6 +49,7 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle('chat:begin', (_event, path?: string | null) => controller.beginChat(path))
   ipcMain.handle('chat:select', (_event, id: number) => controller.selectChat(id))
   ipcMain.handle('chat:load-earlier', () => controller.loadEarlierChatMessages())
+  ipcMain.handle('chat:feedback', (_event, messageId: number, feedback: ChatFeedback | null) => controller.saveChatFeedback(messageId, feedback))
   ipcMain.handle('chat:seen', (_event, id: number) => controller.markChatSeen(id))
   ipcMain.handle('chat:delete', (_event, id: number) => controller.deleteChat(id))
   ipcMain.handle('chat:clear', () => controller.clearChats())

@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, shell } from 'electron'
 import { basename, dirname, join } from 'node:path'
 import { readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import type { AiConnectivityCheck, AppSnapshot, ChatStreamEvent, DuplicateFileGroup, DuplicateScanProgress, DuplicateTrashResult, FileCategory, FileRecord, LibrarySearchRequest, LibrarySearchResponse, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { AiConnectivityCheck, AppSnapshot, ChatFeedback, ChatStreamEvent, DuplicateFileGroup, DuplicateScanProgress, DuplicateTrashResult, FileCategory, FileRecord, LibrarySearchRequest, LibrarySearchResponse, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 import { FileNestDatabase } from './database'
 import { AppLogger } from './logger'
 import { ContentExtractor } from './content-extractor'
@@ -364,6 +364,7 @@ export class AppController {
 
   selectChat(id: number) { this.selectedSessionId = id; this.loadedChatMessageLimit = 40; this.pendingChatAttachmentPath = null; this.completedChatSessionIds.delete(id); this.notifyChanged(); return this.database.chatMessagePage(id, null, this.loadedChatMessageLimit).messages }
   loadEarlierChatMessages(): void { if (this.selectedSessionId != null) this.loadedChatMessageLimit += 40; this.notifyChanged() }
+  async saveChatFeedback(messageId: number, feedback: ChatFeedback | null): Promise<void> { await this.database.updateChatMessageFeedback(messageId, feedback); this.notifyChanged() }
   markChatSeen(id: number): void { this.completedChatSessionIds.delete(id); this.notifyChanged() }
   async deleteChat(id: number): Promise<void> { await this.database.deleteChat(id); this.runningChatSessionIds.delete(id); this.completedChatSessionIds.delete(id); if (this.selectedSessionId === id) this.selectedSessionId = this.database.listChatSessions()[0]?.id ?? null; this.notifyChanged() }
   async clearChats(): Promise<void> { await this.database.clearChats(); this.selectedSessionId = null; this.runningChatSessionIds.clear(); this.completedChatSessionIds.clear(); this.notifyChanged() }

@@ -12,7 +12,7 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "package:win": "npm run build && electron-builder --win nsis portable --x64 --arm64 --publish never",
+    "package:win": "npm run build && electron-builder --win --publish never",
     "package:dir": "npm run build && electron-builder --dir"
   },
   "dependencies": {
@@ -63,21 +63,35 @@
     ],
     "win": {
       "target": [
-        "nsis",
-        "portable"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ],
       "icon": "resources/app-icon.png",
       "artifactName": "FileNest-${version}-${arch}.${ext}"
     },
     "nsis": {
-      "artifactName": "FileNest-Setup-${version}-${arch}.${ext}",
+      "artifactName": "FileNest-Setup-${version}.${ext}",
+      "buildUniversalInstaller": true,
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     },
     "portable": {
-      "artifactName": "FileNest-Portable-${version}-${arch}.${ext}"
+      "artifactName": "FileNest-Portable-${version}-${arch}.${ext}",
+      "buildUniversalInstaller": false
     },
     "publish": {
       "provider": "generic",

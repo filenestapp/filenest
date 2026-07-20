@@ -12,7 +12,7 @@ Both platforms persist product state in a local SQLite-compatible database. macO
 | Embedding | `embeddings` | file_id, chunk index, vector, dimension, model | Semantic search vector | belongs to file/chunk | High |
 | Rule | `rules` | name, pattern, target, priority, enabled, action | Deterministic organization behavior | independent configuration | High |
 | Chat session | `chat_sessions` | title, timestamps, attached path | Conversation boundary | owns messages | High |
-| Chat message | `chat_messages` | role, content, timestamp, related IDs, related-file confidence, response metrics | Persistent conversation turn | belongs to session; references files by JSON IDs | High |
+| Chat message | `chat_messages` | role, content, timestamp, related IDs, related-file confidence, response metrics, local feedback | Persistent conversation turn | belongs to session; references files by JSON IDs | High |
 | Token usage | `token_usage` | timestamp, provider, model, token counts, tokenizer profile, accuracy, session | Aggregate model activity | optionally belongs to session | High |
 | Setting | `settings` | key, value | Persistent application configuration | independent | High |
 | Watch baseline entry | `watch_directory_baseline_entries` | directory path, entry path | Preserve existing items when a folder is added | grouped by watched directory | High on macOS and Windows |
@@ -40,7 +40,7 @@ Windows now persists the same structured chunk vocabulary and contextual text in
 ## Runtime-only state
 
 - Library search score, interpreted intent, sorting, and pagination are derived results. Assistant-message related-file confidence is persisted so historical answers retain their original match evidence.
-- Running/completed chat indicators are process-memory state. Sessions, drafts, messages, references, response metrics, and token usage remain durable where specified by their stores.
+- Running/completed chat indicators and the temporary copied indicator are process-memory state. Sessions, drafts, messages, references, response metrics, helpful/not-helpful feedback, and token usage remain durable where specified by their stores.
 - Index pause/stop state and progress counters are runtime coordination state; committed file/chunk/vector versions remain durable.
 
 ## Relationships

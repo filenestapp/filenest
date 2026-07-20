@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { ChatStreamEvent, FileCategory, FileNestApi, LibrarySearchProgressEvent, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { ChatFeedback, ChatStreamEvent, FileCategory, FileNestApi, LibrarySearchProgressEvent, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 
 const api: FileNestApi = {
   getSnapshot: () => ipcRenderer.invoke('app:snapshot'),
@@ -46,6 +46,7 @@ const api: FileNestApi = {
   beginChat: (path?: string | null) => ipcRenderer.invoke('chat:begin', path),
   selectChat: (id: number) => ipcRenderer.invoke('chat:select', id),
   loadEarlierChatMessages: () => ipcRenderer.invoke('chat:load-earlier'),
+  saveChatFeedback: (messageId: number, feedback: ChatFeedback | null) => ipcRenderer.invoke('chat:feedback', messageId, feedback),
   markChatSeen: (id: number) => ipcRenderer.invoke('chat:seen', id),
   deleteChat: (id: number) => ipcRenderer.invoke('chat:delete', id),
   clearChats: () => ipcRenderer.invoke('chat:clear'),

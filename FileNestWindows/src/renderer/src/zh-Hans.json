@@ -1008,5 +1008,10 @@
   "Affected media only": "仅受影响的媒体",
   "Limit Reindex to File Types": "按文件类型限制重新索引",
   "All file types": "所有文件类型",
-  "Start Reindex": "开始重新索引"
+  "Start Reindex": "开始重新索引",
+  "Copied": "已复制",
+  "Mark this answer as helpful (saved locally)": "标记此回答有帮助（仅保存在本机）",
+  "Remove helpful feedback": "取消“有帮助”反馈",
+  "Mark this answer as not helpful (saved locally)": "标记此回答没有帮助（仅保存在本机）",
+  "Remove not helpful feedback": "取消“没有帮助”反馈"
 }

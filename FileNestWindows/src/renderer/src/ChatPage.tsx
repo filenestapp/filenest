@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
+  Check,
   ChevronUp,
   Clipboard,
   FilePlus2,
@@ -23,6 +24,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type {
   AppSnapshot,
+  ChatFeedback,
   ChatMessage,
   ChatStreamEvent,
   FileRecord,
@@ -480,7 +482,22 @@ function Message({
   onRetry(message: ChatMessage): void;
 }): React.JSX.Element {
   const t = (value: string): string => translate(value, language);
-  const [feedback, setFeedback] = useState<"helpful" | "not-helpful" | null>(null);
+  const [feedback, setFeedback] = useState<ChatFeedback | null>(message.feedback ?? null);
+  const [isCopied, setIsCopied] = useState(false);
+  useEffect(() => {
+    setFeedback(message.feedback ?? null);
+  }, [message.feedback, message.id]);
+  const saveFeedback = (value: ChatFeedback): void => {
+    const next = feedback === value ? null : value;
+    setFeedback(next);
+    void window.fileNest.saveChatFeedback(message.id, next).catch(() => setFeedback(message.feedback ?? null));
+  };
+  const copyMessage = (): void => {
+    void navigator.clipboard.writeText(message.content).then(() => {
+      setIsCopied(true);
+      window.setTimeout(() => setIsCopied(false), 1_500);
+    });
+  };
   const related = message.relatedFileIds
     .map((id) => files.find((file) => file.id === id))
     .filter((file): file is FileRecord => Boolean(file));
@@ -559,31 +576,26 @@ function Message({
             </span>
           )}
           <IconButton
-            label="Copy"
-            onClick={() => void navigator.clipboard.writeText(message.content)}
+            label={t(isCopied ? "Copied" : "Copy")}
+            className={isCopied ? "active" : ""}
+            onClick={copyMessage}
           >
-            <Clipboard size={15} />
+            {isCopied ? <Check size={15} /> : <Clipboard size={15} />}
           </IconButton>
           <IconButton label="Regenerate" onClick={() => onRetry(message)}>
             <RotateCcw size={15} />
           </IconButton>
           <IconButton
-            label="Helpful"
+            label={t(feedback === "helpful" ? "Remove helpful feedback" : "Mark this answer as helpful (saved locally)")}
             className={feedback === "helpful" ? "active" : ""}
-            onClick={() =>
-              setFeedback((value) => (value === "helpful" ? null : "helpful"))
-            }
+            onClick={() => saveFeedback("helpful")}
           >
             <ThumbsUp size={15} />
           </IconButton>
           <IconButton
-            label="Not helpful"
-            className={feedback === "not-helpful" ? "active" : ""}
-            onClick={() =>
-              setFeedback((value) =>
-                value === "not-helpful" ? null : "not-helpful",
-              )
-            }
+            label={t(feedback === "notHelpful" ? "Remove not helpful feedback" : "Mark this answer as not helpful (saved locally)")}
+            className={feedback === "notHelpful" ? "active" : ""}
+            onClick={() => saveFeedback("notHelpful")}
           >
             <ThumbsDown size={15} />
           </IconButton>

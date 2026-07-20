@@ -35,7 +35,7 @@ A capability is complete only when all applicable layers agree:
 | Vector lifecycle | complete | implemented with atomic replacement, semantic parent/child chunks, entity terms, per-file generations, mutation guards, recovery splitting, media scope, and file-category-scoped rebuild | index/database tests passed |
 | Organization | complete | implemented with priority/ignore/hybrid logic, safe paths, conflicts, cross-volume fallback, rollback distinction, and restart-safe one-time multi-folder organization with optional recursion and repository exclusion | organizer tests passed; cross-volume Windows smoke pending |
 | Library | complete | implemented with complete Smart Search filters, lexical/entity/semantic RRF, dynamic semantic acceptance, optional reranking, the 50%/minimum-three display policy, duplicate management, sorting, paging, creation dates, and inspector | query/duplicate tests and Electron UI build passed |
-| Chat | complete | implemented with parent evidence expansion, stable citation validation, bounded context, persisted related-file confidence, immediate durable questions, 40-message history pages, configurable retrieval, document/image/transcribed-media chat, retry replacement, progress, metrics, cancellation, and retrieval fallback | chat/database tests and Electron UI build passed |
+| Chat | complete | implemented with parent evidence expansion, stable citation validation, bounded context, persisted related-file confidence and answer feedback, copy-success state, immediate durable questions, 40-message history pages, configurable retrieval, document/image/transcribed-media chat, retry replacement, progress, metrics, cancellation, and retrieval fallback | chat/database tests and Electron UI build passed |
 | Rules | complete | implemented with create/edit/delete/toggle/generate/apply | integration and UI build passed |
 | Settings and managed services | complete | implemented with independent providers, connectivity checks, model lifecycle, managed Qwen3 reranker lifecycle, FFmpeg/Whisper setup and model management, and selective indexing controls | type check/build passed; provider runtime matrix pending Windows |
 | Statistics, logs, updates | complete | implemented with activity/category/storage/model metrics, log lifecycle, and updater configuration | database tests passed; signed update pending publisher infrastructure |
@@ -70,6 +70,9 @@ A capability is complete only when all applicable layers agree:
 - Added durable related-file confidence, immediate question persistence, 40-message chat history pages, and the shared confidence display policy that keeps all results at or above 50% and uses weaker results only to reach three.
 - Added file creation-date backfill, file-type-scoped reindex controls, bounded directory inspection, a 24-hour/cursor/256 MB managed-content audit, and one-time schema migration markers.
 - Added Ollama embedding requests with truncation and an explicit 32,000-token context window.
+- Added locally persisted helpful/not-helpful answer feedback, localized feedback actions, and a temporary copied-success state matching the latest macOS conversation actions.
+
+The latest macOS changes also add launch arguments for deterministic UI screenshot fixtures. Those are macOS development/QA tooling rather than a shipped product capability; Windows keeps its existing Electron runtime/CDP smoke path instead of reproducing AppKit-specific preview windows.
 
 ## Verification truth
 
@@ -85,10 +88,11 @@ These platform gates must not be reported as passed solely because packaging suc
 
 Therefore, the source implementation now targets complete functional parity, while the release as a whole remains **not yet certified as 100% parity** until the Windows-native gates above pass on x64 and ARM64 Windows 11.
 
-## Latest code-level verification — 2026-07-19
+## Latest code-level verification — 2026-07-20
 
 - Current macOS XCTest baseline: 339 tests passed, 0 failed.
 - TypeScript strict type check: passed.
-- Vitest: 36 tests passed across 2 files, 0 failed.
+- Vitest: 37 tests passed across 2 files, 0 failed.
 - Electron production build: main, preload, and renderer bundles passed.
+- Windows packaging cross-build: passed with one x64/ARM64 Universal NSIS Setup and separate x64/ARM64 Portable executables; native installation acceptance and Authenticode signing remain pending.
 - Windows-native installer, shell, DPAPI, tray, startup, managed FFmpeg/Whisper runtime, and signed update gates remain pending.
