@@ -79,6 +79,10 @@ SQLite + sqlite-vec + 关键词/实体/向量 RRF 融合
 - 设置页包含通用配置、AI 模型、索引、规则、统计、诊断日志与更新。
 - 英文、简体中文以及跟随系统的浅色/深色模式。
 
+## OpenAI Build Week / Codex Collaboration
+
+FileNest was extended for OpenAI Build Week with Codex powered by GPT-5.6. Codex helped implement, debug, and test the local indexing, retrieval, chat, model-management, and cross-platform workflows. The project owner made the product, privacy, architecture, and release decisions; Codex was used as an engineering collaborator throughout the build.
+
 ## 构建与验证
 
 ### macOS
