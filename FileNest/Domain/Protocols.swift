@@ -62,6 +62,13 @@ protocol OCRProvider {
     func recognizeResult(imageData: Data, mimeType: String) async throws -> OCRRecognitionResult
 }
 
+/// Optional lifecycle hook for OCR providers that own persistent subprocesses.
+/// FileNest invokes this during shutdown after cancelling indexing work so native
+/// runtimes can finish their current request and exit without an abrupt signal.
+protocol ManagedOCRProviderLifecycle: AnyObject {
+    func shutdown() async
+}
+
 extension OCRProvider {
     func recognizeResult(imageData: Data, mimeType: String) async throws -> OCRRecognitionResult {
         OCRRecognitionResult(text: try await recognize(imageData: imageData, mimeType: mimeType))

@@ -207,8 +207,8 @@ struct MenuBarView: View {
                 openWindow(id: "main")
             }
             MenuFooterButton(title: "Settings…", icon: "gearshape", showsChevron: true) {
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "settings")
+                appState.presentSettings(.general)
+                MainWindowPresenter.shared.present()
             }
             MenuFooterButton(title: "Quit FileNest", icon: "power", showsChevron: false) {
                 NSApp.terminate(nil)

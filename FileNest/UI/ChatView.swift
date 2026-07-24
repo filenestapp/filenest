@@ -9,7 +9,6 @@ struct ChatView: View {
     private static let messagePageSize = 40
 
     @EnvironmentObject private var appState: AppState
-    @Environment(\.openWindow) private var openWindow
     let returnFromFileChat: () -> Void
     @State private var sendTasks = [Int64: Task<Void, Never>]()
     @State private var pendingStreamDeltas = [Int64: String]()
@@ -454,9 +453,7 @@ struct ChatView: View {
     }
 
     private func openSettings() {
-        appState.selectSettingsSection(.aiModels)
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "settings")
+        appState.presentSettings(.aiModels)
     }
 
     private func submit(_ rawQuestion: String) {
@@ -1215,6 +1212,9 @@ private struct MessageRow: View {
     let startFileChat: (FileRecord) -> Void
 
     @State private var feedback: MessageFeedback?
+    @State private var isShowingFeedbackEditor = false
+    @State private var preselectedFeedbackFileID: Int64?
+    @State private var singleFileFeedbackContext: RAGSingleFileFeedbackContext?
 
     private var isUser: Bool { message.role == ChatRole.user.rawValue }
     private var modelUnavailable: Bool {
@@ -1280,7 +1280,16 @@ private struct MessageRow: View {
                         files: message.relatedFiles,
                         matches: message.relatedFileMatches,
                         preview: appState.toggleFilePreview,
-                        startDocumentChat: startFileChat
+                        startDocumentChat: startFileChat,
+                        markMostAccurate: { file, rank, confidence in
+                            preselectedFeedbackFileID = file.id
+                            singleFileFeedbackContext = RAGSingleFileFeedbackContext(
+                                file: file,
+                                rank: rank,
+                                confidence: confidence
+                            )
+                            isShowingFeedbackEditor = true
+                        }
                     )
                 }
 
@@ -1296,6 +1305,11 @@ private struct MessageRow: View {
                         retry: retry,
                         edit: edit,
                         showsLastUserActions: showsLastUserActions,
+                        openDetailedFeedback: {
+                            preselectedFeedbackFileID = nil
+                            singleFileFeedbackContext = nil
+                            isShowingFeedbackEditor = true
+                        },
                         startFileChat: message.relatedFiles.first(where: {
                             $0.supportsFileChat(with: appState.settings)
                         }).map { file in
@@ -1314,14 +1328,58 @@ private struct MessageRow: View {
         .onChange(of: message.id) { _ in
             feedback = MessageFeedback(rawValue: message.feedback ?? "")
         }
+        .sheet(isPresented: $isShowingFeedbackEditor) {
+            RAGFeedbackEditor(
+                files: message.relatedFiles,
+                initialFeedback: storedFeedback,
+                preselectedFileID: preselectedFeedbackFileID,
+                singleFileContext: singleFileFeedbackContext
+            ) { draft in
+                saveDetailedFeedback(draft)
+            }
+            .environmentObject(appState)
+            .fileNestEnvironment(appState.settings)
+            .id(singleFileFeedbackContext.map {
+                "single:\($0.file.id ?? 0):\($0.file.path)"
+            } ?? "full")
+        }
     }
 
     private func saveFeedback(_ value: MessageFeedback?) {
+        if value == .notHelpful {
+            preselectedFeedbackFileID = nil
+            singleFileFeedbackContext = nil
+            isShowingFeedbackEditor = true
+            return
+        }
         feedback = value
-        guard message.id != nil else { return }
-        var updated = message
-        updated.feedback = value?.rawValue
-        try? appState.store.updateChatMessage(updated)
+        guard value == .helpful else {
+            appState.removeChatFeedback(message: message)
+            return
+        }
+        _ = appState.submitChatFeedback(
+            message: message,
+            rating: .accurate,
+            reason: nil,
+            bestFileID: nil,
+            bestFileReason: nil
+        )
+    }
+
+    private var storedFeedback: RAGFeedbackRecord? {
+        guard let messageID = message.id else { return nil }
+        return appState.ragFeedbackRecords.first { $0.messageID == messageID }
+    }
+
+    private func saveDetailedFeedback(_ draft: RAGFeedbackDraft) {
+        feedback = draft.rating == .accurate ? .helpful : .notHelpful
+        _ = appState.submitChatFeedback(
+            message: message,
+            rating: draft.rating,
+            reason: draft.reason.isEmpty ? nil : draft.reason,
+            bestFileID: draft.bestFileID,
+            bestFileReason: draft.bestFileReason.isEmpty ? nil : draft.bestFileReason
+        )
     }
 }
 
@@ -1700,6 +1758,7 @@ private struct MessageActionBar: View {
     let retry: () -> Void
     let edit: () -> Void
     let showsLastUserActions: Bool
+    let openDetailedFeedback: () -> Void
     let startFileChat: (() -> Void)?
 
     @State private var isCopied = false
@@ -1732,6 +1791,12 @@ private struct MessageActionBar: View {
             }
 
             if !isUser {
+                actionButton(
+                    "checkmark.bubble",
+                    help: "Evaluate this result and mark the most accurate file",
+                    action: openDetailedFeedback
+                )
+
                 if let startFileChat {
                     actionButton("doc.text.magnifyingglass", help: "Chat with cited file", action: startFileChat)
                 }
@@ -1789,17 +1854,22 @@ private struct FileCitationGroup: View {
     let matches: [ChatRelatedFileMatch]
     let preview: (FileRecord) -> Void
     let startDocumentChat: (FileRecord) -> Void
+    let markMostAccurate: (FileRecord, Int, Double?) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             FileCitationTableHeader(showsCategory: appState.previewedFile == nil)
             ForEach(Array(files.enumerated()), id: \.element) { index, file in
+                let matchConfidence = confidence(for: file)
                 FileCitationRow(
                     file: file,
                     isTopMatch: index == 0,
-                    confidence: confidence(for: file),
+                    confidence: matchConfidence,
                     preview: { preview(file) },
-                    startDocumentChat: { startDocumentChat(file) }
+                    startDocumentChat: { startDocumentChat(file) },
+                    markMostAccurate: {
+                        markMostAccurate(file, index + 1, matchConfidence)
+                    }
                 )
                 if index < files.count - 1 {
                     Divider().padding(.leading, LibraryTableLayout.nameColumnLeading)
@@ -1847,6 +1917,7 @@ private struct FileCitationRow: View {
     let confidence: Double?
     let preview: () -> Void
     let startDocumentChat: () -> Void
+    let markMostAccurate: () -> Void
 
     private var isSelected: Bool {
         guard let previewedFile = appState.previewedFile else { return false }
@@ -1945,6 +2016,12 @@ private struct FileCitationRow: View {
                     action: startDocumentChat
                 )
             }
+            LibraryActionButton(
+                systemName: "checkmark.seal",
+                tint: FileNestTheme.accent,
+                title: "Mark as Most Accurate",
+                action: markMostAccurate
+            )
             LibraryActionButton(
                 systemName: "folder",
                 tint: FileNestTheme.accent,

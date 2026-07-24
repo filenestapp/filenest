@@ -814,11 +814,14 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    func makeLocalLLMProvider(modelOverride: String? = nil) -> LLMProvider {
+    func makeLocalLLMProvider(
+        modelOverride: String? = nil,
+        thinkingEnabled: Bool? = nil
+    ) -> LLMProvider {
         OllamaLLMProvider(
             host: ollamaHost,
             model: modelOverride ?? ollamaModel,
-            thinkingEnabled: thinkingMode
+            thinkingEnabled: thinkingEnabled ?? thinkingMode
         )
     }
 
@@ -831,14 +834,16 @@ final class AppSettings: ObservableObject {
                 baseURL: rerankerBaseURL,
                 apiKey: rerankerAPIKey,
                 model: rerankerModel,
-                name: "local-reranker"
+                name: "local-reranker",
+                requestTimeout: 8
             )
         case .cloud:
             return CompatibleRerankingProvider(
                 baseURL: rerankerReuseChatCredentials ? effectiveCloudBaseURL : rerankerBaseURL,
                 apiKey: rerankerReuseChatCredentials ? cloudAPIKey : rerankerAPIKey,
                 model: rerankerModel,
-                name: "cloud-reranker"
+                name: "cloud-reranker",
+                requestTimeout: 15
             )
         }
     }
@@ -918,7 +923,7 @@ final class AppSettings: ObservableObject {
     var contentProcessingSignature: String {
         let categorySignatures = indexContentCategorySignatures
         return Self.signatureDigest(
-            ["content-processing-v2"] + IndexContentChangeCategory.allCases.flatMap {
+            ["content-processing-v3"] + IndexContentChangeCategory.allCases.flatMap {
                 [$0.rawValue, categorySignatures[$0] ?? ""]
             }
         )
@@ -971,7 +976,7 @@ final class AppSettings: ObservableObject {
                 String(vectorRetrievalChunkTokens), String(vectorChunkOverlap),
             ]),
             .documentParsing: Self.signatureDigest([
-                "document-parsing-v3", doclingConfiguration,
+                "document-parsing-v4-text-layer-quality-gate", doclingConfiguration,
             ]),
             .ocr: Self.signatureDigest([
                 // v3: large and panoramic raster images use lossless overlapping tiles with

@@ -106,11 +106,18 @@ private actor IndexTaskCoordinator {
 private actor IndexBatchProgressReporter {
     private let total: Int
     private let progress: (@MainActor (VectorIndexRebuildProgress) -> Void)?
-    private var completed = 0
-    private var failed = 0
+    private var completed: Int
+    private var failed: Int
 
-    init(total: Int, progress: (@MainActor (VectorIndexRebuildProgress) -> Void)?) {
+    init(
+        total: Int,
+        initialCompleted: Int = 0,
+        initialFailed: Int = 0,
+        progress: (@MainActor (VectorIndexRebuildProgress) -> Void)?
+    ) {
         self.total = total
+        completed = initialCompleted
+        failed = initialFailed
         self.progress = progress
     }
 
@@ -491,6 +498,24 @@ final class IndexerService {
 
     func cancelAll() async {
         await taskCoordinator.cancelAll()
+    }
+
+    /// Releases persistent provider subprocesses after indexing tasks have been
+    /// cancelled. Clearing the cache prevents a shutting-down provider from being
+    /// reused if another request races with application termination.
+    func shutdownManagedProviders() async {
+        let provider = detachManagedOCRProvider()
+        if let provider = provider as? ManagedOCRProviderLifecycle {
+            await provider.shutdown()
+        }
+    }
+
+    private func detachManagedOCRProvider() -> OCRProvider? {
+        ocrProviderLock.lock()
+        defer { ocrProviderLock.unlock() }
+        let provider = providedOCRProvider ?? cachedOCRProvider?.provider
+        cachedOCRProvider = nil
+        return provider
     }
 
     func cancel(fileID: Int64) async {
@@ -1508,7 +1533,12 @@ final class IndexerService {
         includeUnindexedFiles: Bool = false,
         onlyMediaFiles: Bool = false,
         fileCategories: Set<FileCategory> = [],
+        fileIDs: Set<Int64>? = nil,
+        totalOverride: Int? = nil,
+        initialCompleted: Int = 0,
+        resumeShadow: Bool = false,
         checkpoint: (@Sendable () async -> Bool)? = nil,
+        fileCompletion: (@Sendable (Int64, Bool) async -> Void)? = nil,
         progress: (@MainActor (VectorIndexRebuildProgress) -> Void)? = nil
     ) async -> Bool {
         // Duplicate copies intentionally reuse their retained original's index.
@@ -1520,20 +1550,26 @@ final class IndexerService {
         let scopedFiles = allFiles.filter { file in
             (!onlyMediaFiles || AppSettings.mediaTranscriptionExtensions.contains(file.ext.lowercased()))
                 && (fileCategories.isEmpty || fileCategories.contains(file.categoryEnum))
+                && (fileIDs == nil || file.id.map { fileIDs?.contains($0) == true } == true)
         }
         let files = onlyUnindexedFiles
             ? scopedFiles.filter { $0.indexedAt == nil }
             : scopedFiles
-        let total = rebuildVectorSpace && !forceReprocessing
+        let calculatedTotal = rebuildVectorSpace && !forceReprocessing
             ? scopedFiles.filter { $0.indexedAt != nil }.count
                 + (includeUnindexedFiles ? scopedFiles.filter { $0.indexedAt == nil }.count : 0)
             : files.count
+        let total = totalOverride ?? (initialCompleted + calculatedTotal)
         await progress?(VectorIndexRebuildProgress(
-            phase: .preparing, completed: 0, total: total, currentFileName: nil, failed: 0
+            phase: .preparing, completed: initialCompleted, total: total, currentFileName: nil, failed: 0
         ))
         guard await canContinue(checkpoint) else {
             await progress?(VectorIndexRebuildProgress(
-                phase: .stopped, completed: 0, total: total, currentFileName: nil, failed: 0
+                phase: .stopped,
+                completed: initialCompleted,
+                total: total,
+                currentFileName: nil,
+                failed: 0
             ))
             return false
         }
@@ -1541,14 +1577,22 @@ final class IndexerService {
             return await rebuildEmbeddingsOnly(
                 files: files.filter { $0.indexedAt != nil },
                 newFiles: includeUnindexedFiles ? scopedFiles.filter { $0.indexedAt == nil } : [],
+                totalOverride: total,
+                initialCompleted: initialCompleted,
+                resumeShadow: resumeShadow,
                 checkpoint: checkpoint,
+                fileCompletion: fileCompletion,
                 progress: progress
             )
         }
         if rebuildVectorSpace && forceReprocessing {
             return await rebuildSourcesUsingShadowIndex(
                 files: files,
+                totalOverride: total,
+                initialCompleted: initialCompleted,
+                resumeShadow: resumeShadow,
                 checkpoint: checkpoint,
+                fileCompletion: fileCompletion,
                 progress: progress
             )
         }
@@ -1557,7 +1601,10 @@ final class IndexerService {
         let result = await indexFiles(
             files,
             force: rebuildVectorSpace || forceReprocessing,
+            totalOverride: total,
+            initialCompleted: initialCompleted,
             checkpoint: checkpoint,
+            fileCompletion: fileCompletion,
             progress: progress
         )
         if result.stopped {
@@ -1584,31 +1631,42 @@ final class IndexerService {
     /// The active RAG index remains queryable until the final atomic commit.
     private func rebuildSourcesUsingShadowIndex(
         files: [FileRecord],
+        totalOverride: Int,
+        initialCompleted: Int,
+        resumeShadow: Bool,
         checkpoint: (@Sendable () async -> Bool)?,
+        fileCompletion: (@Sendable (Int64, Bool) async -> Void)?,
         progress: (@MainActor (VectorIndexRebuildProgress) -> Void)?
     ) async -> Bool {
-        let total = files.count
-        guard await vectorStore.beginShadowRebuild() else {
+        guard await vectorStore.beginShadowRebuild(resumeIfAvailable: resumeShadow) else {
             await progress?(VectorIndexRebuildProgress(
-                phase: .failed, completed: 0, total: total,
-                currentFileName: nil, failed: total, stage: .saving
+                phase: .failed, completed: initialCompleted, total: totalOverride,
+                currentFileName: nil, failed: files.count, stage: .saving
             ))
             return false
         }
+        let stagedFileIDs = await vectorStore.shadowStagedFileIDs()
+        let pendingFiles = files.filter { file in
+            guard let fileID = file.id else { return false }
+            return !stagedFileIDs.contains(fileID)
+        }
+        let completedBeforeRun = max(initialCompleted, stagedFileIDs.count)
+        let expectedFileCount = stagedFileIDs.count + pendingFiles.count
 
         let result = await indexFiles(
-            files,
+            pendingFiles,
             force: true,
             writeTarget: .shadow,
+            totalOverride: totalOverride,
+            initialCompleted: completedBeforeRun,
             checkpoint: checkpoint,
+            fileCompletion: fileCompletion,
             progress: progress
         )
         guard !result.stopped, result.failed == 0, await canContinue(checkpoint) else {
-            await vectorStore.discardShadowRebuild()
             await progress?(VectorIndexRebuildProgress(
                 phase: result.stopped || Task.isCancelled ? .stopped : .failed,
-                completed: result.completed,
-                total: total,
+                completed: result.completed, total: totalOverride,
                 currentFileName: nil,
                 failed: result.failed
             ))
@@ -1618,28 +1676,27 @@ final class IndexerService {
         await progress?(VectorIndexRebuildProgress(
             phase: .clearing,
             completed: result.completed,
-            total: total,
+            total: totalOverride,
             currentFileName: nil,
             failed: 0,
             stage: .saving
         ))
-        let committed = await vectorStore.commitShadowRebuild(expectedFileCount: total)
+        let committed = await vectorStore.commitShadowRebuild(expectedFileCount: expectedFileCount)
         guard committed else {
-            await vectorStore.discardShadowRebuild()
             await progress?(VectorIndexRebuildProgress(
                 phase: .failed,
                 completed: result.completed,
-                total: total,
+                total: totalOverride,
                 currentFileName: nil,
-                failed: total,
+                failed: pendingFiles.count,
                 stage: .saving
             ))
             return false
         }
         await progress?(VectorIndexRebuildProgress(
             phase: .completed,
-            completed: total,
-            total: total,
+            completed: totalOverride,
+            total: totalOverride,
             currentFileName: nil,
             failed: 0,
             stage: .saving
@@ -1651,29 +1708,49 @@ final class IndexerService {
     private func rebuildEmbeddingsOnly(
         files: [FileRecord],
         newFiles: [FileRecord] = [],
+        totalOverride: Int,
+        initialCompleted: Int,
+        resumeShadow: Bool,
         checkpoint: (@Sendable () async -> Bool)?,
+        fileCompletion: (@Sendable (Int64, Bool) async -> Void)?,
         progress: (@MainActor (VectorIndexRebuildProgress) -> Void)?
     ) async -> Bool {
-        let total = files.count + newFiles.count
         let storedChunks: [Int64: [StructuredDocumentChunk]]
         do {
             storedChunks = try store.allStoredDocumentChunks()
         } catch {
             await progress?(VectorIndexRebuildProgress(
-                phase: .failed, completed: 0, total: total,
-                currentFileName: nil, failed: total
+                phase: .failed, completed: initialCompleted, total: totalOverride,
+                currentFileName: nil, failed: files.count + newFiles.count
             ))
             return false
         }
 
         let embedder = activeEmbedder()
-        var rebuilt = [Int64: [EmbeddingChunk]]()
-        var completed = 0
+        var completed = initialCompleted
         var failed = 0
-        for file in files {
+        var stagedFileIDs = resumeShadow ? await vectorStore.shadowStagedFileIDs() : []
+        if !files.isEmpty || !stagedFileIDs.isEmpty {
+            guard await vectorStore.beginShadowRebuild(resumeIfAvailable: resumeShadow) else {
+                await progress?(VectorIndexRebuildProgress(
+                    phase: .failed, completed: completed, total: totalOverride,
+                    currentFileName: nil, failed: files.count
+                ))
+                return false
+            }
+            stagedFileIDs = await vectorStore.shadowStagedFileIDs()
+        }
+        completed = max(completed, stagedFileIDs.count)
+        let pendingFiles = files.filter { file in
+            guard let fileID = file.id else { return false }
+            return !stagedFileIDs.contains(fileID)
+        }
+        let expectedStagedFileCount = stagedFileIDs.count + pendingFiles.count
+
+        for file in pendingFiles {
             guard await canContinue(checkpoint) else {
                 await progress?(VectorIndexRebuildProgress(
-                    phase: .stopped, completed: completed, total: total,
+                    phase: .stopped, completed: completed, total: totalOverride,
                     currentFileName: file.name, failed: failed
                 ))
                 return false
@@ -1681,68 +1758,82 @@ final class IndexerService {
             guard let fileID = file.id else { continue }
             let chunks = storedChunks[fileID] ?? []
             await progress?(VectorIndexRebuildProgress(
-                phase: .indexing, completed: completed, total: total,
+                phase: .indexing, completed: completed, total: totalOverride,
                 currentFileName: file.name, failed: failed,
                 stage: chunks.isEmpty ? .saving : .embedding(completed: 0, total: chunks.count)
             ))
-            if !chunks.isEmpty {
+            let embeddings: [EmbeddingChunk]
+            if chunks.isEmpty {
+                embeddings = []
+            } else {
                 let completedBeforeFile = completed
                 let failedBeforeFile = failed
-                let currentFileName = file.name
-                let totalFiles = total
-                let embeddings = await embed(
+                let fileName = file.name
+                embeddings = await embed(
                     chunks: chunks,
                     using: embedder,
                     checkpoint: checkpoint,
                     stageProgress: { stage in
                         await progress?(VectorIndexRebuildProgress(
-                            phase: .indexing, completed: completedBeforeFile, total: totalFiles,
-                            currentFileName: currentFileName, failed: failedBeforeFile, stage: stage
+                            phase: .indexing, completed: completedBeforeFile, total: totalOverride,
+                            currentFileName: fileName, failed: failedBeforeFile, stage: stage
                         ))
                     }
                 )
-                if embeddings.isEmpty {
-                    failed += 1
-                } else {
-                    rebuilt[fileID] = embeddings
-                }
             }
+            let generatedEmbeddings = chunks.isEmpty || !embeddings.isEmpty
+            let staged = generatedEmbeddings
+                ? await vectorStore.stageShadowEmbeddings(
+                    fileID: fileID,
+                    chunks: embeddings,
+                    model: embedder.name
+                )
+                : false
+            let succeeded = generatedEmbeddings && staged
+            await fileCompletion?(fileID, succeeded)
+            if !succeeded { failed += 1 }
             completed += 1
             await progress?(VectorIndexRebuildProgress(
-                phase: .indexing, completed: completed, total: total,
+                phase: .indexing, completed: completed, total: totalOverride,
                 currentFileName: file.name, failed: failed
             ))
         }
 
         guard failed == 0 else {
             await progress?(VectorIndexRebuildProgress(
-                phase: .failed, completed: completed, total: total,
+                phase: .failed, completed: completed, total: totalOverride,
                 currentFileName: nil, failed: failed
             ))
             return false
         }
-        await progress?(VectorIndexRebuildProgress(
-            phase: .clearing, completed: completed, total: total,
-            currentFileName: nil, failed: 0, stage: .saving
-        ))
-        guard await vectorStore.replaceAllEmbeddingsPreservingChunks(rebuilt, model: embedder.name) else {
+        if expectedStagedFileCount > 0 {
             await progress?(VectorIndexRebuildProgress(
-                phase: .failed, completed: completed, total: total,
-                currentFileName: nil, failed: total
+                phase: .clearing, completed: completed, total: totalOverride,
+                currentFileName: nil, failed: 0, stage: .saving
             ))
-            return false
+            guard await vectorStore.commitShadowEmbeddingRebuild(
+                expectedFileCount: expectedStagedFileCount
+            ) else {
+                await progress?(VectorIndexRebuildProgress(
+                    phase: .failed, completed: completed, total: totalOverride,
+                    currentFileName: nil, failed: pendingFiles.count
+                ))
+                return false
+            }
+            try? store.migrateIndexedFileSignatures(to: settings.embeddingSpaceSignature)
         }
-        try? store.migrateIndexedFileSignatures(to: settings.embeddingSpaceSignature)
         if !newFiles.isEmpty {
-            let completedEmbeddingFiles = completed
             let newResult = await indexFiles(
                 newFiles,
+                totalOverride: totalOverride,
+                initialCompleted: completed,
                 checkpoint: checkpoint,
+                fileCompletion: fileCompletion,
                 progress: { childProgress in
                     progress?(VectorIndexRebuildProgress(
                         phase: childProgress.phase,
-                        completed: completedEmbeddingFiles + childProgress.completed,
-                        total: total,
+                        completed: childProgress.completed,
+                        total: totalOverride,
                         currentFileName: childProgress.currentFileName,
                         failed: childProgress.failed,
                         stage: childProgress.stage
@@ -1752,17 +1843,17 @@ final class IndexerService {
             if newResult.stopped || newResult.failed > 0 {
                 await progress?(VectorIndexRebuildProgress(
                     phase: newResult.stopped ? .stopped : .failed,
-                    completed: completedEmbeddingFiles + newResult.completed,
-                    total: total,
+                    completed: newResult.completed,
+                    total: totalOverride,
                     currentFileName: nil,
                     failed: newResult.failed
                 ))
                 return false
             }
-            completed += newResult.completed
+            completed = newResult.completed
         }
         await progress?(VectorIndexRebuildProgress(
-            phase: .completed, completed: completed, total: total,
+            phase: .completed, completed: totalOverride, total: totalOverride,
             currentFileName: nil, failed: 0
         ))
         return true
@@ -1773,20 +1864,27 @@ final class IndexerService {
         _ files: [FileRecord],
         force: Bool = false,
         writeTarget: IndexWriteTarget = .active,
+        totalOverride: Int? = nil,
+        initialCompleted: Int = 0,
         checkpoint: (@Sendable () async -> Bool)? = nil,
+        fileCompletion: (@Sendable (Int64, Bool) async -> Void)? = nil,
         progress: (@MainActor (VectorIndexRebuildProgress) -> Void)? = nil
     ) async -> IndexBatchResult {
         let candidates = files.filter { $0.id != nil }
-        let reporter = IndexBatchProgressReporter(total: candidates.count, progress: progress)
+        let reporter = IndexBatchProgressReporter(
+            total: totalOverride ?? (initialCompleted + candidates.count),
+            initialCompleted: initialCompleted,
+            progress: progress
+        )
         var nextIndex = 0
         var stopped = false
 
-        await withTaskGroup(of: (name: String, succeeded: Bool, stopped: Bool).self) { group in
+        await withTaskGroup(of: (id: Int64?, name: String, succeeded: Bool, stopped: Bool).self) { group in
             func enqueue(_ file: FileRecord) {
                 group.addTask { [weak self] in
                     guard let self, let id = file.id,
                           await self.canContinue(checkpoint) else {
-                        return (file.name, false, true)
+                        return (file.id, file.name, false, true)
                     }
                     await reporter.report(fileName: file.name, stage: .hashing)
                     let succeeded = await self.indexFile(
@@ -1800,7 +1898,7 @@ final class IndexerService {
                     )
                     let remainsRunnable = await self.canContinue(checkpoint)
                     let didStop = Task.isCancelled || !remainsRunnable
-                    return (file.name, succeeded, didStop)
+                    return (id, file.name, succeeded, didStop)
                 }
             }
 
@@ -1816,6 +1914,9 @@ final class IndexerService {
                     group.cancelAll()
                     await cancelAll()
                 } else {
+                    if let fileID = outcome.id {
+                        await fileCompletion?(fileID, outcome.succeeded)
+                    }
                     await reporter.finishFile(named: outcome.name, succeeded: outcome.succeeded)
                     if nextIndex < candidates.count {
                         enqueue(candidates[nextIndex])

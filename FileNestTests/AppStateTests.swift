@@ -2,6 +2,24 @@ import XCTest
 import Combine
 @testable import FileNest
 
+private final class ThreadObservationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var observedOffMainThread = false
+
+    func recordCurrentThread() {
+        guard !Thread.isMainThread else { return }
+        lock.lock()
+        observedOffMainThread = true
+        lock.unlock()
+    }
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return observedOffMainThread
+    }
+}
+
 final class AppStateTests: XCTestCase {
     private struct ImmediateEmbeddingProvider: EmbeddingProvider {
         let name = "immediate-test-embedding"
@@ -10,6 +28,31 @@ final class AppStateTests: XCTestCase {
         func embed(_ text: String) async throws -> [Float] {
             [1, 0]
         }
+    }
+
+    func testSingleFileFeedbackDefaultsToAccurateForStrongTopTenResult() {
+        XCTAssertEqual(
+            RAGFeedbackPolicy.defaultRating(selectedFileRank: 10, confidence: 0.70),
+            .accurate
+        )
+    }
+
+    func testSingleFileFeedbackDefaultsToInaccurateBelowTopTen() {
+        XCTAssertEqual(
+            RAGFeedbackPolicy.defaultRating(selectedFileRank: 11, confidence: 0.95),
+            .inaccurate
+        )
+    }
+
+    func testSingleFileFeedbackDefaultsToInaccurateBelowConfidenceThreshold() {
+        XCTAssertEqual(
+            RAGFeedbackPolicy.defaultRating(selectedFileRank: 1, confidence: 0.699),
+            .inaccurate
+        )
+        XCTAssertEqual(
+            RAGFeedbackPolicy.defaultRating(selectedFileRank: nil, confidence: nil),
+            .inaccurate
+        )
     }
 
     @MainActor
@@ -745,6 +788,84 @@ final class AppStateTests: XCTestCase {
         )
 
         XCTAssertEqual(Set(results.map(\.name)), ["range-start.pdf", "range-end.pdf"])
+    }
+
+    @MainActor
+    func testLibrarySearchContinuesAfterLibraryViewBecomesHidden() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        let previousIndexer = AppStateIndexerProxy.shared.indexer
+        defer { AppStateIndexerProxy.shared.indexer = previousIndexer }
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: temporaryDirectory.appendingPathComponent("organized"),
+            startAutomatically: false
+        )
+        state.saveLibrarySearch(
+            query: "cached invoice",
+            results: [],
+            recordHistory: false
+        )
+
+        state.setLibrarySearchViewVisible(true)
+        state.startLibrarySearch(
+            matching: "cached invoice",
+            mode: .standard,
+            recordHistory: false,
+            debounceNanoseconds: 120_000_000
+        )
+        let searchID = try XCTUnwrap(state.librarySearchActivity?.id)
+        XCTAssertTrue(state.librarySearchActivity?.isActive == true)
+
+        state.setLibrarySearchViewVisible(false)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(state.librarySearchActivity?.id, searchID)
+        XCTAssertFalse(state.librarySearchActivity?.isActive == true)
+        XCTAssertFalse(state.librarySearchActivity?.wasCancelled == true)
+        XCTAssertEqual(state.librarySearchActivity?.results, [])
+        XCTAssertTrue(state.hasUnreadCompletedLibrarySearch)
+    }
+
+    @MainActor
+    func testLibrarySearchPublishesStateOnlyFromMainThread() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        settings.llmChoice = AppSettings.LLMChoice.none.rawValue
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: temporaryDirectory.appendingPathComponent("organized"),
+            startAutomatically: false
+        )
+        let observation = ThreadObservationFlag()
+        let cancellable = state.$librarySearchActivity
+            .dropFirst()
+            .sink { _ in observation.recordCurrentThread() }
+        defer { cancellable.cancel() }
+
+        state.startLibrarySearch(
+            matching: "invoice",
+            mode: .smart,
+            recordHistory: false
+        )
+        for _ in 0..<100 where state.librarySearchActivity?.isActive == true {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertFalse(state.librarySearchActivity?.isActive == true)
+        XCTAssertFalse(observation.value)
     }
 
     private func makeLibraryRecord(

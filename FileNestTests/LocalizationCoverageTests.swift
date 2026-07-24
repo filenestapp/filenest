@@ -14,6 +14,7 @@ final class LocalizationCoverageTests: XCTestCase {
             "FileNest/UI/FilePreviewView.swift",
             "FileNest/UI/OnboardingView.swift",
             "FileNest/UI/QuickSearchPanel.swift",
+            "FileNest/UI/RAGFeedbackView.swift",
             "FileNest/UI/RulesView.swift",
             "FileNest/UI/SettingsView.swift",
             "FileNest/UI/StatisticsView.swift",
@@ -67,7 +68,10 @@ final class LocalizationCoverageTests: XCTestCase {
                 ),
                 encoding: .utf8
             )
-            let keys = captures(pattern: #"(?m)^\"((?:\\.|[^\"\\])*)\"\s*="#, in: source)
+            let keys = captureList(
+                pattern: #"(?m)^\"((?:\\.|[^\"\\])*)\"\s*="#,
+                in: source
+            )
             let duplicates = Dictionary(grouping: keys, by: { $0 })
                 .filter { $0.value.count > 1 }
                 .map(\.key)
@@ -275,6 +279,9 @@ final class LocalizationCoverageTests: XCTestCase {
             "%@ finished indexing and processing.",
             "%d files finished indexing and processing.",
             "FileNest could not process %@. Open FileNest for details.",
+            "Search Complete",
+            "Search found %d related files.",
+            "Smart Search found %d related files.",
         ]
 
         for localizationFolder in ["en.lproj", "zh-Hans.lproj"] {
@@ -289,6 +296,116 @@ final class LocalizationCoverageTests: XCTestCase {
                     + "\(expectedKeys.subtracting(localizedKeys).sorted())"
             )
         }
+    }
+
+    func testUserFacingLocalizationLiteralsExistInEveryLocalizationResource() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceRoot = repositoryRoot.appendingPathComponent("FileNest")
+        let intentionallyVerbatim: Set<String> = [
+            "",
+            ": ",
+            "·",
+            "FileNest",
+            "/Users/name/Folder",
+            "612000",
+            "Qwen/Qwen3-Reranker-0.6B",
+            "Qwen3-Reranker-0.6B",
+            "glm-ocr",
+            "http://127.0.0.1:11435/v1",
+            "https://api.example.com/v1",
+            "https://api.openai.com/v1",
+            "https://example.com/appcast.xml",
+            "pdf, docx, txt, md, png, jpg",
+            "qwen3-embedding:0.6b",
+            "sk-…",
+        ]
+        let patterns = [
+            #"\b(?:Text|Button|Label|Section|Picker|Toggle|GroupBox|TextField|SecureField|ProgressView|navigationTitle|alert|confirmationDialog)\(\s*"((?:\\.|[^"\\])*)""#,
+            #"\.(?:help|accessibilityLabel|accessibilityHint)\(\s*"((?:\\.|[^"\\])*)""#,
+            #"\b(?:localized|localizedFormat)\(\s*"((?:\\.|[^"\\])*)""#,
+            #"LocalizedStringKey\(\s*"((?:\\.|[^"\\])*)""#,
+        ]
+
+        var requiredKeys = Set<String>()
+        let enumerator = FileManager.default.enumerator(
+            at: sourceRoot,
+            includingPropertiesForKeys: nil
+        )
+        while let url = enumerator?.nextObject() as? URL {
+            guard url.pathExtension == "swift" else { continue }
+            let source = try String(contentsOf: url, encoding: .utf8)
+            for pattern in patterns {
+                requiredKeys.formUnion(captures(pattern: pattern, in: source))
+            }
+        }
+        requiredKeys = requiredKeys.filter {
+            !$0.contains(#"\("#) && !intentionallyVerbatim.contains($0)
+        }
+
+        for localizationFolder in ["en.lproj", "zh-Hans.lproj"] {
+            let source = try String(
+                contentsOf: repositoryRoot.appendingPathComponent(
+                    "FileNest/\(localizationFolder)/Localizable.strings"
+                ),
+                encoding: .utf8
+            )
+            let localizedKeys = stringKeys(in: source)
+            XCTAssertTrue(
+                requiredKeys.isSubset(of: localizedKeys),
+                "Missing user-facing localization keys in \(localizationFolder): "
+                    + "\(requiredKeys.subtracting(localizedKeys).sorted())"
+            )
+        }
+    }
+
+    func testSimplifiedChineseDoesNotSilentlyFallBackToEnglish() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let english = try localizationEntries(
+            at: repositoryRoot.appendingPathComponent("FileNest/en.lproj/Localizable.strings")
+        )
+        let simplifiedChinese = try localizationEntries(
+            at: repositoryRoot.appendingPathComponent("FileNest/zh-Hans.lproj/Localizable.strings")
+        )
+        let intentionallyLanguageNeutral: Set<String> = [
+            "Ollama · %@",
+            "Apple NLEmbedding",
+            "FFmpeg",
+            "OpenAI Whisper",
+        ]
+        let untranslated = english.compactMap { key, value -> String? in
+            guard value.range(of: #"[A-Za-z]{3}"#, options: .regularExpression) != nil,
+                  simplifiedChinese[key] == value,
+                  !intentionallyLanguageNeutral.contains(key) else {
+                return nil
+            }
+            return key
+        }.sorted()
+
+        XCTAssertTrue(
+            untranslated.isEmpty,
+            "Simplified Chinese values still fall back to English: \(untranslated)"
+        )
+    }
+
+    private func localizationEntries(at url: URL) throws -> [String: String] {
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let regex = try NSRegularExpression(
+            pattern: #"(?m)^"((?:\\.|[^"\\])*)"\s*=\s*"((?:\\.|[^"\\])*)";"#
+        )
+        let range = NSRange(source.startIndex..., in: source)
+        var entries = [String: String]()
+        for match in regex.matches(in: source, range: range) {
+            guard let keyRange = Range(match.range(at: 1), in: source),
+                  let valueRange = Range(match.range(at: 2), in: source) else {
+                continue
+            }
+            entries[String(source[keyRange])] = String(source[valueRange])
+        }
+        return entries
     }
 
     private func stringKeys(in source: String) -> Set<String> {
@@ -306,11 +423,15 @@ final class LocalizationCoverageTests: XCTestCase {
     }
 
     private func captures(pattern: String, in source: String) -> Set<String> {
+        Set(captureList(pattern: pattern, in: source))
+    }
+
+    private func captureList(pattern: String, in source: String) -> [String] {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let range = NSRange(source.startIndex..., in: source)
-        return Set(regex.matches(in: source, range: range).compactMap { match in
+        return regex.matches(in: source, range: range).compactMap { match in
             guard let range = Range(match.range(at: 1), in: source) else { return nil }
             return String(source[range])
-        })
+        }
     }
 }

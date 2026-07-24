@@ -97,4 +97,29 @@ final class DoclingDocumentProcessorTests: XCTestCase {
         XCTAssertEqual(OCRDocumentProcessor.classify(pages(text: 5, scanned: 5))?.mode, .mixed)
         XCTAssertNil(OCRDocumentProcessor.classify([]))
     }
+
+    func testCorruptedEmbeddedTextIsRemovedWhenOCRHasRecoveredReadableContent() {
+        let corrupted = StructuredDocumentChunk(
+            text: "!%&!#$%&!#%&!#$%&!#%&!#$%&!#%&!#$%&!#%&!#$%&!#%&!#$%&!#"
+        )
+        let recovered = StructuredDocumentChunk(
+            text: "RE-ENTRY PERMIT. This permit allows the holder to re-enter Singapore during its validity and must be presented to an Immigration Officer on arrival and departure."
+        )
+
+        let result = DoclingDocumentProcessor.removingCorruptedTextLayerChunks(
+            from: [corrupted, recovered]
+        )
+
+        XCTAssertEqual(result, [recovered])
+    }
+
+    func testPotentiallySymbolHeavyTextIsRetainedWithoutReadableRecovery() {
+        let source = StructuredDocumentChunk(
+            text: "!%&!#$%&!#%&!#$%&!#%&!#$%&!#%&!#$%&!#%&!#$%&!#%&!#$%&!#"
+        )
+
+        let result = DoclingDocumentProcessor.removingCorruptedTextLayerChunks(from: [source])
+
+        XCTAssertEqual(result, [source])
+    }
 }

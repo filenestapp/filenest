@@ -22,6 +22,25 @@ struct LibraryDateRange: Equatable {
     var end: Date
 }
 
+private enum LibraryFeedbackPresentation: Identifiable {
+    case resultSet
+    case singleFile(RAGSingleFileFeedbackContext)
+
+    var id: String {
+        switch self {
+        case .resultSet:
+            return "result-set"
+        case let .singleFile(context):
+            return "single-file:\(context.file.id ?? 0):\(context.file.path)"
+        }
+    }
+
+    var singleFileContext: RAGSingleFileFeedbackContext? {
+        guard case let .singleFile(context) = self else { return nil }
+        return context
+    }
+}
+
 struct LibraryFileQuery {
     static func sorted(
         _ files: [FileRecord],
@@ -102,15 +121,7 @@ struct LibraryView: View {
     let startDocumentChat: (FileRecord) -> Void
     @State private var searchText = FileNestEnvironment.isSearchPreview ? "renewal term" : ""
     @State private var selectedCategories = Set<FileCategory>()
-    @State private var searchResults: [LibrarySearchResult]?
-    @State private var isSearching = false
-    @State private var searchTask: Task<Void, Never>?
-    @State private var semanticSearchTask: Task<Void, Never>?
-    @State private var activeSearchQuery = ""
-    @State private var smartSearchEnabled = false
-    @State private var smartSearchPlan: SmartLibrarySearchPlan?
-    @State private var smartSearchUsedAI = false
-    @State private var smartSearchIntent = ""
+    @AppStorage("librarySearchUsesAI") private var searchUsesAI = false
     @State private var sortField: LibrarySortField = .modified
     @State private var sortDirection: LibrarySortDirection = .descending
     @State private var dateField: LibraryDateField = .modified
@@ -123,6 +134,47 @@ struct LibraryView: View {
     @State private var derivedFiles: [FileRecord] = []
     @State private var derivedSearchMatchesByPath: [String: LibrarySearchResult] = [:]
     @State private var dismissedAutomaticProcessingItemIDs = Set<Int64>()
+    @State private var feedbackPresentation: LibraryFeedbackPresentation?
+
+    private var searchActivity: LibrarySearchActivity? {
+        appState.librarySearchActivity
+    }
+
+    private var searchResults: [LibrarySearchResult]? {
+        searchActivity?.results
+    }
+
+    private var isSearching: Bool {
+        searchActivity?.isActive == true
+    }
+
+    private var activeSearchQuery: String {
+        searchActivity?.query ?? ""
+    }
+
+    private var smartSearchEnabled: Bool {
+        searchActivity?.mode == .smart
+    }
+
+    private var smartSearchPlan: SmartLibrarySearchPlan? {
+        searchActivity?.smartPlan
+    }
+
+    private var smartSearchUsedAI: Bool {
+        searchActivity?.usedAI == true
+    }
+
+    private var smartSearchIntent: String {
+        searchActivity?.intent ?? ""
+    }
+
+    private var searchStage: LibrarySearchProgressStage? {
+        searchActivity?.stage
+    }
+
+    private var isSearchCancelled: Bool {
+        searchActivity?.wasCancelled == true
+    }
 
     private var activeAutomaticProcessingItemIDs: Set<Int64> {
         Set(appState.activeAutomaticFileProcessingItems.map(\.id))
@@ -234,14 +286,20 @@ struct LibraryView: View {
                         .buttonStyle(QuietButtonStyle())
 
                         Button {
-                            appState.reindexAll()
+                            if appState.hasReindexActivity {
+                                appState.presentSettings(.reindexActivity)
+                            } else {
+                                appState.reindexAll()
+                            }
                         } label: {
                             IndexingButtonLabel(defaultTitle: "Reindex", appState: appState)
                         }
                         .buttonStyle(QuietButtonStyle())
-                        .disabled(appState.reindexButtonsDisabled)
+                        .disabled(appState.reindexButtonsDisabled && !appState.hasReindexActivity)
                     }
                 }
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
             }
 
             if appState.organizationState.isActive {
@@ -268,6 +326,8 @@ struct LibraryView: View {
         }
         .background(FileNestTheme.surface)
         .onAppear {
+            appState.setLibrarySearchViewVisible(true)
+            restoreActiveLibrarySearch()
             rebuildDerivedFiles()
             appState.refreshPersistedCreationDates()
             applyPendingLibrarySearch()
@@ -295,8 +355,9 @@ struct LibraryView: View {
         .onChange(of: selectedCategories) { _ in
             resetPagination()
             rebuildDerivedFiles()
+            guard !isApplyingExternalSearch else { return }
             if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if smartSearchEnabled {
+                if searchUsesAI {
                     startSmartSearch(query: searchText, recordHistory: false)
                 } else {
                     scheduleSearch(searchText)
@@ -323,8 +384,30 @@ struct LibraryView: View {
             applyPendingLibrarySearch()
         }
         .onDisappear {
-            searchTask?.cancel()
-            semanticSearchTask?.cancel()
+            appState.setLibrarySearchViewVisible(false)
+        }
+        .sheet(item: $feedbackPresentation) { presentation in
+            let singleFileContext = presentation.singleFileContext
+            RAGFeedbackEditor(
+                files: searchResults?.map(\.file) ?? [],
+                initialFeedback: currentSearchFeedback,
+                preselectedFileID: singleFileContext?.file.id,
+                singleFileContext: singleFileContext
+            ) { draft in
+                guard let searchResults else { return }
+                _ = appState.submitSearchFeedback(
+                    query: activeSearchQuery,
+                    isSmartSearch: smartSearchEnabled,
+                    results: searchResults,
+                    rating: draft.rating,
+                    reason: draft.reason.isEmpty ? nil : draft.reason,
+                    bestFileID: draft.bestFileID,
+                    bestFileReason: draft.bestFileReason.isEmpty ? nil : draft.bestFileReason
+                )
+            }
+            .environmentObject(appState)
+            .fileNestEnvironment(appState.settings)
+            .id(presentation.id)
         }
     }
 
@@ -334,7 +417,12 @@ struct LibraryView: View {
                 HStack(spacing: 10) {
                     HStack(spacing: 10) {
                         if isSearching {
-                            ProgressView().controlSize(.small)
+                            if smartSearchEnabled {
+                                AIThinkingActivitySymbol(size: 14)
+                            } else {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
                         } else {
                             Image(systemName: "magnifyingglass")
                                 .foregroundStyle(.secondary)
@@ -362,18 +450,25 @@ struct LibraryView: View {
                             .stroke(FileNestTheme.strongBorder, lineWidth: 1)
                     }
 
-                    Button(action: runSearch) {
+                    Toggle(isOn: $searchUsesAI) {
+                        Label("Use AI", systemImage: "sparkles")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .fixedSize()
+                    .help("Use AI to analyze the query before retrieval")
+
+                    Button(action: isSearching ? cancelCurrentSearch : runSearch) {
                         if isSearching {
-                            HStack(spacing: 6) {
-                                ProgressView().controlSize(.small)
-                                Text("Searching…")
-                            }
+                            Label("Stop Search", systemImage: "stop.circle")
                         } else {
                             Text("Search")
                         }
                     }
                     .buttonStyle(QuietButtonStyle())
-                    .disabled(isSearching || searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!isSearching && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help(isSearching ? "Stop Search" : "Search")
 
                     Button {
                         appState.refreshLibrarySearchHistory()
@@ -425,8 +520,36 @@ struct LibraryView: View {
                         Text(LocalizedStringKey(searchRankingDescription))
                             .foregroundStyle(.secondary)
                         Spacer()
+                        if !isSearching, searchStage == nil {
+                            Button {
+                                feedbackPresentation = .resultSet
+                            } label: {
+                                Label(
+                                    currentSearchFeedback == nil ? "Evaluate Results" : "Edit Evaluation",
+                                    systemImage: currentSearchFeedback == nil
+                                        ? "checkmark.bubble"
+                                        : "checkmark.bubble.fill"
+                                )
+                            }
+                            .buttonStyle(InlineActionButtonStyle())
+                            .help("Evaluate result accuracy and mark the most accurate file")
+                        }
                     }
                     .font(.system(size: 10, weight: .medium))
+
+                    if let searchStage {
+                        HStack(spacing: 6) {
+                            if searchStage == .analyzingQuery {
+                                AIThinkingActivitySymbol(size: 12)
+                            } else {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text(LocalizedStringKey(searchStage.localizationKey))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .font(.system(size: 10))
+                    }
 
                     if smartSearchEnabled {
                         if let smartSearchPlan {
@@ -456,12 +579,17 @@ struct LibraryView: View {
 
             if isSearching, searchResults == nil {
                 VStack(spacing: 10) {
-                    ProgressView()
-                    Text(LocalizedStringKey(
+                    if smartSearchEnabled {
+                        AIThinkingActivitySymbol(size: 28)
+                    } else {
+                        ProgressView()
+                            .controlSize(.regular)
+                    }
+                    Text(LocalizedStringKey(searchStage?.localizationKey ?? (
                         smartSearchEnabled
                             ? "AI is analyzing the query and running precise vector retrieval…"
                             : "Searching Keywords and Vector Index…"
-                    ))
+                    )))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     if smartSearchEnabled, !smartSearchIntent.isEmpty {
@@ -472,6 +600,18 @@ struct LibraryView: View {
                             .frame(maxWidth: 520)
                             .textSelection(.enabled)
                     }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if isSearchCancelled, searchResults == nil {
+                VStack(spacing: 10) {
+                    Image(systemName: "stop.circle")
+                        .font(.system(size: 26, weight: .light))
+                        .foregroundStyle(.secondary)
+                    Text("Search Stopped")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("The current search was stopped. Run it again when you are ready.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if filteredFiles.isEmpty {
@@ -488,7 +628,10 @@ struct LibraryView: View {
                             LibraryFileRow(
                                 file: file,
                                 searchMatch: searchMatchesByPath[file.path],
-                                startDocumentChat: startDocumentChat
+                                startDocumentChat: startDocumentChat,
+                                markMostAccurate: searchResults == nil || isSearching || searchStage != nil ? nil : {
+                                    beginSingleFileFeedback(for: file)
+                                }
                             )
                             Divider().padding(.leading, LibraryTableLayout.nameColumnLeading)
                         }
@@ -576,6 +719,21 @@ struct LibraryView: View {
             : "Time Intent + File Keywords + Vector Semantic Ranking"
     }
 
+    private var currentSearchFeedback: RAGFeedbackRecord? {
+        let sourceKind = smartSearchEnabled
+            ? RAGFeedbackSourceKind.smartSearch.rawValue
+            : RAGFeedbackSourceKind.search.rawValue
+        let normalizedQuery = activeSearchQuery
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return appState.ragFeedbackRecords.first {
+            $0.sourceKind == sourceKind
+                && ($0.searchQuery ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() == normalizedQuery
+        }
+    }
+
     private var smartSearchSuggestion: some View {
         HStack(spacing: 9) {
             Image(systemName: "sparkles")
@@ -612,7 +770,12 @@ struct LibraryView: View {
         if !plan.semanticQuery.isEmpty {
             parts.append(appState.settings.localizedFormat("Semantic: %@", plan.semanticQuery))
         }
-        if !plan.keywords.isEmpty {
+        let weightedKeywords = plan.weightedKeywords.map { keyword in
+            "\(keyword.canonical) \(Int((keyword.normalizedWeight * 100).rounded()))%"
+        }
+        if !weightedKeywords.isEmpty {
+            parts.append(appState.settings.localizedFormat("Keywords: %@", weightedKeywords.joined(separator: ", ")))
+        } else if !plan.keywords.isEmpty {
             parts.append(appState.settings.localizedFormat("Keywords: %@", plan.keywords.joined(separator: ", ")))
         }
         if !plan.categories.isEmpty {
@@ -639,14 +802,22 @@ struct LibraryView: View {
             clearSearch()
             return
         }
-        startSearch(query: query, debounceNanoseconds: 0, recordHistory: true)
+        if searchUsesAI {
+            startSmartSearch(query: query, recordHistory: true)
+        } else {
+            startSearch(query: query, debounceNanoseconds: 0, recordHistory: true)
+        }
     }
 
     private func applyPendingLibrarySearch() {
         guard let request = appState.librarySearchRequest else { return }
         isApplyingExternalSearch = true
         searchText = request.query
-        startSearch(query: request.query, debounceNanoseconds: 0, recordHistory: true)
+        if searchUsesAI {
+            startSmartSearch(query: request.query, recordHistory: true)
+        } else {
+            startSearch(query: request.query, debounceNanoseconds: 0, recordHistory: true)
+        }
         appState.consumeLibrarySearchRequest(request.id)
         DispatchQueue.main.async { isApplyingExternalSearch = false }
     }
@@ -654,6 +825,7 @@ struct LibraryView: View {
     private func runSmartSearch() {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
+        searchUsesAI = true
         startSmartSearch(query: query, recordHistory: true)
     }
 
@@ -671,165 +843,26 @@ struct LibraryView: View {
         debounceNanoseconds: UInt64,
         recordHistory: Bool
     ) {
-        searchTask?.cancel()
-        semanticSearchTask?.cancel()
-        let categories = selectedCategories
-        smartSearchEnabled = false
-        smartSearchPlan = nil
-        smartSearchUsedAI = false
-        smartSearchIntent = ""
-        activeSearchQuery = query
-        isSearching = true
-        searchResults = nil
         sortField = .relevance
         sortDirection = .descending
-        searchTask = Task { @MainActor in
-            if debounceNanoseconds > 0 {
-                do {
-                    try await Task.sleep(nanoseconds: debounceNanoseconds)
-                } catch {
-                    return
-                }
-            }
-            guard !Task.isCancelled else { return }
-            if categories.isEmpty, let cached = appState.cachedLibrarySearch(
-                matching: query,
-                isSmartSearch: false
-            ) {
-                guard activeSearchQuery == query,
-                      searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
-                applyCachedSearch(cached, isSmartSearch: false)
-                if recordHistory {
-                    appState.saveLibrarySearch(
-                        query: query,
-                        results: cached.results,
-                        recordHistory: true
-                    )
-                }
-                return
-            }
-            let results = await appState.managedQuickSearchResults(
-                matching: query,
-                categories: categories
-            )
-            guard !Task.isCancelled,
-                  activeSearchQuery == query,
-                  searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
-            searchResults = results
-            isSearching = false
-            searchTask = nil
-            resetPagination()
-            scheduleSemanticSearch(query: query, categories: categories, recordHistory: recordHistory)
-        }
-    }
-
-    /// Local evidence appears first. Semantic retrieval starts only once typing
-    /// has settled, so stale partial queries never queue local model work.
-    private func scheduleSemanticSearch(
-        query: String,
-        categories: Set<FileCategory>,
-        recordHistory: Bool
-    ) {
-        semanticSearchTask?.cancel()
-        semanticSearchTask = Task { @MainActor in
-            do {
-                try await Task.sleep(nanoseconds: 650_000_000)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled,
-                  activeSearchQuery == query,
-                  searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
-            let results = await appState.managedSearchResults(
-                matching: query,
-                categories: categories
-            )
-            guard !Task.isCancelled,
-                  activeSearchQuery == query,
-                  searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
-            searchResults = results
-            if categories.isEmpty {
-                appState.saveLibrarySearch(
-                    query: query,
-                    results: results,
-                    recordHistory: recordHistory
-                )
-            }
-            semanticSearchTask = nil
-            resetPagination()
-        }
+        appState.startLibrarySearch(
+            matching: query,
+            mode: .standard,
+            categories: selectedCategories,
+            recordHistory: recordHistory,
+            debounceNanoseconds: debounceNanoseconds
+        )
     }
 
     private func startSmartSearch(query: String, recordHistory: Bool) {
-        searchTask?.cancel()
-        semanticSearchTask?.cancel()
-        let categories = selectedCategories
-        smartSearchEnabled = true
-        activeSearchQuery = query
-        isSearching = true
-        searchResults = nil
-        smartSearchPlan = nil
-        smartSearchIntent = ""
         sortField = .relevance
         sortDirection = .descending
-        searchTask = Task { @MainActor in
-            if categories.isEmpty, let cached = appState.cachedLibrarySearch(
-                matching: query,
-                isSmartSearch: true
-            ) {
-                guard activeSearchQuery == query,
-                      searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
-                applyCachedSearch(cached, isSmartSearch: true)
-                if recordHistory {
-                    appState.saveLibrarySearch(
-                        query: query,
-                        results: cached.results,
-                        smartPlan: cached.smartPlan,
-                        usedAI: cached.usedAI,
-                        recordHistory: true
-                    )
-                }
-                return
-            }
-            let response = await appState.managedSmartSearchResults(
-                matching: query,
-                categories: categories,
-                onIntentUpdate: { intent in
-                    guard !Task.isCancelled,
-                          activeSearchQuery == query else { return }
-                    smartSearchIntent = intent
-                }
-            )
-            guard !Task.isCancelled,
-                  activeSearchQuery == query,
-                  searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
-            searchResults = response.results
-            smartSearchPlan = response.plan
-            smartSearchUsedAI = response.usedAI
-            if categories.isEmpty {
-                appState.saveLibrarySearch(
-                    query: query,
-                    results: response.results,
-                    smartPlan: response.plan,
-                    usedAI: response.usedAI,
-                    recordHistory: recordHistory
-                )
-            }
-            isSearching = false
-            searchTask = nil
-            resetPagination()
-        }
-    }
-
-    private func applyCachedSearch(_ cached: CachedLibrarySearch, isSmartSearch: Bool) {
-        searchResults = cached.results
-        smartSearchEnabled = isSmartSearch
-        smartSearchPlan = cached.smartPlan
-        smartSearchUsedAI = cached.usedAI
-        smartSearchIntent = ""
-        isSearching = false
-        searchTask = nil
-        resetPagination()
+        appState.startLibrarySearch(
+            matching: query,
+            mode: .smart,
+            categories: selectedCategories,
+            recordHistory: recordHistory
+        )
     }
 
     private func restoreSearchHistory(_ entry: LibrarySearchHistoryEntry) {
@@ -837,28 +870,37 @@ struct LibraryView: View {
         isApplyingExternalSearch = true
         searchText = entry.query
         if entry.isSmartSearch {
+            searchUsesAI = true
             startSmartSearch(query: entry.query, recordHistory: true)
         } else {
+            searchUsesAI = false
             startSearch(query: entry.query, debounceNanoseconds: 0, recordHistory: true)
         }
         DispatchQueue.main.async { isApplyingExternalSearch = false }
     }
 
     private func clearSearch() {
-        searchTask?.cancel()
-        semanticSearchTask?.cancel()
-        searchTask = nil
-        semanticSearchTask = nil
-        isSearching = false
-        smartSearchEnabled = false
-        searchResults = nil
-        smartSearchPlan = nil
-        smartSearchUsedAI = false
-        smartSearchIntent = ""
-        activeSearchQuery = ""
+        appState.clearLibrarySearch()
         sortField = .modified
         sortDirection = .descending
         resetPagination()
+    }
+
+    private func cancelCurrentSearch() {
+        guard isSearching else { return }
+        appState.cancelLibrarySearch()
+    }
+
+    private func restoreActiveLibrarySearch() {
+        guard let activity = appState.librarySearchActivity else { return }
+        isApplyingExternalSearch = true
+        searchText = activity.query
+        selectedCategories = activity.categories
+        searchUsesAI = activity.mode == .smart
+        sortField = .relevance
+        sortDirection = .descending
+        resetPagination()
+        DispatchQueue.main.async { isApplyingExternalSearch = false }
     }
 
     private func updateSort(_ field: LibrarySortField) {
@@ -877,6 +919,22 @@ struct LibraryView: View {
     private func loadNextPage() {
         guard visibleLimit < filteredFiles.count else { return }
         visibleLimit = min(visibleLimit + 20, filteredFiles.count)
+    }
+
+    private func beginSingleFileFeedback(for file: FileRecord) {
+        guard let searchResults,
+              let resultIndex = searchResults.firstIndex(where: {
+                  $0.file.id == file.id && $0.file.path == file.path
+              }) else {
+            return
+        }
+        feedbackPresentation = .singleFile(
+            RAGSingleFileFeedbackContext(
+                file: file,
+                rank: resultIndex + 1,
+                confidence: searchResults[resultIndex].confidence
+            )
+        )
     }
 
 }
@@ -1006,7 +1064,7 @@ enum LibraryTableLayout {
     static let categoryWidth: CGFloat = 90
     static let sizeWidth: CGFloat = 82
     static let modifiedWidth: CGFloat = 150
-    static let actionsWidth: CGFloat = 128
+    static let actionsWidth: CGFloat = 168
 }
 
 private struct LibraryColumnHeader: View {
@@ -1061,6 +1119,7 @@ private struct LibraryFileRow: View {
     let file: FileRecord
     let searchMatch: LibrarySearchResult?
     let startDocumentChat: (FileRecord) -> Void
+    let markMostAccurate: (() -> Void)?
     @State private var isHovered = false
     @State private var isDeleting = false
     @State private var activeAlert: LibraryFileAlert?
@@ -1077,7 +1136,7 @@ private struct LibraryFileRow: View {
             actionButtons
         }
         .font(.system(size: 11))
-        .frame(minHeight: 66)
+        .frame(minHeight: searchMatch?.evidence.isEmpty == false ? 82 : 66)
         .background {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(
@@ -1111,6 +1170,9 @@ private struct LibraryFileRow: View {
             Button("View File Details") { appState.toggleFilePreview(file) }
             if file.supportsFileChat(with: appState.settings) {
                 Button("Chat with File") { startDocumentChat(file) }
+            }
+            if let markMostAccurate {
+                Button("Mark as Most Accurate", action: markMostAccurate)
             }
             Button("Open") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: file.path))
@@ -1149,6 +1211,20 @@ private struct LibraryFileRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                if let searchMatch, !searchMatch.evidence.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(searchMatch.evidence.prefix(2), id: \.self) { evidence in
+                            Text(evidenceLabel(evidence))
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(FileNestTheme.accent)
+                                .lineLimit(1)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(FileNestTheme.accent.opacity(0.10), in: Capsule())
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1190,6 +1266,19 @@ private struct LibraryFileRow: View {
                     .accessibilityHidden(true)
             }
 
+            if let markMostAccurate {
+                LibraryActionButton(
+                    systemName: "checkmark.seal",
+                    tint: FileNestTheme.accent,
+                    title: "Mark as Most Accurate",
+                    action: markMostAccurate
+                )
+            } else {
+                Color.clear
+                    .frame(width: 36, height: 30)
+                    .accessibilityHidden(true)
+            }
+
             LibraryActionButton(
                 systemName: "folder",
                 tint: FileNestTheme.accent,
@@ -1226,6 +1315,19 @@ private struct LibraryFileRow: View {
         if let note = file.note, !note.isEmpty { return note }
         if let title = file.title, !title.isEmpty { return title }
         return file.displayPath
+    }
+
+    private func evidenceLabel(_ evidence: LibrarySearchEvidence) -> String {
+        switch evidence.kind {
+        case .exactPhrase:
+            return appState.settings.localizedFormat("Exact phrase: %@", evidence.label)
+        case .keyword:
+            return appState.settings.localizedFormat("Matched: %@", evidence.label)
+        case .semantic:
+            return appState.settings.localizedFormat("Semantic match: %@", evidence.label)
+        case .entity:
+            return appState.settings.localized("Exact entity match")
+        }
     }
 
     private func reveal(_ file: FileRecord) {

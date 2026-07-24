@@ -213,10 +213,21 @@ private struct RuleRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(rule.name)
-                .font(.system(size: 13, weight: .medium))
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(rule.name)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                Label {
+                    Text(verbatim: scopeSummary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } icon: {
+                    Image(systemName: rule.usesSpecificSourceDirectories ? "folder.fill" : "folder")
+                }
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(verbatim: appState.settings.localized(
                 rule.typeEnum == .rule ? "Rule (by extension)" : "AI Generated"
@@ -265,12 +276,23 @@ private struct RuleRow: View {
             .frame(width: 54)
         }
         .font(.system(size: 11))
-        .frame(minHeight: 58)
+        .frame(minHeight: 64)
         .contentShape(Rectangle())
         .contextMenu {
             Button(appState.settings.localized("Edit"), action: edit)
             Button(appState.settings.localized("Delete"), role: .destructive, action: delete)
         }
+    }
+
+    private var scopeSummary: String {
+        let directories = rule.sourceDirectories
+        if directories.isEmpty {
+            return appState.settings.localized("All Watched Folders")
+        }
+        if directories.count == 1, let directory = directories.first {
+            return URL(fileURLWithPath: directory).tildeAbbreviatedPath
+        }
+        return appState.settings.localizedFormat("%d Selected Folders", directories.count)
     }
 }
 
@@ -332,6 +354,8 @@ struct RuleEditor: View {
                 Text(verbatim: appState.settings.localized("Separate extensions with commas; higher-priority rules match first."))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
+
+                RuleDirectoryScopePicker(rule: $rule)
 
                 Picker(selection: $rule.action) {
                     Text(verbatim: appState.settings.localized("Organize into Folder"))
@@ -421,7 +445,7 @@ struct RuleEditor: View {
             }
             .padding(24)
         }
-        .frame(width: 520, height: 590)
+        .frame(width: 560, height: 680)
         .background(FileNestTheme.surface)
     }
 }
@@ -505,6 +529,7 @@ private struct AIRuleGeneratorSheet: View {
                         TextField(appState.settings.localized("Rule Name"), text: draftBinding.name)
                         TextField(appState.settings.localized("Extensions (comma-separated)"), text: draftBinding.pattern)
                         TextField(appState.settings.localized("Destination Folder"), text: draftBinding.targetFolder)
+                        RuleDirectoryScopePicker(rule: draftBinding)
                         Stepper(
                             appState.settings.localizedFormat(
                                 "Priority %d",
@@ -567,5 +592,111 @@ private struct AIRuleGeneratorSheet: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+}
+
+private enum RuleDirectoryScopeMode: String {
+    case all
+    case selected
+}
+
+private struct RuleDirectoryScopePicker: View {
+    @EnvironmentObject private var appState: AppState
+    @Binding var rule: Rule
+
+    private var watchedDirectories: [String] {
+        let configured = appState.settings.watchDirs.map {
+            URL(fileURLWithPath: $0).standardizedFileURL.path
+        }
+        return Array(Set(configured + rule.sourceDirectories)).sorted()
+    }
+
+    private var scopeMode: Binding<RuleDirectoryScopeMode> {
+        Binding(
+            get: {
+                rule.usesSpecificSourceDirectories ? .selected : .all
+            },
+            set: { mode in
+                switch mode {
+                case .all:
+                    rule.sourceDirectories = []
+                case .selected:
+                    guard rule.sourceDirectories.isEmpty,
+                          let firstDirectory = watchedDirectories.first else { return }
+                    rule.sourceDirectories = [firstDirectory]
+                }
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Picker(selection: scopeMode) {
+                Text(verbatim: appState.settings.localized("All Watched Folders"))
+                    .tag(RuleDirectoryScopeMode.all)
+                Text(verbatim: appState.settings.localized("Selected Watched Folders"))
+                    .tag(RuleDirectoryScopeMode.selected)
+            } label: {
+                Text(verbatim: appState.settings.localized("Folder Scope"))
+            }
+            .pickerStyle(.segmented)
+
+            if rule.usesSpecificSourceDirectories {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(watchedDirectories, id: \.self) { directory in
+                        Toggle(isOn: directoryBinding(directory)) {
+                            Label {
+                                Text(URL(fileURLWithPath: directory).tildeAbbreviatedPath)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            } icon: {
+                                Image(systemName: "folder")
+                            }
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+                }
+                .padding(10)
+                .background(
+                    FileNestTheme.elevatedSurface,
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(FileNestTheme.border, lineWidth: 1)
+                }
+            } else if watchedDirectories.isEmpty {
+                Label {
+                    Text(verbatim: appState.settings.localized("No watched folders are configured."))
+                } icon: {
+                    Image(systemName: "folder.badge.questionmark")
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            }
+
+            Text(verbatim: appState.settings.localized(
+                "Specific folder rules take precedence over rules for all folders; priority breaks ties within the same scope."
+            ))
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func directoryBinding(_ directory: String) -> Binding<Bool> {
+        Binding(
+            get: {
+                rule.sourceDirectories.contains(directory)
+            },
+            set: { isSelected in
+                var directories = rule.sourceDirectories
+                if isSelected {
+                    directories.append(directory)
+                } else if directories.count > 1 {
+                    directories.removeAll { $0 == directory }
+                }
+                rule.sourceDirectories = directories
+            }
+        )
     }
 }

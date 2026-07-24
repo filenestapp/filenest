@@ -25,9 +25,8 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                 do {
                     try self.store.dbPool.write { db in
                         _ = try String.fetchOne(db, sql: "SELECT vec_version()")
-                        // A shadow generation is never resumable across app launches. If the app
-                        // exited during a rebuild, keep the active index and remove the orphaned stage.
-                        try self.dropShadowTables(db)
+                        // Shadow tables are intentionally retained across launches. AppState owns
+                        // the durable job descriptor and resumes or supersedes the staged generation.
                         guard let dimension = try Int.fetchOne(
                             db,
                             sql: "SELECT MIN(dim) FROM embeddings HAVING COUNT(DISTINCT dim) = 1"
@@ -116,11 +115,14 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
     /// Creates an isolated on-disk generation for a full RAG rebuild.
     /// Production chunks, vectors, and file metadata remain readable until commit.
     @discardableResult
-    func beginShadowRebuild() async -> Bool {
+    func beginShadowRebuild(resumeIfAvailable: Bool = false) async -> Bool {
         await withCheckedContinuation { continuation in
             queue.async {
                 do {
                     try self.store.dbPool.write { db in
+                        if resumeIfAvailable, try self.shadowTablesExist(db) {
+                            return
+                        }
                         try self.dropShadowTables(db)
                         try db.execute(sql: """
                             CREATE TABLE \(Self.shadowEmbeddingsTable)(
@@ -339,6 +341,187 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
                         category: .vectorWrite,
                         level: .error,
                         metadata: ["fileID": "\(fileID)"]
+                    )
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    func shadowStagedFileIDs() async -> Set<Int64> {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                let ids = (try? self.store.dbPool.read { db -> [Int64] in
+                    guard try self.shadowTablesExist(db) else { return [] }
+                    return try Int64.fetchAll(
+                        db,
+                        sql: "SELECT file_id FROM \(Self.shadowMetadataTable)"
+                    )
+                }) ?? []
+                continuation.resume(returning: Set(ids))
+            }
+        }
+    }
+
+    /// Stages only replacement embeddings while preserving active chunks and file metadata.
+    @discardableResult
+    func stageShadowEmbeddings(
+        fileID: Int64,
+        chunks: [EmbeddingChunk],
+        model: String
+    ) async -> Bool {
+        guard chunks.allSatisfy({ Self.isValidVector($0.vector) }),
+              Set(chunks.map { $0.vector.count }).count <= 1 else {
+            return false
+        }
+        let normalized = chunks.map { chunk in
+            EmbeddingChunk(
+                vector: Self.normalize(chunk.vector),
+                text: chunk.text,
+                contextualText: chunk.contextualText,
+                sectionPath: chunk.sectionPath,
+                pageStart: chunk.pageStart,
+                pageEnd: chunk.pageEnd,
+                kind: chunk.kind,
+                parentIndex: chunk.parentIndex,
+                parentText: chunk.parentText,
+                entityTerms: chunk.entityTerms,
+                tokenCount: chunk.tokenCount,
+                tokenizerProfile: chunk.tokenizerProfile,
+                tokenizerVersion: chunk.tokenizerVersion,
+                tokenCountAccuracy: chunk.tokenCountAccuracy
+            )
+        }
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                do {
+                    try self.store.dbPool.write { db in
+                        guard try self.shadowTablesExist(db) else {
+                            throw VectorStoreError.shadowGenerationUnavailable
+                        }
+                        try db.execute(
+                            sql: "DELETE FROM \(Self.shadowEmbeddingsTable) WHERE file_id = ?",
+                            arguments: [fileID]
+                        )
+                        if let dimension = normalized.first?.vector.count {
+                            let incompatible = try Bool.fetchOne(
+                                db,
+                                sql: """
+                                    SELECT EXISTS(
+                                        SELECT 1 FROM \(Self.shadowEmbeddingsTable)
+                                        WHERE file_id != ? AND (model != ? OR dim != ?)
+                                    )
+                                    """,
+                                arguments: [fileID, model, dimension]
+                            ) ?? false
+                            guard !incompatible else {
+                                throw VectorStoreError.incompatibleVectorSpace
+                            }
+                            for (index, chunk) in normalized.enumerated() {
+                                let contextualText = chunk.contextualText ?? chunk.text ?? ""
+                                try db.execute(
+                                    sql: """
+                                        INSERT INTO \(Self.shadowEmbeddingsTable)(
+                                            file_id, vector, dim, model, chunk_idx, chunk_text
+                                        ) VALUES (?, ?, ?, ?, ?, ?)
+                                        """,
+                                    arguments: [
+                                        fileID,
+                                        Self.encode(chunk.vector),
+                                        dimension,
+                                        model,
+                                        index,
+                                        contextualText,
+                                    ]
+                                )
+                            }
+                        }
+                        try db.execute(
+                            sql: """
+                                INSERT INTO \(Self.shadowMetadataTable)(file_id)
+                                VALUES (?)
+                                ON CONFLICT(file_id) DO NOTHING
+                                """,
+                            arguments: [fileID]
+                        )
+                    }
+                    continuation.resume(returning: true)
+                } catch {
+                    AppLogService.shared.write(
+                        "shadow embedding file write failed: \(error)",
+                        category: .vectorWrite,
+                        level: .error,
+                        metadata: ["fileID": "\(fileID)"]
+                    )
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    /// Atomically activates a resumable embedding-only generation.
+    @discardableResult
+    func commitShadowEmbeddingRebuild(expectedFileCount: Int) async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                do {
+                    try self.store.dbPool.write { db in
+                        guard try self.shadowTablesExist(db) else {
+                            throw VectorStoreError.shadowGenerationUnavailable
+                        }
+                        let stagedFileCount = try Int.fetchOne(
+                            db,
+                            sql: "SELECT COUNT(*) FROM \(Self.shadowMetadataTable)"
+                        ) ?? 0
+                        guard stagedFileCount == expectedFileCount else {
+                            throw VectorStoreError.incompleteShadowGeneration(
+                                expected: expectedFileCount,
+                                actual: stagedFileCount
+                            )
+                        }
+                        try self.dropVectorTable(db)
+                        try db.execute(sql: """
+                            DELETE FROM embeddings
+                            WHERE file_id IN (SELECT file_id FROM \(Self.shadowMetadataTable))
+                            """)
+                        try db.execute(sql: """
+                            INSERT INTO embeddings(file_id, vector, dim, model, chunk_idx, chunk_text)
+                            SELECT file_id, vector, dim, model, chunk_idx, chunk_text
+                            FROM \(Self.shadowEmbeddingsTable)
+                            ORDER BY file_id, chunk_idx
+                            """)
+                        if let dimension = try Int.fetchOne(
+                            db,
+                            sql: "SELECT MIN(dim) FROM embeddings HAVING COUNT(DISTINCT dim) = 1"
+                        ) {
+                            try self.ensureVectorTable(db, dimension: dimension, allowRecreate: true)
+                            let rows = try Row.fetchAll(
+                                db,
+                                sql: "SELECT id, vector FROM embeddings ORDER BY id"
+                            )
+                            for row in rows {
+                                try db.execute(
+                                    sql: "INSERT INTO \(Self.vectorTable)(rowid, embedding) VALUES (?, vec_f32(?))",
+                                    arguments: [row["id"] as Int64, row["vector"] as Data]
+                                )
+                            }
+                        }
+                        try self.dropShadowTables(db)
+                    }
+                    self.latestRevisionByFile.removeAll()
+                    self.refreshCount()
+                    AppLogService.shared.write(
+                        "resumable embedding generation activated",
+                        category: .vectorLifecycle,
+                        level: .notice,
+                        metadata: ["files": "\(expectedFileCount)", "vectors": "\(self.storedCount)"]
+                    )
+                    continuation.resume(returning: true)
+                } catch {
+                    AppLogService.shared.write(
+                        "resumable embedding generation activation failed: \(error)",
+                        category: .vectorLifecycle,
+                        level: .error
                     )
                     continuation.resume(returning: false)
                 }

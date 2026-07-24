@@ -85,6 +85,28 @@ The indexer retains Docling sections as answer-time parents and produces smaller
 
 Every library retrieval writes a bounded local trace containing candidate counts, the effective semantic threshold, reranker identity, result count, and latency. These traces support offline recall and ranking evaluation without adding a chunk-level FTS index.
 
+### Agent Skills runtime
+
+FileNest implements the open Agent Skills package shape: each capability is a directory containing a `SKILL.md` file with YAML frontmatter and Markdown instructions, with optional `agents/openai.yaml` metadata and on-demand resources. The runtime discovers bundled packages, `~/.agents/skills`, and FileNest-managed packages. Name collisions resolve in that order, with managed packages taking precedence.
+
+The runtime follows progressive disclosure. Discovery caches only validated names, descriptions, metadata, and resource manifests. Deterministic capability defaults, explicit `$skill-name` requests, and skills already active in the conversation are selected without an extra model call. When other candidate skills remain, the configured generation provider receives the metadata catalog and returns a bounded JSON selection. Only then does FileNest load the selected `SKILL.md` bodies and directly referenced resources into structured `<skill_content>` blocks. Activated names persist for the conversation.
+
+### RAG agent lifecycle
+
+The RAG path is organized as a bounded agent lifecycle rather than one monolithic prompt:
+
+1. **Understand** — the search-planning skill converts the request into semantic intent, weighted concepts, exact terms, and metadata constraints.
+2. **Retrieve** — deterministic filename, metadata, indexed-content, and vector routes collect candidates without giving retrieved content control over the agent.
+3. **Rank and inspect** — confidence policy, concept coverage, and optional reranking select evidence and retain stable evidence identifiers.
+4. **Answer** — the grounded-answer or single-file skill composes a response within the selected evidence scope.
+5. **Evaluate** — users can rate a result and identify the best file with a reason.
+6. **Learn** — the configured AI provider analyzes saved feedback through the feedback-learning skill. Local Ollama analysis forces thinking; cloud configurations use the selected cloud provider.
+7. **Evolve** — generalizable improvements update a managed override of an existing skill. Distinct reusable behavior becomes a new managed standard skill. Low-confidence, one-off, personal, secret-bearing, or unsafe proposals are rejected.
+
+Hard privacy, safety, evidence, and output-schema contracts remain in source code and cannot be changed by a skill. The runtime does not execute `allowed-tools`; it exposes that declaration for diagnostics until a separately permissioned tool layer exists.
+
+RAG feedback remains auditable in SQLite. The feedback-learning agent receives the installed-skill catalog and relevant instruction bodies, then proposes either an update of an existing package or creation of a distinct reusable package. Updates are written as versioned managed overrides rather than mutating bundled or shared packages. A deterministic validator rejects low-confidence, oversized, unsafe, or malformed mutations before any package is written.
+
 ### Token accounting
 
 All native chunking, context planning, persisted chunk metadata, previews, and fallback usage statistics use one versioned token counter. The canonical embedding profile is `qwen3-embedding:0.6b`. Docling records an exact count when its Hugging Face tokenizer is available; native and provider fallback paths record a reproducible estimate together with `tokenizer_profile`, `tokenizer_version`, and `token_count_accuracy`. Exact values are never replaced by estimate migrations. Existing estimates are recalculated in place without changing chunk boundaries or vectors. Chat metrics carry an approximation marker until a provider exposes authoritative usage metadata.

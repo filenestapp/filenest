@@ -766,16 +766,19 @@ final class CompatibleRerankingProvider: RerankingProvider, @unchecked Sendable 
     private let apiKey: String
     private let model: String
     private let session: URLSession
+    private let requestTimeout: TimeInterval
 
     init(baseURL: String,
          apiKey: String,
          model: String,
          name: String,
+         requestTimeout: TimeInterval = 12,
          session: URLSession = .shared) {
         self.baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         self.name = name
+        self.requestTimeout = max(1, requestTimeout)
         self.session = session
     }
 
@@ -783,7 +786,7 @@ final class CompatibleRerankingProvider: RerankingProvider, @unchecked Sendable 
         guard !query.isEmpty, !documents.isEmpty, let url = endpointURL else { return [] }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 45
+        request.timeoutInterval = requestTimeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
