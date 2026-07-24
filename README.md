@@ -64,6 +64,15 @@ Local Ollama or cloud LLM answers
 - Answers support Markdown, file previews, retry-in-place, token usage, time-to-first-token, and total response time.
 - RAG context is capped at eight parent chunks and uses stable `[F#:P#]` evidence identifiers that are verified after generation.
 
+### Agent Skills and feedback learning
+
+- FileNest packages search planning, grounded library answers, single-file chat, and feedback analysis as standard `SKILL.md` Agent Skills instead of one monolithic prompt.
+- Skill discovery reads bundled skills, shared user skills under `~/.agents/skills`, and FileNest-managed skills. Managed skills have the highest precedence, so learned improvements can evolve a bundled capability without modifying the app bundle.
+- The RAG agent follows an understand → retrieve → rank → answer → evaluate → learn loop. Feedback is analyzed by the currently configured local or cloud AI, and only reusable, high-confidence improvements are written as auditable managed skills.
+- Discovery loads only skill metadata. Full instructions and referenced resources are loaded after automatic routing, explicit `$skill-name` activation, or session reuse.
+- Search and answer feedback is stored as an audit record before an AI analysis proposes either a safe update to an existing skill or a distinct reusable skill. Learned changes cannot weaken local-data privacy, evidence grounding, citation validation, or prompt-injection defenses.
+- Skills can be reviewed, enabled, disabled, revealed, refreshed, or removed from Settings.
+
 ### Local and cloud AI
 
 - Install, start, update, and manage Ollama plus local generation, embedding, OCR, and reranker models.

@@ -6,11 +6,99 @@ import AppKit
 enum SettingsSection: String, CaseIterable, Identifiable {
     case general
     case indexing
+    case reindexActivity
     case aiModels
+    case aiSkills
     case statistics
     case rules
 
     var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .general: return "General"
+        case .indexing: return "Index & Organize"
+        case .reindexActivity: return "Reindex Task"
+        case .aiModels: return "AI Models"
+        case .aiSkills: return "AI Skills"
+        case .statistics: return "Statistics"
+        case .rules: return "Organization Rules"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .general: return "gearshape"
+        case .indexing: return "folder.badge.gearshape"
+        case .reindexActivity: return "list.bullet.clipboard"
+        case .aiModels: return "cpu"
+        case .aiSkills: return "brain.head.profile"
+        case .statistics: return "chart.bar.xaxis"
+        case .rules: return "list.bullet.rectangle.portrait"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .general: return "General settings and application behavior"
+        case .indexing: return "Control indexing, organization, and file processing"
+        case .reindexActivity: return "Monitor the active reindex queue and control its progress"
+        case .aiModels: return "Configure chat, embedding, OCR, and local services"
+        case .aiSkills: return "Review and manage learned AI skills"
+        case .statistics: return "Review file, index, token, and storage activity"
+        case .rules: return "Create and manage file organization rules"
+        }
+    }
+
+    var group: SettingsSectionGroup {
+        switch self {
+        case .general, .indexing, .reindexActivity: return .fileManagement
+        case .aiModels, .aiSkills: return .artificialIntelligence
+        case .statistics, .rules: return .insights
+        }
+    }
+
+    func matchesSettingsSearch(_ query: String) -> Bool {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return true }
+        let searchableText = "\(label) \(detail) \(searchKeywords)"
+        return searchableText.localizedCaseInsensitiveContains(normalized)
+    }
+
+    private var searchKeywords: String {
+        switch self {
+        case .general:
+            return "language appearance shortcut logs updates folders watching"
+        case .indexing:
+            return "index chunks vectors embedding organize OCR document media duplicate"
+        case .reindexActivity:
+            return "reindex task queue progress failed pending pause resume stop"
+        case .aiModels:
+            return "Ollama cloud API model reranker Docling PaddleOCR Whisper FFmpeg"
+        case .aiSkills:
+            return "feedback learning prompt skills rating"
+        case .statistics:
+            return "usage storage tokens files charts"
+        case .rules:
+            return "rules folders extensions ignore classification"
+        }
+    }
+}
+
+enum SettingsSectionGroup: String, CaseIterable, Identifiable {
+    case fileManagement
+    case artificialIntelligence
+    case insights
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .fileManagement: return "File Management"
+        case .artificialIntelligence: return "Artificial Intelligence"
+        case .insights: return "Insights"
+        }
+    }
 }
 
 enum IndexingTaskState: Equatable, Sendable {
@@ -127,6 +215,29 @@ struct LibrarySearchRequest: Identifiable, Equatable, Sendable {
     let query: String
 }
 
+enum LibrarySearchMode: String, Equatable, Sendable {
+    case standard
+    case smart
+}
+
+/// Application-owned search state. Keeping this outside LibraryView lets retrieval
+/// continue when the user navigates to chat or settings.
+struct LibrarySearchActivity: Equatable {
+    let id: UUID
+    let query: String
+    let mode: LibrarySearchMode
+    let categories: Set<FileCategory>
+    let startedAt: Date
+    var isActive: Bool
+    var wasCancelled: Bool
+    var stage: LibrarySearchProgressStage?
+    var intent: String
+    var results: [LibrarySearchResult]?
+    var smartPlan: SmartLibrarySearchPlan?
+    var usedAI: Bool
+    var completedAt: Date?
+}
+
 enum FileChatReturnDestination: Equatable {
     case chat
     case library
@@ -221,6 +332,8 @@ final class AppState: ObservableObject {
     let organizer: OrganizerService
     let indexer: IndexerService
     let chat: ChatService
+    let ragLearning: RAGLearningService
+    let agentSkills: AgentSkillService
     let ollama: OllamaServiceManager
     let reranker: RerankerServiceManager
     let docling: DoclingServiceManager
@@ -249,7 +362,14 @@ final class AppState: ObservableObject {
     @Published private(set) var draftChatAttachmentPath: String?
     @Published private(set) var chatComposerInput = ""
     @Published private(set) var librarySearchRequest: LibrarySearchRequest?
+    @Published private(set) var librarySearchPresentationID: UUID?
     @Published private(set) var librarySearchHistory: [LibrarySearchHistoryEntry] = []
+    @Published private(set) var librarySearchActivity: LibrarySearchActivity?
+    @Published private(set) var hasUnreadCompletedLibrarySearch = false
+    @Published private(set) var ragFeedbackRecords: [RAGFeedbackRecord] = []
+    @Published private(set) var aiSystemSkills: [AISystemSkill] = []
+    @Published private(set) var installedAgentSkills: [AgentSkill] = []
+    @Published private(set) var agentSkillDiagnostics: [AgentSkillDiagnostic] = []
     @Published private(set) var fileCreationDates = [String: Date]()
     @Published private(set) var duplicateFileGroups: [DuplicateFileGroup] = []
     @Published private(set) var duplicateScanProgress: DuplicateScanProgress?
@@ -258,6 +378,7 @@ final class AppState: ObservableObject {
     @Published private(set) var quickSearchShortcutRegistrationError: String?
     @Published var statistics: AppStatistics = .empty
     @Published var selectedSettingsSection: SettingsSection = .general
+    @Published private(set) var isSettingsPresented = false
     @Published var isOnboardingPresented = false
     @Published private(set) var indexingState: IndexingTaskState = .idle
     @Published private(set) var organizationState: OrganizationTaskState = .idle
@@ -265,6 +386,7 @@ final class AppState: ObservableObject {
     @Published private(set) var automaticFileProcessingItems: [AutomaticFileProcessingItem] = []
     @Published private(set) var indexingKind: IndexingTaskKind = .automatic
     @Published private(set) var vectorIndexRebuildProgress: VectorIndexRebuildProgress?
+    @Published private(set) var reindexJobSummary: ReindexJobSummary?
     @Published private(set) var isIndexConfigurationPromptPresented = false
     @Published private(set) var hasPendingAutomaticEmbeddingRebuild = false
     @Published private(set) var reindexConfirmationStep: ReindexConfirmationStep?
@@ -285,6 +407,11 @@ final class AppState: ObservableObject {
     private var managedSyncIndexTask: Task<Void, Never>?
     private var scheduledRefreshTask: Task<Void, Never>?
     private var backgroundRefreshTask: Task<Void, Never>?
+    private var librarySearchTask: Task<Void, Never>?
+    private var librarySearchViewIsVisible = false
+    private var librarySearchStageStartedAt: Date?
+    private var librarySearchStageDurations = [String: Int]()
+    private var librarySearchTemporarilyPausedIndexing = false
     private var refreshGeneration: UInt64 = 0
     private var statisticsTask: Task<Void, Never>?
     private var activeStatisticsDays: Int?
@@ -300,6 +427,7 @@ final class AppState: ObservableObject {
     private var servicePresentationRefreshTask: Task<Void, Never>?
     private var modelVersionCheckTask: Task<Void, Never>?
     private var reindexTask: Task<Void, Never>?
+    private var activeReindexJobID: Int64?
     private var organizationTask: Task<Void, Never>?
     private var organizationJobToken: UUID?
     private var organizationPhaseBeforePause: OrganizationJobPhase = .preparing
@@ -348,6 +476,9 @@ final class AppState: ObservableObject {
 
     var indexingProgress: VectorIndexRebuildProgress? { vectorIndexRebuildProgress }
     var reindexButtonsDisabled: Bool { indexingState.blocksReindexButtons }
+    var hasReindexActivity: Bool {
+        reindexJobSummary != nil || (indexingKind != .automatic && indexingState.isActive)
+    }
     var isScanningForDuplicates: Bool { duplicateScanProgress != nil }
     var isRemovingDuplicates: Bool { duplicateTrashProgress != nil }
     var duplicateConfirmationFileCount: Int { files.filter { $0.duplicateOfFileID != nil }.count }
@@ -517,7 +648,20 @@ final class AppState: ObservableObject {
         self.shouldIndexManagedFiles = startAutomatically
         let organizer = OrganizerService(store: store, settings: settings, organizeRoot: organizeRoot)
         let indexer = providedIndexer ?? IndexerService(store: store, settings: settings)
-        let chat = ChatService(store: store, settings: settings, vectorStore: indexer.vectorStore)
+        let agentSkills = AgentSkillService(store: store)
+        _ = agentSkills.refresh()
+        agentSkills.migrateLegacySkills((try? store.allAISystemSkills()) ?? [])
+        let chat = ChatService(
+            store: store,
+            settings: settings,
+            vectorStore: indexer.vectorStore,
+            skillService: agentSkills
+        )
+        let ragLearning = RAGLearningService(
+            store: store,
+            settings: settings,
+            skillService: agentSkills
+        )
         let ollama = OllamaServiceManager()
         let reranker = RerankerServiceManager()
         let docling = DoclingServiceManager()
@@ -534,6 +678,8 @@ final class AppState: ObservableObject {
         self.organizer = organizer
         self.indexer = indexer
         self.chat = chat
+        self.ragLearning = ragLearning
+        self.agentSkills = agentSkills
         self.ollama = ollama
         self.reranker = reranker
         self.docling = docling
@@ -667,13 +813,21 @@ final class AppState: ObservableObject {
             async let vectorWarmup: Void = indexer.warmup()
             await initialLibraryRefreshTask?.value
             await vectorWarmup
-            _ = await organizer.invalidateChangedManagedFileIndexes()
-            if !self.refreshIndexConfigurationState() {
-                self.refreshInBackground()
+            // A resumed job may immediately need Ollama, Docling, OCR, or media runtimes.
+            // Wait for configured local services to be ready instead of racing startup.
+            await self.refreshModelServiceStatus()
+            if self.resumePendingReindexIfNeeded() {
+                self.isIndexConfigurationPromptPresented = false
+            } else {
+                _ = await organizer.invalidateChangedManagedFileIndexes()
+                if !self.refreshIndexConfigurationState() {
+                    self.refreshInBackground()
+                }
             }
         }
         refreshChatSessions()
         refreshLibrarySearchHistory()
+        refreshRAGLearningState()
         // Do not scan folders before initial setup completes; the user must first decide how to handle existing files.
         if settings.onboardingCompleted {
             startWatching()
@@ -684,6 +838,12 @@ final class AppState: ObservableObject {
         }
         Task { [weak self] in
             await self?.refreshModelServiceStatus()
+        }
+        if settings.llmChoice != AppSettings.LLMChoice.none.rawValue {
+            Task { @MainActor [weak self] in
+                await self?.ragLearning.processPendingFeedback()
+                self?.refreshRAGLearningState()
+            }
         }
     }
 
@@ -1029,6 +1189,11 @@ final class AppState: ObservableObject {
         let appliedEmbeddingSignature = store.getSetting(Self.appliedEmbeddingSignatureKey)
         hasPendingAutomaticEmbeddingRebuild = appliedEmbeddingSignature != settings.embeddingSpaceSignature
 
+        if activeReindexJobID != nil || store.hasResumableReindexJob() {
+            isIndexConfigurationPromptPresented = false
+            return indexingState.isActive
+        }
+
         if hasPendingAutomaticEmbeddingRebuild {
             isIndexConfigurationPromptPresented = false
             guard allowAutomaticRebuild, shouldIndexManagedFiles else { return false }
@@ -1231,6 +1396,13 @@ final class AppState: ObservableObject {
     func consumeLibrarySearchRequest(_ requestID: UUID) {
         guard librarySearchRequest?.id == requestID else { return }
         librarySearchRequest = nil
+    }
+
+    func presentCompletedLibrarySearch() {
+        guard librarySearchActivity?.results != nil else { return }
+        dismissSettings()
+        closeFilePreview()
+        librarySearchPresentationID = UUID()
     }
 
     private func registerQuickSearchShortcut(_ shortcut: QuickSearchShortcut) {
@@ -1484,16 +1656,331 @@ final class AppState: ObservableObject {
         return FileSummaryService(settings: settings).streamSummary(file: file)
     }
 
+    func setLibrarySearchViewVisible(_ isVisible: Bool) {
+        librarySearchViewIsVisible = isVisible
+        if isVisible {
+            hasUnreadCompletedLibrarySearch = false
+        }
+    }
+
+    func startLibrarySearch(
+        matching rawQuery: String,
+        mode: LibrarySearchMode,
+        categories: Set<FileCategory> = [],
+        recordHistory: Bool,
+        debounceNanoseconds: UInt64 = 0
+    ) {
+        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            clearLibrarySearch()
+            return
+        }
+
+        librarySearchTask?.cancel()
+        let activity = LibrarySearchActivity(
+            id: UUID(),
+            query: query,
+            mode: mode,
+            categories: categories,
+            startedAt: Date(),
+            isActive: true,
+            wasCancelled: false,
+            stage: mode == .smart ? .analyzingQuery : .matchingMetadata,
+            intent: "",
+            results: nil,
+            smartPlan: nil,
+            usedAI: false,
+            completedAt: nil
+        )
+        librarySearchActivity = activity
+        hasUnreadCompletedLibrarySearch = false
+        librarySearchStageStartedAt = activity.startedAt
+        librarySearchStageDurations = [:]
+        AppLogService.shared.write(
+            "library search started",
+            category: .searchLifecycle,
+            metadata: [
+                "categories": "\(categories.count)",
+                "mode": mode.rawValue,
+                "searchID": String(activity.id.uuidString.prefix(8)).lowercased(),
+            ]
+        )
+
+        librarySearchTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            if debounceNanoseconds > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: debounceNanoseconds)
+                } catch {
+                    return
+                }
+            }
+            guard self.isCurrentLibrarySearch(activity.id), !Task.isCancelled else { return }
+
+            if categories.isEmpty,
+               let cached = self.cachedLibrarySearch(
+                   matching: query,
+                   isSmartSearch: mode == .smart
+               ) {
+                if recordHistory {
+                    self.saveLibrarySearch(
+                        query: query,
+                        results: cached.results,
+                        smartPlan: cached.smartPlan,
+                        usedAI: cached.usedAI,
+                        recordHistory: true
+                    )
+                }
+                self.completeLibrarySearch(
+                    id: activity.id,
+                    results: cached.results,
+                    smartPlan: cached.smartPlan,
+                    usedAI: cached.usedAI,
+                    cacheHit: true
+                )
+                return
+            }
+
+            self.prioritizeLibrarySearchOverIndexing()
+            switch mode {
+            case .standard:
+                let quickResults = await self.managedQuickSearchResults(
+                    matching: query,
+                    categories: categories,
+                    onStage: { [weak self] stage in
+                        Task { @MainActor [weak self] in
+                            self?.transitionLibrarySearch(id: activity.id, to: stage)
+                        }
+                    }
+                )
+                guard self.isCurrentLibrarySearch(activity.id), !Task.isCancelled else { return }
+                self.transitionLibrarySearch(id: activity.id, to: .matchingContent)
+                self.updateLibrarySearch(id: activity.id) { $0.results = quickResults }
+                do {
+                    try await Task.sleep(nanoseconds: 650_000_000)
+                } catch {
+                    return
+                }
+                guard self.isCurrentLibrarySearch(activity.id), !Task.isCancelled else { return }
+                let results = await self.managedSearchResults(
+                    matching: query,
+                    categories: categories,
+                    onStage: { [weak self] stage in
+                        Task { @MainActor [weak self] in
+                            self?.transitionLibrarySearch(id: activity.id, to: stage)
+                        }
+                    }
+                )
+                guard self.isCurrentLibrarySearch(activity.id), !Task.isCancelled else { return }
+                if categories.isEmpty {
+                    self.saveLibrarySearch(
+                        query: query,
+                        results: results,
+                        recordHistory: recordHistory
+                    )
+                }
+                self.completeLibrarySearch(
+                    id: activity.id,
+                    results: results,
+                    smartPlan: nil,
+                    usedAI: false,
+                    cacheHit: false
+                )
+
+            case .smart:
+                let response = await self.managedSmartSearchResults(
+                    matching: query,
+                    categories: categories,
+                    onIntentUpdate: { [weak self] intent in
+                        Task { @MainActor [weak self] in
+                            self?.updateLibrarySearch(id: activity.id) { $0.intent = intent }
+                        }
+                    },
+                    onStage: { [weak self] stage in
+                        Task { @MainActor [weak self] in
+                            self?.transitionLibrarySearch(id: activity.id, to: stage)
+                        }
+                    }
+                )
+                guard self.isCurrentLibrarySearch(activity.id), !Task.isCancelled else { return }
+                if categories.isEmpty {
+                    self.saveLibrarySearch(
+                        query: query,
+                        results: response.results,
+                        smartPlan: response.plan,
+                        usedAI: response.usedAI,
+                        recordHistory: recordHistory
+                    )
+                }
+                self.completeLibrarySearch(
+                    id: activity.id,
+                    results: response.results,
+                    smartPlan: response.plan,
+                    usedAI: response.usedAI,
+                    cacheHit: false
+                )
+            }
+        }
+    }
+
+    func cancelLibrarySearch() {
+        guard let activity = librarySearchActivity, activity.isActive else { return }
+        librarySearchTask?.cancel()
+        librarySearchTask = nil
+        recordCurrentLibrarySearchStage(id: activity.id)
+        updateLibrarySearch(id: activity.id) {
+            $0.isActive = false
+            $0.wasCancelled = true
+            $0.stage = nil
+            $0.intent = ""
+            $0.completedAt = Date()
+        }
+        AppLogService.shared.write(
+            "library search cancelled",
+            category: .searchLifecycle,
+            metadata: [
+                "durationMs": "\(Int(Date().timeIntervalSince(activity.startedAt) * 1_000))",
+                "mode": activity.mode.rawValue,
+                "searchID": String(activity.id.uuidString.prefix(8)).lowercased(),
+            ]
+        )
+        restoreIndexingAfterLibrarySearch()
+    }
+
+    func clearLibrarySearch() {
+        librarySearchTask?.cancel()
+        librarySearchTask = nil
+        librarySearchActivity = nil
+        librarySearchStageStartedAt = nil
+        librarySearchStageDurations = [:]
+        hasUnreadCompletedLibrarySearch = false
+        restoreIndexingAfterLibrarySearch()
+    }
+
+    private func isCurrentLibrarySearch(_ id: UUID) -> Bool {
+        librarySearchActivity?.id == id
+    }
+
+    private func updateLibrarySearch(
+        id: UUID,
+        _ update: (inout LibrarySearchActivity) -> Void
+    ) {
+        guard var activity = librarySearchActivity, activity.id == id else { return }
+        update(&activity)
+        librarySearchActivity = activity
+    }
+
+    private func transitionLibrarySearch(
+        id: UUID,
+        to stage: LibrarySearchProgressStage
+    ) {
+        guard let activity = librarySearchActivity,
+              activity.id == id,
+              activity.isActive,
+              activity.stage != stage else { return }
+        recordCurrentLibrarySearchStage(id: id)
+        updateLibrarySearch(id: id) { $0.stage = stage }
+        librarySearchStageStartedAt = Date()
+    }
+
+    private func recordCurrentLibrarySearchStage(id: UUID) {
+        guard let activity = librarySearchActivity,
+              activity.id == id,
+              let stage = activity.stage,
+              let stageStartedAt = librarySearchStageStartedAt else { return }
+        let duration = Int(Date().timeIntervalSince(stageStartedAt) * 1_000)
+        librarySearchStageDurations[stage.logName, default: 0] += max(0, duration)
+        librarySearchStageStartedAt = nil
+    }
+
+    private func completeLibrarySearch(
+        id: UUID,
+        results: [LibrarySearchResult],
+        smartPlan: SmartLibrarySearchPlan?,
+        usedAI: Bool,
+        cacheHit: Bool
+    ) {
+        guard let activity = librarySearchActivity, activity.id == id else { return }
+        recordCurrentLibrarySearchStage(id: id)
+        let completedAt = Date()
+        updateLibrarySearch(id: id) {
+            $0.results = results
+            $0.smartPlan = smartPlan
+            $0.usedAI = usedAI
+            $0.isActive = false
+            $0.wasCancelled = false
+            $0.stage = nil
+            $0.completedAt = completedAt
+        }
+        librarySearchTask = nil
+
+        var metadata = librarySearchStageDurations.mapValues(String.init)
+        metadata["cacheHit"] = "\(cacheHit)"
+        metadata["durationMs"] = "\(Int(completedAt.timeIntervalSince(activity.startedAt) * 1_000))"
+        metadata["mode"] = activity.mode.rawValue
+        metadata["results"] = "\(results.count)"
+        metadata["searchID"] = String(activity.id.uuidString.prefix(8)).lowercased()
+        AppLogService.shared.write(
+            "library search stage timings completed",
+            category: .searchPerformance,
+            metadata: metadata
+        )
+        restoreIndexingAfterLibrarySearch()
+
+        guard !librarySearchViewIsVisible else { return }
+        hasUnreadCompletedLibrarySearch = true
+        let bodyKey = activity.mode == .smart
+            ? "Smart Search found %d related files."
+            : "Search found %d related files."
+        postSystemNotification(
+            titleKey: "Search Complete",
+            body: settings.localizedFormat(bodyKey, results.count),
+            identifier: "filenest.search.complete"
+        )
+    }
+
+    private func prioritizeLibrarySearchOverIndexing() {
+        guard !librarySearchTemporarilyPausedIndexing,
+              indexingState == .running else { return }
+        librarySearchTemporarilyPausedIndexing = true
+        indexingState = .paused
+        statusText = "Indexing Paused for Search"
+        updateProgressPhase(.paused)
+        AppLogService.shared.write(
+            "indexing temporarily paused for interactive search",
+            category: .searchLifecycle,
+            metadata: ["kind": indexingKind.logName]
+        )
+        Task { await indexingGate.pause() }
+    }
+
+    private func restoreIndexingAfterLibrarySearch() {
+        guard librarySearchTemporarilyPausedIndexing else { return }
+        librarySearchTemporarilyPausedIndexing = false
+        guard indexingState == .paused else { return }
+        indexingState = .running
+        statusText = indexingStatusTitle
+        updateProgressPhase(.indexing)
+        AppLogService.shared.write(
+            "indexing resumed after interactive search",
+            category: .searchLifecycle,
+            metadata: ["kind": indexingKind.logName]
+        )
+        Task { await indexingGate.resume() }
+    }
+
     func managedSearchResults(
         matching keyword: String,
-        categories: Set<FileCategory> = []
+        categories: Set<FileCategory> = [],
+        onStage: ((LibrarySearchProgressStage) -> Void)? = nil
     ) async -> [LibrarySearchResult] {
         let startedAt = Date()
         let results = await chat.searchLibrary(
             keyword,
             managedRootPath: organizer.organizeRoot.standardizedFileURL.path,
             includeSemantic: true,
-            allowedCategories: categories
+            allowedCategories: categories,
+            onStage: onStage
         )
         logLibrarySearchPerformance(
             mode: "semantic",
@@ -1505,14 +1992,17 @@ final class AppState: ObservableObject {
 
     func managedQuickSearchResults(
         matching keyword: String,
-        categories: Set<FileCategory> = []
+        categories: Set<FileCategory> = [],
+        onStage: ((LibrarySearchProgressStage) -> Void)? = nil
     ) async -> [LibrarySearchResult] {
         let startedAt = Date()
         let results = await chat.searchLibrary(
             keyword,
             managedRootPath: organizer.organizeRoot.standardizedFileURL.path,
             includeSemantic: false,
-            allowedCategories: categories
+            includeChunkContent: false,
+            allowedCategories: categories,
+            onStage: onStage
         )
         logLibrarySearchPerformance(
             mode: "keyword",
@@ -1532,7 +2022,8 @@ final class AppState: ObservableObject {
                 isSmartSearch: isSmartSearch
               ),
               record.revision == revision,
-              let cached = try? JSONDecoder().decode(CachedLibrarySearchPayload.self, from: record.payload) else {
+              let cached = try? JSONDecoder().decode(CachedLibrarySearchPayload.self, from: record.payload),
+              cached.pipelineVersion == CachedLibrarySearchPayload.currentPipelineVersion else {
             return nil
         }
 
@@ -1557,7 +2048,8 @@ final class AppState: ObservableObject {
                 snippet: result.snippet,
                 sectionPath: result.sectionPath,
                 pageStart: result.pageStart,
-                pageEnd: result.pageEnd
+                pageEnd: result.pageEnd,
+                evidence: result.evidence
             )
         }
         return CachedLibrarySearch(
@@ -1575,6 +2067,7 @@ final class AppState: ObservableObject {
         recordHistory: Bool = true
     ) {
         let cached = CachedLibrarySearchPayload(
+            pipelineVersion: CachedLibrarySearchPayload.currentPipelineVersion,
             results: results.map(CachedLibrarySearchResult.init),
             smartPlan: smartPlan,
             usedAI: usedAI
@@ -1614,17 +2107,174 @@ final class AppState: ObservableObject {
         refreshLibrarySearchHistory()
     }
 
+    func refreshRAGLearningState() {
+        ragFeedbackRecords = (try? store.ragFeedbackRecords()) ?? []
+        aiSystemSkills = (try? store.allAISystemSkills()) ?? []
+        installedAgentSkills = agentSkills.refresh()
+        agentSkillDiagnostics = agentSkills.diagnostics()
+    }
+
+    func processPendingRAGFeedbackIfPossible() {
+        guard settings.llmChoice != AppSettings.LLMChoice.none.rawValue else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.ragLearning.processPendingFeedback()
+            self.refreshRAGLearningState()
+        }
+    }
+
+    @discardableResult
+    func submitChatFeedback(
+        message: ChatMessage,
+        rating: RAGFeedbackRating,
+        reason: String?,
+        bestFileID: Int64?,
+        bestFileReason: String?
+    ) -> RAGFeedbackRecord? {
+        guard let messageID = message.id,
+              let sessionID = message.sessionId else { return nil }
+        do {
+            let record = try store.upsertRAGFeedback(
+                messageID: messageID,
+                sessionID: sessionID,
+                rating: rating,
+                reason: reason,
+                bestFileID: bestFileID,
+                bestFileReason: bestFileReason
+            )
+            var updatedMessage = message
+            updatedMessage.feedback = rating == .accurate ? "helpful" : "notHelpful"
+            try? store.updateChatMessage(updatedMessage)
+            refreshRAGLearningState()
+            scheduleRAGFeedbackAnalysis(record.id)
+            return record
+        } catch {
+            AppLogService.shared.write(
+                "chat RAG feedback persistence failed",
+                category: .chat,
+                level: .error,
+                metadata: ["message_id": "\(messageID)", "error": error.localizedDescription]
+            )
+            return nil
+        }
+    }
+
+    @discardableResult
+    func submitSearchFeedback(
+        query: String,
+        isSmartSearch: Bool,
+        results: [LibrarySearchResult],
+        rating: RAGFeedbackRating,
+        reason: String?,
+        bestFileID: Int64?,
+        bestFileReason: String?
+    ) -> RAGFeedbackRecord? {
+        let fileIDs = results.compactMap(\.file.id)
+        do {
+            let record = try store.upsertSearchFeedback(
+                query: query,
+                sourceKind: isSmartSearch ? .smartSearch : .search,
+                resultFileIDs: fileIDs,
+                rating: rating,
+                reason: reason,
+                bestFileID: bestFileID,
+                bestFileReason: bestFileReason
+            )
+            refreshRAGLearningState()
+            scheduleRAGFeedbackAnalysis(record.id)
+            return record
+        } catch {
+            AppLogService.shared.write(
+                "library RAG feedback persistence failed",
+                category: .chat,
+                level: .error,
+                metadata: ["query": query, "error": error.localizedDescription]
+            )
+            return nil
+        }
+    }
+
+    func retryRAGFeedbackAnalysis(_ feedback: RAGFeedbackRecord) {
+        scheduleRAGFeedbackAnalysis(feedback.id)
+    }
+
+    func removeChatFeedback(message: ChatMessage) {
+        guard let messageID = message.id else { return }
+        try? store.deleteRAGFeedback(messageID: messageID)
+        var updatedMessage = message
+        updatedMessage.feedback = nil
+        try? store.updateChatMessage(updatedMessage)
+        refreshRAGLearningState()
+    }
+
+    func setAISystemSkillEnabled(_ skill: AISystemSkill, enabled: Bool) {
+        guard let id = skill.id else { return }
+        try? store.setAISystemSkillEnabled(id: id, enabled: enabled)
+        refreshRAGLearningState()
+    }
+
+    func deleteAISystemSkill(_ skill: AISystemSkill) {
+        guard let id = skill.id else { return }
+        try? store.deleteAISystemSkill(id: id)
+        refreshRAGLearningState()
+    }
+
+    func setAgentSkillEnabled(_ skill: AgentSkill, enabled: Bool) {
+        agentSkills.setEnabled(skill, enabled: enabled)
+        if let legacy = aiSystemSkills.first(where: { $0.key == skill.name }),
+           let id = legacy.id {
+            try? store.setAISystemSkillEnabled(id: id, enabled: enabled)
+        }
+        refreshRAGLearningState()
+    }
+
+    func deleteManagedAgentSkill(_ skill: AgentSkill) {
+        do {
+            try agentSkills.removeManagedSkill(skill)
+            if let legacy = aiSystemSkills.first(where: { $0.key == skill.name }),
+               let id = legacy.id {
+                try? store.deleteAISystemSkill(id: id)
+            }
+        } catch {
+            AppLogService.shared.write(
+                "managed Agent Skill removal failed",
+                category: .chat,
+                level: .error,
+                metadata: ["skill": skill.name, "error": error.localizedDescription]
+            )
+        }
+        refreshRAGLearningState()
+    }
+
+    func revealAgentSkillsFolder() {
+        try? FileManager.default.createDirectory(
+            at: agentSkills.managedDirectory,
+            withIntermediateDirectories: true
+        )
+        NSWorkspace.shared.activateFileViewerSelecting([agentSkills.managedDirectory])
+    }
+
+    private func scheduleRAGFeedbackAnalysis(_ id: Int64?) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.ragLearning.analyzeFeedback(id: id)
+            self.refreshRAGLearningState()
+        }
+    }
+
     func managedSmartSearchResults(
         matching query: String,
         categories: Set<FileCategory> = [],
-        onIntentUpdate: ((String) -> Void)? = nil
+        onIntentUpdate: ((String) -> Void)? = nil,
+        onStage: ((LibrarySearchProgressStage) -> Void)? = nil
     ) async -> SmartLibrarySearchResponse {
         let startedAt = Date()
         let response = await chat.smartSearchLibrary(
             query,
             managedRootPath: organizer.organizeRoot.standardizedFileURL.path,
             allowedCategories: categories,
-            onIntentUpdate: onIntentUpdate
+            onIntentUpdate: onIntentUpdate,
+            onStage: onStage
         )
         logLibrarySearchPerformance(
             mode: "smart",
@@ -1867,14 +2517,33 @@ final class AppState: ObservableObject {
     }
 
     /// Long-lived local runtimes are owned by FileNest and must not outlive it.
-    /// Docling and PaddleOCR use short-lived job subprocesses, so they have no daemon to stop here.
+    /// Active indexing tasks are cancelled first, then persistent provider workers
+    /// receive a graceful shutdown request before model services are stopped.
     func shutdownManagedServices() async {
+        watcher.stop()
+        librarySearchTask?.cancel()
+        let activeOrganizationTask = organizationTask
+        let activeReindexTask = reindexTask
+        let activeManagedSyncTask = managedSyncIndexTask
+
         // Keep the persisted job descriptor so a manual organization can restart safely after
         // the next launch. The worker will rescan source folders and skip files already moved.
-        if organizationState.isActive {
-            organizationTask?.cancel()
+        if activeOrganizationTask != nil {
+            activeOrganizationTask?.cancel()
             await organizationGate.stop()
         }
+        // Stop at the next safe file boundary and wait for the worker to persist its terminal
+        // state before local model services are shut down.
+        if activeReindexTask != nil || activeManagedSyncTask != nil {
+            activeReindexTask?.cancel()
+            activeManagedSyncTask?.cancel()
+            await indexingGate.stop()
+        }
+        await indexer.cancelAll()
+        await indexer.shutdownManagedProviders()
+        await activeOrganizationTask?.value
+        await activeReindexTask?.value
+        await activeManagedSyncTask?.value
         await reranker.shutdown()
         await ollama.stop(host: settings.ollamaHost)
     }
@@ -2156,6 +2825,26 @@ final class AppState: ObservableObject {
 
     func selectSettingsSection(_ section: SettingsSection) {
         selectedSettingsSection = section
+    }
+
+    func presentSettings(_ section: SettingsSection = .general) {
+        refreshReindexJobSummary()
+        selectedSettingsSection = section
+        closeFilePreview()
+        isSettingsPresented = true
+    }
+
+    func refreshReindexJobSummary() {
+        reindexJobSummary = try? store.latestReindexJobSummary()
+        if reindexJobSummary == nil,
+           selectedSettingsSection == .reindexActivity,
+           !indexingState.isActive {
+            selectedSettingsSection = .indexing
+        }
+    }
+
+    func dismissSettings() {
+        isSettingsPresented = false
     }
 
     func presentOnboarding() {
@@ -2572,10 +3261,12 @@ final class AppState: ObservableObject {
     }
 
     var reindexFileTypeScopeDescription: String {
-        guard !selectedReindexFileCategories.isEmpty else { return "All file types" }
+        guard !selectedReindexFileCategories.isEmpty else {
+            return settings.localized("All file types")
+        }
         return selectedReindexFileCategories
             .sorted { $0.label < $1.label }
-            .map(\.label)
+            .map { settings.localized($0.label) }
             .joined(separator: ", ")
     }
 
@@ -2851,6 +3542,9 @@ final class AppState: ObservableObject {
             vectorIndexRebuildProgress = nil
             refresh()
         } else {
+            if resumePendingReindexIfNeeded() {
+                return
+            }
             startReindex(
                 kind: lastIndexingKind,
                 rebuildVectorSpace: lastRebuildVectorSpace,
@@ -2865,6 +3559,75 @@ final class AppState: ObservableObject {
         }
     }
 
+    func resumeReindexJobFromSettings() {
+        if indexingState == .idle {
+            _ = resumePendingReindexIfNeeded()
+        } else {
+            restartIndexing()
+        }
+    }
+
+    @discardableResult
+    private func resumePendingReindexIfNeeded() -> Bool {
+        guard reindexTask == nil,
+              managedSyncIndexTask == nil,
+              !indexingState.isActive,
+              let job = try? store.resumableReindexJob(),
+              let jobID = job.id else {
+            return false
+        }
+        if job.rebuildVectorSpace,
+           job.targetEmbeddingSignature != settings.embeddingSpaceSignature {
+            AppLogService.shared.write(
+                "persisted reindex job superseded by a newer embedding configuration",
+                category: .indexPipeline,
+                level: .notice,
+                metadata: ["jobID": "\(jobID)"]
+            )
+            store.deleteReindexJob(jobID: jobID)
+            Task { await indexer.vectorStore.discardShadowRebuild() }
+            return false
+        }
+        let kind: IndexingTaskKind
+        switch job.kind {
+        case IndexingTaskKind.vectorRebuild.logName:
+            kind = .vectorRebuild
+        case IndexingTaskKind.automatic.logName:
+            kind = .automatic
+        default:
+            kind = .fullReindex
+        }
+        let contentCategories = Set(
+            job.contentCategoryRawValues.compactMap(IndexContentChangeCategory.init(rawValue:))
+        )
+        let fileCategories = Set(
+            job.fileCategoryRawValues.compactMap(FileCategory.init(rawValue:))
+        )
+        AppLogService.shared.write(
+            "resuming persisted reindex job",
+            category: .indexPipeline,
+            level: .notice,
+            metadata: [
+                "jobID": "\(jobID)",
+                "kind": job.kind,
+                "total": "\(job.total)",
+            ]
+        )
+        isIndexConfigurationPromptPresented = false
+        return startReindex(
+            kind: kind,
+            rebuildVectorSpace: job.rebuildVectorSpace,
+            contentCategoriesToAcknowledge: contentCategories,
+            onlyUnindexedFiles: job.onlyUnindexedFiles,
+            includeUnindexedFiles: job.includeUnindexedFiles,
+            retrievalIndexOnly: job.retrievalIndexOnly,
+            forceSourceReprocessing: job.forceSourceReprocessing,
+            onlyMediaFiles: job.onlyMediaFiles,
+            fileCategories: fileCategories,
+            resumingJob: job
+        )
+    }
+
     @discardableResult
     private func startReindex(
         kind: IndexingTaskKind,
@@ -2875,7 +3638,8 @@ final class AppState: ObservableObject {
         retrievalIndexOnly: Bool = false,
         forceSourceReprocessing: Bool = false,
         onlyMediaFiles: Bool = false,
-        fileCategories: Set<FileCategory> = []
+        fileCategories: Set<FileCategory> = [],
+        resumingJob: ReindexJobRecord? = nil
     ) -> Bool {
         guard !indexingState.blocksReindexButtons,
               managedSyncIndexTask == nil,
@@ -2889,30 +3653,91 @@ final class AppState: ObservableObject {
         lastRetrievalIndexOnly = retrievalIndexOnly
         lastForceSourceReprocessing = forceSourceReprocessing
         lastReindexContentCategories = contentCategoriesToAcknowledge
-        let targetEmbeddingSignature = settings.embeddingSpaceSignature
-        let counts = (try? store.fileIndexCounts()) ?? (
-            total: files.count,
-            indexed: files.filter { $0.indexedAt != nil }.count,
-            unindexed: files.filter { $0.indexedAt == nil }.count
-        )
+        let targetEmbeddingSignature = resumingJob?.targetEmbeddingSignature
+            ?? settings.embeddingSpaceSignature
         let scopedFiles = ((try? store.libraryFiles()) ?? files).filter { file in
-            (!onlyMediaFiles || AppSettings.mediaTranscriptionExtensions.contains(file.ext.lowercased()))
+            file.duplicateOfFileID == nil
+                && (!onlyMediaFiles || AppSettings.mediaTranscriptionExtensions.contains(file.ext.lowercased()))
                 && (fileCategories.isEmpty || fileCategories.contains(file.categoryEnum))
         }
-        let total: Int
+        let targetFiles: [FileRecord]
         if retrievalIndexOnly {
-            total = indexer.vectorStore.count + (includeUnindexedFiles ? counts.unindexed : 0)
-        } else if onlyMediaFiles || !fileCategories.isEmpty {
-            total = scopedFiles.count
-        } else if forceSourceReprocessing {
-            total = counts.total
-        } else if rebuildVectorSpace {
-            total = counts.indexed + (includeUnindexedFiles ? counts.unindexed : 0)
+            targetFiles = includeUnindexedFiles
+                ? scopedFiles.filter { $0.indexedAt == nil }
+                : []
         } else if onlyUnindexedFiles {
-            total = counts.unindexed
+            targetFiles = scopedFiles.filter { $0.indexedAt == nil }
+        } else if rebuildVectorSpace && !forceSourceReprocessing {
+            targetFiles = scopedFiles.filter {
+                $0.indexedAt != nil || (includeUnindexedFiles && $0.indexedAt == nil)
+            }
         } else {
-            total = counts.total
+            targetFiles = scopedFiles
         }
+        let persistedJob: ReindexJobRecord
+        let remainingFileIDs: Set<Int64>
+        let initialCompleted: Int
+        let isResuming = resumingJob != nil
+        let total: Int
+        if let resumingJob, let jobID = resumingJob.id {
+            let jobProgress = (try? store.reindexJobProgress(jobID: jobID))
+                ?? (completed: 0, failed: 0, totalFiles: resumingJob.total)
+            persistedJob = resumingJob
+            remainingFileIDs = Set(
+                (try? store.reindexJobFileIDs(jobID: jobID, includeCompleted: false)) ?? []
+            )
+            initialCompleted = jobProgress.completed
+            total = retrievalIndexOnly
+                ? resumingJob.total
+                : max(jobProgress.totalFiles, jobProgress.completed + remainingFileIDs.count)
+            store.setReindexJobStatus(jobID: jobID, status: .running)
+        } else {
+            let calculatedTotal: Int
+            if retrievalIndexOnly {
+                calculatedTotal = indexer.vectorStore.count + targetFiles.count
+            } else {
+                calculatedTotal = targetFiles.count
+            }
+            let now = Date()
+            let descriptor = ReindexJobRecord(
+                id: nil,
+                kind: kind.logName,
+                rebuildVectorSpace: rebuildVectorSpace,
+                contentCategoriesJSON: ReindexJobRecord.encodeStrings(
+                    contentCategoriesToAcknowledge.map(\.rawValue)
+                ),
+                onlyUnindexedFiles: onlyUnindexedFiles,
+                includeUnindexedFiles: includeUnindexedFiles,
+                retrievalIndexOnly: retrievalIndexOnly,
+                forceSourceReprocessing: forceSourceReprocessing,
+                onlyMediaFiles: onlyMediaFiles,
+                fileCategoriesJSON: ReindexJobRecord.encodeStrings(fileCategories.map(\.rawValue)),
+                targetEmbeddingSignature: targetEmbeddingSignature,
+                status: ReindexJobStatus.running.rawValue,
+                total: calculatedTotal,
+                createdAt: now,
+                updatedAt: now
+            )
+            do {
+                persistedJob = try store.createReindexJob(
+                    descriptor,
+                    fileIDs: targetFiles.compactMap(\.id)
+                )
+            } catch {
+                AppLogService.shared.write(
+                    "reindex job persistence failed: \(error)",
+                    category: .indexPipeline,
+                    level: .error
+                )
+                return false
+            }
+            remainingFileIDs = Set(targetFiles.compactMap(\.id))
+            initialCompleted = 0
+            total = calculatedTotal
+        }
+        guard let jobID = persistedJob.id else { return false }
+        activeReindexJobID = jobID
+        refreshReindexJobSummary()
         AppLogService.shared.write(
             "reindex requested",
             category: .indexPipeline,
@@ -2930,20 +3755,38 @@ final class AppState: ObservableObject {
                 "rebuildVectorSpace": "\(rebuildVectorSpace)",
                 "retrievalIndexOnly": "\(retrievalIndexOnly)",
                 "forceSourceReprocessing": "\(forceSourceReprocessing)",
+                "resuming": "\(isResuming)",
+                "completedBeforeStart": "\(initialCompleted)",
                 "total": "\(total)",
             ]
         )
-        beginIndexing(kind: kind, total: total)
+        beginIndexing(kind: kind, total: total, initialCompleted: initialCompleted)
 
         reindexTask = Task { [weak self] in
             guard let self else { return }
             await self.indexingGate.reset()
+            if !isResuming {
+                await self.indexer.vectorStore.discardShadowRebuild()
+            }
             let progressHandler: @MainActor (VectorIndexRebuildProgress) -> Void = { [weak self] progress in
                 guard let self else { return }
                 self.vectorIndexRebuildProgress = progress
+                let recordedFiles = (self.reindexJobSummary?.completed ?? 0)
+                    + (self.reindexJobSummary?.failed ?? 0)
+                if progress.completed > recordedFiles {
+                    self.refreshReindexJobSummary()
+                }
                 if self.indexingState != .paused && self.indexingState != .stopping {
                     self.statusText = self.indexingStatusTitle
                 }
+            }
+            let completionHandler: @Sendable (Int64, Bool) async -> Void = {
+                [store = self.store] fileID, succeeded in
+                store.markReindexJobFile(
+                    jobID: jobID,
+                    fileID: fileID,
+                    state: succeeded ? .completed : .failed
+                )
             }
             let succeeded: Bool
             if retrievalIndexOnly {
@@ -2951,9 +3794,13 @@ final class AppState: ObservableObject {
                 if retrievalSucceeded && includeUnindexedFiles {
                     succeeded = await self.indexer.rebuildAll(
                         onlyUnindexedFiles: true,
+                        fileIDs: remainingFileIDs,
+                        totalOverride: total,
+                        initialCompleted: initialCompleted,
                         checkpoint: { [indexingGate = self.indexingGate] in
                             await indexingGate.waitUntilRunnable()
                         },
+                        fileCompletion: completionHandler,
                         progress: progressHandler
                     )
                 } else {
@@ -2967,25 +3814,41 @@ final class AppState: ObservableObject {
                     includeUnindexedFiles: includeUnindexedFiles,
                     onlyMediaFiles: onlyMediaFiles,
                     fileCategories: fileCategories,
+                    fileIDs: remainingFileIDs,
+                    totalOverride: total,
+                    initialCompleted: initialCompleted,
+                    resumeShadow: isResuming,
                     checkpoint: { [indexingGate = self.indexingGate] in
                         await indexingGate.waitUntilRunnable()
                     },
+                    fileCompletion: completionHandler,
                     progress: progressHandler
                 )
             }
 
-            let stopped = self.indexingState == .stopping || self.vectorIndexRebuildProgress?.phase == .stopped
+            let stopped = self.indexingState == .stopping
+                || self.vectorIndexRebuildProgress?.phase == .stopped
+                || Task.isCancelled
             let progress = self.vectorIndexRebuildProgress
             self.reindexTask = nil
             if succeeded {
                 if rebuildVectorSpace {
+                    try? self.store.migrateIndexedFileSignatures(to: targetEmbeddingSignature)
                     self.store.setSetting(
                         Self.appliedEmbeddingSignatureKey,
                         targetEmbeddingSignature
                     )
                 }
                 self.acknowledgeContentCategories(contentCategoriesToAcknowledge)
+                self.store.deleteReindexJob(jobID: jobID)
+            } else {
+                self.store.setReindexJobStatus(
+                    jobID: jobID,
+                    status: stopped ? .interrupted : .failed
+                )
             }
+            self.activeReindexJobID = nil
+            self.refreshReindexJobSummary()
             self.finishIndexing(
                 stopped: stopped,
                 succeeded: succeeded,
@@ -2993,16 +3856,21 @@ final class AppState: ObservableObject {
                 total: progress?.total ?? total,
                 failed: progress?.failed ?? 0
             )
+            self.refreshReindexJobSummary()
+            if succeeded {
+                _ = await self.organizer.invalidateChangedManagedFileIndexes()
+            }
             self.refresh(allowManagedIndexing: succeeded)
-            // Retry failed model rebuilds on the next launch or settings change to avoid an immediate infinite loop.
-            if kind != .vectorRebuild || succeeded {
+            if succeeded {
                 self.refreshIndexConfigurationState()
+            } else {
+                self.isIndexConfigurationPromptPresented = false
             }
         }
         return true
     }
 
-    private func beginIndexing(kind: IndexingTaskKind, total: Int) {
+    private func beginIndexing(kind: IndexingTaskKind, total: Int, initialCompleted: Int = 0) {
         AppLogService.shared.write(
             "indexing task started",
             category: .indexPipeline,
@@ -3013,7 +3881,7 @@ final class AppState: ObservableObject {
         indexingState = .running
         vectorIndexRebuildProgress = VectorIndexRebuildProgress(
             phase: .preparing,
-            completed: 0,
+            completed: initialCompleted,
             total: total,
             currentFileName: nil,
             failed: 0

@@ -64,6 +64,15 @@ SQLite + sqlite-vec + 关键词/实体/向量 RRF 融合
 - 回答支持 Markdown、文件预览、原位重试、token usage、首 token 时间和总响应时间。
 - RAG 上下文最多保留八个 Parent，并使用稳定的 `[F#:P#]` 证据编号，在生成后进行校验。
 
+### Agent Skills 与反馈学习
+
+- FileNest 将搜索规划、基于证据的文件库回答、单文件聊天和反馈分析拆分为标准 `SKILL.md` Agent Skills，不再依赖一个巨大的固定 Prompt。
+- Skill 会从 App 内置目录、`~/.agents/skills` 共享用户目录和 FileNest 受管目录发现。受管 Skill 优先级最高，因此学习结果可以覆盖并演进内置能力，而不修改 App 包。
+- RAG Agent 采用“理解 → 检索 → 排序 → 回答 → 评价 → 学习”的闭环。反馈会由当前配置的本地或云端 AI 分析，只有可复用且高置信度的改进才会写入可审计的受管 Skill。
+- 发现阶段只加载名称和描述；完整指令与引用资源仅在自动路由、显式 `$skill-name` 激活或会话复用后加载。
+- 搜索与回答反馈会先保存为可审计记录，再由 AI 提议安全地更新已有 Skill，或生成一个职责明确、可复用的新 Skill。学习结果不能削弱本地隐私、证据约束、引用校验或 Prompt Injection 防护。
+- 可在设置页查看、启用、停用、定位、刷新或删除 Skills。
+
 ### 本地与云端 AI
 
 - 可安装、启动、更新和管理 Ollama，以及本地生成、Embedding、OCR 和 reranker 模型。

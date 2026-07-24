@@ -87,6 +87,9 @@ final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegat
     ) async {
         await MainActor.run {
             MainWindowPresenter.shared.present()
+            if response.notification.request.identifier == "filenest.search.complete" {
+                AppLifecycleCoordinator.shared.appState?.presentCompletedLibrarySearch()
+            }
         }
     }
 }
@@ -361,15 +364,6 @@ struct FileNestApp: App {
                 .keyboardShortcut(.delete, modifiers: [.command, .shift])
             }
         }
-
-        Window("FileNest Settings", id: "settings") {
-            SettingsView()
-                .environmentObject(appState)
-                .fileNestEnvironment(appState.settings)
-                .fileNestOverlayScrollStyle()
-        }
-        .defaultSize(width: 1040, height: 760)
-        .windowResizability(.contentMinSize)
 
         Window("FileNest Setup", id: "onboarding") {
             OnboardingView()
@@ -708,15 +702,13 @@ private struct MainWindowPresentationBridge: View {
 }
 
 private struct FileNestSettingsCommands: Commands {
-    @Environment(\.openWindow) private var openWindow
     @ObservedObject var appState: AppState
 
     var body: some Commands {
         CommandGroup(replacing: .appSettings) {
             Button("Settings…") {
-                appState.selectSettingsSection(.general)
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "settings")
+                appState.presentSettings(.general)
+                MainWindowPresenter.shared.present()
             }
             .keyboardShortcut(",", modifiers: .command)
         }

@@ -26,6 +26,8 @@ enum AppLogCategory: String, CaseIterable, Sendable {
     case vectorLifecycle = "vector.lifecycle"
     case vectorWrite = "vector.write"
     case vectorSearch = "vector.search"
+    case searchLifecycle = "search.lifecycle"
+    case searchPerformance = "search.performance"
     case performance = "performance"
     case chat = "chat"
 }

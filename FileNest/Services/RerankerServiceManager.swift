@@ -351,6 +351,13 @@ args = parser.parse_args()
 
 device = "mps" if torch.backends.mps.is_available() else "cpu"
 model = CrossEncoder(args.model, device=device)
+with torch.inference_mode():
+    model.predict(
+        [("File search", "A document stored on this Mac")],
+        activation_fn=torch.nn.Sigmoid(),
+        batch_size=1,
+        show_progress_bar=False,
+    )
 app = FastAPI(docs_url=None, redoc_url=None)
 
 class RerankRequest(BaseModel):
@@ -371,6 +378,7 @@ def rerank(request: RerankRequest):
         scores = model.predict(
             [(request.query, document) for document in request.documents],
             activation_fn=torch.nn.Sigmoid(),
+            batch_size=16,
             show_progress_bar=False,
         )
         results = [

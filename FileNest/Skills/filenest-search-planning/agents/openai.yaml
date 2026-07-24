@@ -1,0 +1,6 @@
+interface:
+  display_name: "FileNest Search Planning"
+  short_description: "Plan precise semantic and metadata file searches"
+  default_prompt: "Use $filenest-search-planning to plan this local file search."
+policy:
+  allow_implicit_invocation: true

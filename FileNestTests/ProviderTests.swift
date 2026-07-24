@@ -843,6 +843,44 @@ for line in sys.stdin:
         )])
     }
 
+    func testPaddleOCRProviderShutdownLetsWorkerExitThroughEOF() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let exitMarker = temporaryDirectory.appendingPathComponent("worker-exited")
+        let markerPath = String(reflecting: exitMarker.path)
+        let script = #"""
+import json
+import sys
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({
+        "id": request["id"],
+        "ok": True,
+        "text": "Paddle text",
+        "observations": []
+    }), flush=True)
+with open(\#(markerPath), "w", encoding="utf-8") as marker:
+    marker.write("closed")
+"""#
+        let provider = PaddleOCRProvider(
+            pythonExecutableURL: URL(fileURLWithPath: "/usr/bin/python3"),
+            workerScript: script
+        )
+
+        _ = try await provider.recognizeResult(
+            imageData: Data([1, 2, 3]),
+            mimeType: "image/png"
+        )
+        await provider.shutdown()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: exitMarker.path))
+    }
+
     func testCloudOCROpenAIFormatUsesVisionContent() async throws {
         let endpoint = "https://ocr-cloud.test/v1/chat/completions"
         registerJSON(endpoint, status: 200, object: [
@@ -920,6 +958,7 @@ for line in sys.stdin:
         XCTAssertEqual(results.first?.score ?? 0, 0.91, accuracy: 0.0001)
         let request = try XCTUnwrap(URLProtocolStub.request(for: endpoint))
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        XCTAssertEqual(request.timeoutInterval, 12)
         let body = try requestJSON(request)
         XCTAssertEqual(body["query"] as? String, "invoice")
         XCTAssertEqual(body["top_n"] as? Int, 2)

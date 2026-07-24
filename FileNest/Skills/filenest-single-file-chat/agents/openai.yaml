@@ -1,0 +1,6 @@
+interface:
+  display_name: "FileNest Single File Chat"
+  short_description: "Answer exclusively from one attached local file"
+  default_prompt: "Use $filenest-single-file-chat to answer from this file only."
+policy:
+  allow_implicit_invocation: true

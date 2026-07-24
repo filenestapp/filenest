@@ -1,0 +1,6 @@
+interface:
+  display_name: "FileNest Feedback Learning"
+  short_description: "Turn RAG evaluations into durable skill updates"
+  default_prompt: "Use $filenest-feedback-learning to analyze this saved RAG feedback."
+policy:
+  allow_implicit_invocation: true

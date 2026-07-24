@@ -42,6 +42,61 @@ struct MainView: View {
     }
 
     var body: some View {
+        Group {
+            if appState.isSettingsPresented {
+                SettingsView(onBack: appState.dismissSettings)
+                    .transition(.opacity)
+            } else {
+                mainWorkspace
+                    .transition(.opacity)
+            }
+        }
+        .background(FileNestTheme.sidebarSurface)
+        .animation(.easeInOut(duration: 0.18), value: appState.isSettingsPresented)
+        .animation(.easeInOut(duration: 0.18), value: isSidebarCollapsed)
+        .animation(.easeInOut(duration: 0.2), value: appState.previewedFile?.path)
+        .toolbar {
+            if !appState.isSettingsPresented {
+                if #available(macOS 26.0, *) {
+                    ToolbarItem(placement: .navigation) {
+                        toolbarNavigationControls
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .navigation) {
+                        toolbarNavigationControls
+                    }
+                }
+            }
+        }
+        .onAppear {
+            if !FileNestEnvironment.isUIPreview,
+               appState.prepareInitialMainViewChatIfNeeded() {
+                selection = .chat
+            } else {
+                appState.refreshChatSessions()
+            }
+            if appState.settings.onboardingCompleted && !appState.isWatching {
+                appState.startWatching()
+            }
+            presentOnboardingIfNeeded()
+            routePendingLibrarySearch()
+        }
+        .onChange(of: appState.isOnboardingPresented) { isPresented in
+            if isPresented { presentOnboardingIfNeeded() }
+        }
+        .onChange(of: appState.previewedFile?.path) { previewPath in
+            coordinateSidebar(withPreviewPath: previewPath)
+        }
+        .onChange(of: appState.librarySearchRequest?.id) { _ in
+            routePendingLibrarySearch()
+        }
+        .onChange(of: appState.librarySearchPresentationID) { _ in
+            setMainSelection(.library)
+        }
+    }
+
+    private var mainWorkspace: some View {
         HStack(spacing: 0) {
             if !isSidebarCollapsed {
                 FileNestSidebar(
@@ -94,43 +149,6 @@ struct MainView: View {
                 .frame(maxHeight: .infinity)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
-        }
-        .background(FileNestTheme.sidebarSurface)
-        .animation(.easeInOut(duration: 0.18), value: isSidebarCollapsed)
-        .animation(.easeInOut(duration: 0.2), value: appState.previewedFile?.path)
-        .toolbar {
-            if #available(macOS 26.0, *) {
-                ToolbarItem(placement: .navigation) {
-                    toolbarNavigationControls
-                }
-                .sharedBackgroundVisibility(.hidden)
-            } else {
-                ToolbarItem(placement: .navigation) {
-                    toolbarNavigationControls
-                }
-            }
-        }
-        .onAppear {
-            if !FileNestEnvironment.isUIPreview,
-               appState.prepareInitialMainViewChatIfNeeded() {
-                selection = .chat
-            } else {
-                appState.refreshChatSessions()
-            }
-            if appState.settings.onboardingCompleted && !appState.isWatching {
-                appState.startWatching()
-            }
-            presentOnboardingIfNeeded()
-            routePendingLibrarySearch()
-        }
-        .onChange(of: appState.isOnboardingPresented) { isPresented in
-            if isPresented { presentOnboardingIfNeeded() }
-        }
-        .onChange(of: appState.previewedFile?.path) { previewPath in
-            coordinateSidebar(withPreviewPath: previewPath)
-        }
-        .onChange(of: appState.librarySearchRequest?.id) { _ in
-            routePendingLibrarySearch()
         }
     }
 
@@ -240,9 +258,7 @@ struct MainView: View {
     }
 
     private func openSettings(_ section: SettingsSection) {
-        appState.selectSettingsSection(section)
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "settings")
+        appState.presentSettings(section)
     }
 }
 
@@ -343,6 +359,15 @@ private struct FileNestSidebar: View {
                             : Color.primary.opacity(0.86)
                     )
                 Spacer()
+                if item == .library, appState.librarySearchActivity?.isActive == true {
+                    AIThinkingActivitySymbol(size: 13)
+                        .help("Search in progress")
+                } else if item == .library, appState.hasUnreadCompletedLibrarySearch {
+                    Circle()
+                        .fill(FileNestTheme.accent)
+                        .frame(width: 7, height: 7)
+                        .help("Search complete")
+                }
             }
             .padding(.horizontal, 14)
             .frame(height: 40)
@@ -785,25 +810,28 @@ private struct SidebarStatusBar: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                Button {
-                    appState.reindexAll()
-                } label: {
-                    IndexingButtonLabel(defaultTitle: "Reindex", appState: appState)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(FileNestTheme.accentFill)
-                .disabled(appState.reindexButtonsDisabled)
-
-                Button {
-                    openSettings(.statistics)
-                } label: {
-                    Label {
-                        Text(localized("View Statistics"))
-                    } icon: {
-                        Image(systemName: "chart.bar.xaxis")
+                if appState.hasReindexActivity {
+                    Button {
+                        openSettings(.reindexActivity)
+                    } label: {
+                        Label {
+                            Text(localized("View Reindex Task"))
+                        } icon: {
+                            Image(systemName: SettingsSection.reindexActivity.icon)
+                        }
                     }
+                    .buttonStyle(.borderedProminent)
+                    .tint(FileNestTheme.accentFill)
+                } else {
+                    Button {
+                        appState.reindexAll()
+                    } label: {
+                        IndexingButtonLabel(defaultTitle: "Reindex", appState: appState)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(FileNestTheme.accentFill)
+                    .disabled(appState.reindexButtonsDisabled)
                 }
-                .buttonStyle(.bordered)
             }
             .controlSize(.small)
             }

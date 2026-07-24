@@ -826,7 +826,11 @@ struct OnboardingView: View {
             }
         case .embedding:
             VStack(spacing: 0) {
-                cloudTextRow(label: "API Format", value: "OpenAI-compatible /embeddings", setter: nil)
+                cloudTextRow(
+                    label: "API Format",
+                    value: appState.settings.localized("OpenAI-compatible /embeddings"),
+                    setter: nil
+                )
                 Divider().padding(.leading, 132)
                 cloudTextRow(label: "Base URL", value: appState.settings.cloudEmbeddingBaseURL,
                              setter: appState.settings.setCloudEmbeddingBaseURL)

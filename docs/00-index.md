@@ -4,8 +4,8 @@
 - Repository path: `/Users/la230048/work/ai.prompt/mactools`
 - Product baseline: current macOS implementation under `FileNest/`
 - Windows implementation: `FileNestWindows/`
-- Last synchronized: 2026-07-17 (Asia/Singapore)
-- Code baseline: `839c410`
+- Last synchronized: 2026-07-24 (Asia/Singapore)
+- Code baseline: `91848e2` plus the Agent Skills and RAG learning update documented below
 
 ## Reading order
 
@@ -51,6 +51,7 @@ The macOS source is the normative feature specification. Existing overview files
 
 | Date | Baseline | Documentation synchronized |
 | --- | --- | --- |
+| 2026-07-24 | Agent Skills and RAG learning update | Standard `SKILL.md` runtime, progressive capability routing, managed skill precedence, feedback-driven skill evolution, safety validation, settings management, and end-to-end tests |
 | 2026-07-20 | Latest working-tree macOS product update | Persistent assistant-answer feedback, copy-success state, localized feedback actions, and Windows parity implementation; macOS preview modes recorded as platform-specific QA tooling |
 | 2026-07-19 | Latest working-tree macOS product update | SHA-256 duplicate management, persisted retrieval confidence, 40-message chat paging, file-category reindex scope, creation-date backfill, budgeted directory inspection, managed-content audit, one-time migrations, and Windows parity implementation |
 | 2026-07-17 | `839c410` | Semantic boundary chunking, parent/child terminology, runner EOF recovery, parent-row cleanup, and selective reindex behavior |
