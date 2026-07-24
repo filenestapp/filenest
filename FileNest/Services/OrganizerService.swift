@@ -7,8 +7,17 @@ final class RuleClassifier: Classifier {
     private let strategy: ClassificationStrategy
 
     init(rules: [Rule], strategy: String) {
-        // Sort by descending priority.
-        self.rules = rules.filter { $0.enabled }.sorted { $0.priority > $1.priority }
+        // Directory-scoped rules always precede global rules. Priority resolves
+        // conflicts only among rules at the same scope level.
+        self.rules = rules.filter(\.enabled).sorted { lhs, rhs in
+            if lhs.usesSpecificSourceDirectories != rhs.usesSpecificSourceDirectories {
+                return lhs.usesSpecificSourceDirectories
+            }
+            if lhs.priority != rhs.priority {
+                return lhs.priority > rhs.priority
+            }
+            return (lhs.id ?? Int64.max) < (rhs.id ?? Int64.max)
+        }
         self.strategy = ClassificationStrategy(storedValue: strategy)
     }
 
@@ -16,7 +25,9 @@ final class RuleClassifier: Classifier {
         let ext = file.ext.lowercased()
 
         // Manual and AI-generated rules are both stored as deterministic extension conditions and use the same execution path.
-        for rule in rules where rule.type == RuleType.rule.rawValue || rule.type == RuleType.ai.rawValue {
+        for rule in rules
+        where (rule.type == RuleType.rule.rawValue || rule.type == RuleType.ai.rawValue)
+            && rule.appliesToSource(of: file) {
             let extensions = rule.pattern.split(separator: ",").map {
                 let value = $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 return value.hasPrefix(".") ? String(value.dropFirst()) : value

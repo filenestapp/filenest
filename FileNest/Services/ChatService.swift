@@ -70,6 +70,99 @@ enum LibrarySearchMatchKind: String, Codable, Equatable {
     }
 }
 
+enum LibrarySearchProgressStage: Equatable {
+    case analyzingQuery
+    case matchingMetadata
+    case matchingContent
+    case matchingEntities
+    case embeddingQuery
+    case searchingVectors
+    case reranking
+    case assemblingResults
+
+    var localizationKey: String {
+        switch self {
+        case .analyzingQuery: return "AI is analyzing the query…"
+        case .matchingMetadata: return "Matching filenames, titles, paths, and notes…"
+        case .matchingContent: return "Matching indexed document content…"
+        case .matchingEntities: return "Matching identifiers and structured values…"
+        case .embeddingQuery: return "Creating the query embedding…"
+        case .searchingVectors: return "Searching the vector index…"
+        case .reranking: return "Reranking the strongest matches…"
+        case .assemblingResults: return "Preparing final results…"
+        }
+    }
+
+    var logName: String {
+        switch self {
+        case .analyzingQuery: return "analyzing_query"
+        case .matchingMetadata: return "matching_metadata"
+        case .matchingContent: return "matching_content"
+        case .matchingEntities: return "matching_entities"
+        case .embeddingQuery: return "embedding_query"
+        case .searchingVectors: return "searching_vectors"
+        case .reranking: return "reranking"
+        case .assemblingResults: return "assembling_results"
+        }
+    }
+}
+
+enum SmartSearchKeywordRole: String, Codable, Equatable {
+    case core
+    case support
+    case format
+}
+
+enum LibrarySearchContentMode: String, Codable, Equatable {
+    case automatic
+    case metadataOnly = "metadata_only"
+    case indexedContent = "indexed_content"
+}
+
+private enum LibrarySearchChunkRoute: String {
+    case disabled
+    case scopedEvidence = "scoped_evidence"
+    case globalRecall = "global_recall"
+}
+
+/// A planner keyword is deliberately separated from its localized aliases. This keeps
+/// semantic retrieval language-neutral while still allowing lexical evidence to be shown
+/// in the language found in a file.
+struct SmartSearchKeyword: Codable, Equatable, Hashable {
+    let term: String
+    let canonical: String
+    let aliases: [String]
+    let weight: Double
+    let role: SmartSearchKeywordRole
+    let required: Bool
+
+    var allTerms: [String] {
+        var seen = Set<String>()
+        return ([term, canonical] + aliases).compactMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed.lowercased()).inserted else { return nil }
+            return trimmed
+        }
+    }
+
+    var normalizedWeight: Double {
+        min(max(weight, 0.05), 1)
+    }
+}
+
+enum LibrarySearchEvidenceKind: String, Codable, Equatable {
+    case exactPhrase
+    case keyword
+    case semantic
+    case entity
+}
+
+struct LibrarySearchEvidence: Codable, Equatable, Hashable {
+    let kind: LibrarySearchEvidenceKind
+    let label: String
+    let detail: String?
+}
+
 struct LibraryRelativeDateIntent: Equatable {
     let interval: DateInterval
     let contentYears: Set<Int>
@@ -92,6 +185,7 @@ struct LibrarySearchResult: Identifiable, Equatable {
     let sectionPath: [String]
     let pageStart: Int?
     let pageEnd: Int?
+    var evidence: [LibrarySearchEvidence] = []
 
     var confidencePercent: Int {
         Int((min(max(confidence, 0), 1) * 100).rounded())
@@ -117,6 +211,7 @@ struct LibrarySearchResult: Identifiable, Equatable {
 struct SmartLibrarySearchPlan: Codable, Equatable {
     let semanticQuery: String
     let keywords: [String]
+    var weightedKeywords: [SmartSearchKeyword] = []
     let exactName: String?
     let fileExtensions: Set<String>
     let categories: Set<FileCategory>
@@ -128,6 +223,7 @@ struct SmartLibrarySearchPlan: Codable, Equatable {
     let maximumSizeBytes: Int64?
     let hasNote: Bool?
     let isIndexed: Bool?
+    let contentMode: LibrarySearchContentMode
     let sort: LibrarySearchSort
 
     var sortNewestFirst: Bool { sort == .newest }
@@ -148,7 +244,25 @@ struct SmartLibrarySearchPlan: Codable, Equatable {
     var hasContentIntent: Bool {
         !semanticQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !keywords.isEmpty
+            || !weightedKeywords.isEmpty
             || exactName != nil
+    }
+
+    var weightedLexicalTerms: [String] {
+        let weightedTerms = weightedKeywords
+            .sorted { lhs, rhs in
+                if lhs.normalizedWeight != rhs.normalizedWeight {
+                    return lhs.normalizedWeight > rhs.normalizedWeight
+                }
+                return lhs.canonical.localizedCaseInsensitiveCompare(rhs.canonical) == .orderedAscending
+            }
+            .flatMap(\.allTerms)
+        var seen = Set<String>()
+        return (weightedTerms + keywords).compactMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed.lowercased()).inserted else { return nil }
+            return trimmed
+        }
     }
 }
 
@@ -193,6 +307,9 @@ struct CachedLibrarySearch: Equatable {
 }
 
 struct CachedLibrarySearchPayload: Codable, Equatable {
+    static let currentPipelineVersion = 4
+
+    let pipelineVersion: Int
     let results: [CachedLibrarySearchResult]
     let smartPlan: SmartLibrarySearchPlan?
     let usedAI: Bool
@@ -208,6 +325,7 @@ struct CachedLibrarySearchResult: Codable, Equatable {
     let sectionPath: [String]
     let pageStart: Int?
     let pageEnd: Int?
+    var evidence: [LibrarySearchEvidence] = []
 
     init(_ result: LibrarySearchResult) {
         fileID = result.file.id
@@ -219,6 +337,7 @@ struct CachedLibrarySearchResult: Codable, Equatable {
         sectionPath = result.sectionPath
         pageStart = result.pageStart
         pageEnd = result.pageEnd
+        evidence = result.evidence
     }
 }
 
@@ -245,6 +364,7 @@ private struct SmartSearchPlanPayload: Decodable {
     let intent: String?
     let semanticQuery: String?
     let keywords: [String]?
+    let weightedKeywords: [SmartSearchKeyword]?
     let exactName: String?
     let fileExtensions: [String]?
     let categories: [String]?
@@ -257,12 +377,14 @@ private struct SmartSearchPlanPayload: Decodable {
     let maximumSizeBytes: Int64?
     let hasNote: Bool?
     let isIndexed: Bool?
+    let contentMode: String?
     let sort: String?
 
     enum CodingKeys: String, CodingKey {
         case intent
         case semanticQuery = "semantic_query"
         case keywords
+        case weightedKeywords = "weighted_keywords"
         case exactName = "exact_name"
         case fileExtensions = "file_extensions"
         case categories
@@ -275,12 +397,44 @@ private struct SmartSearchPlanPayload: Decodable {
         case maximumSizeBytes = "size_max_bytes"
         case hasNote = "has_note"
         case isIndexed = "is_indexed"
+        case contentMode = "content_mode"
         case sort
     }
 }
 
 private enum SmartSearchPlanError: Error {
     case invalidJSON
+}
+
+private actor RerankResultCache {
+    private struct Entry {
+        let results: [RerankItem]
+        let storedAt: Date
+    }
+
+    private let capacity = 48
+    private let lifetime: TimeInterval = 30 * 60
+    private var entries = [Int: Entry]()
+    private var insertionOrder = [Int]()
+
+    func results(for key: Int) -> [RerankItem]? {
+        guard let entry = entries[key] else { return nil }
+        guard Date().timeIntervalSince(entry.storedAt) <= lifetime else {
+            entries[key] = nil
+            insertionOrder.removeAll { $0 == key }
+            return nil
+        }
+        return entry.results
+    }
+
+    func insert(_ results: [RerankItem], for key: Int) {
+        entries[key] = Entry(results: results, storedAt: Date())
+        insertionOrder.removeAll { $0 == key }
+        insertionOrder.append(key)
+        while insertionOrder.count > capacity {
+            entries[insertionOrder.removeFirst()] = nil
+        }
+    }
 }
 
 struct ChatHistoryPage {
@@ -299,23 +453,29 @@ final class ChatService {
     private let providedEmbedder: EmbeddingProvider?
     private let providedLLMProvider: LLMProvider?
     private let providedVectorStore: VectorStore?
+    private let skillService: AgentSkillService?
     private let contextWindowResolver = ChatModelContextWindowResolver()
     private let doclingProcessor = DoclingDocumentProcessor()
+    private let rerankResultCache = RerankResultCache()
     private let embedderLock = NSLock()
     private var cachedEmbedder: (signature: String, provider: EmbeddingProvider)?
     private let ocrProviderLock = NSLock()
     private var cachedOCRProvider: (signature: String, provider: OCRProvider?)?
+    private let activatedSkillsLock = NSLock()
+    private var activatedSkillNamesBySession = [Int64: Set<String>]()
 
     init(store: SQLiteStore,
          settings: AppSettings,
          embedder: EmbeddingProvider? = nil,
          llmProvider: LLMProvider? = nil,
-         vectorStore: VectorStore? = nil) {
+         vectorStore: VectorStore? = nil,
+         skillService: AgentSkillService? = nil) {
         self.store = store
         self.settings = settings
         self.providedEmbedder = embedder
         self.providedLLMProvider = llmProvider
         self.providedVectorStore = vectorStore
+        self.skillService = skillService
         try? store.migrateLegacyChatMessagesIfNeeded()
         try? store.deleteEmptyChatSessions()
     }
@@ -493,6 +653,18 @@ final class ChatService {
 
                 let isFileChat = !(attachedFilePath?.isEmpty ?? true)
                 let usesExistingIndex = attachedFilePath.map { canReuseAttachedIndex(at: $0) } ?? false
+                let skillActivation = await resolvedSkillActivation(
+                    for: question,
+                    sessionID: sessionId,
+                    capability: isFileChat ? .attachedFileAnswer : .libraryAnswer,
+                    providerMode: providerMode,
+                    modelOverride: modelOverride
+                )
+                if Task.isCancelled {
+                    continuation.yield(.cancelled)
+                    continuation.finish()
+                    return
+                }
                 continuation.yield(.progress(ChatProgress(
                     phase: isFileChat ? .readingFile : .planningSearch,
                     scope: isFileChat ? .attachedFile : .library,
@@ -507,6 +679,7 @@ final class ChatService {
                         for: question,
                         providerMode: providerMode,
                         modelOverride: modelOverride,
+                        skillContext: skillActivation.context,
                         onIntentUpdate: { intent in
                             searchIntent = intent
                             continuation.yield(.progress(ChatProgress(
@@ -531,6 +704,7 @@ final class ChatService {
                     for: question,
                     attachedFilePath: attachedFilePath,
                     smartSearchPlan: smartSearchPlan,
+                    skillContext: skillActivation.context,
                     onReranking: {
                         continuation.yield(.progress(ChatProgress(
                             phase: .reranking,
@@ -771,15 +945,19 @@ final class ChatService {
         limit: Int = 200,
         managedRootPath: String? = nil,
         includeSemantic: Bool = true,
-        rerankCandidateLimit: Int = 10,
-        allowedCategories: Set<FileCategory> = []
+        includeChunkContent: Bool = true,
+        rerankCandidateLimit: Int = 32,
+        allowedCategories: Set<FileCategory> = [],
+        onStage: ((LibrarySearchProgressStage) -> Void)? = nil
     ) async -> [LibrarySearchResult] {
         let results = await executeLibrarySearch(
             rawQuery,
             limit: limit,
             smartPlan: nil,
             includeSemantic: includeSemantic,
-            rerankCandidateLimit: rerankCandidateLimit
+            includeChunkContent: includeChunkContent,
+            rerankCandidateLimit: rerankCandidateLimit,
+            onStage: onStage
         )
         return LibrarySearchResult.applyingDisplayConfidencePolicy(to: Self.filteredManagedResults(
             results,
@@ -793,15 +971,25 @@ final class ChatService {
         limit: Int = 200,
         managedRootPath: String? = nil,
         allowedCategories: Set<FileCategory> = [],
-        onIntentUpdate: ((String) -> Void)? = nil
+        onIntentUpdate: ((String) -> Void)? = nil,
+        onStage: ((LibrarySearchProgressStage) -> Void)? = nil
     ) async -> SmartLibrarySearchResponse {
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackPlan = Self.fallbackSmartSearchPlan(for: query)
         guard !query.isEmpty, limit > 0 else {
             return SmartLibrarySearchResponse(results: [], plan: fallbackPlan, usedAI: false)
         }
+        onStage?(.analyzingQuery)
+        let skillActivation = await resolvedSkillActivation(
+            for: query,
+            sessionID: nil,
+            capability: .search,
+            providerMode: .configured,
+            modelOverride: nil
+        )
         let resolved = await resolvedSmartSearchPlan(
             for: query,
+            skillContext: skillActivation.context,
             onIntentUpdate: onIntentUpdate
         )
         guard !Task.isCancelled else {
@@ -809,7 +997,7 @@ final class ChatService {
         }
         let plan = resolved.plan
         let results = LibrarySearchResult.applyingDisplayConfidencePolicy(to: Self.filteredManagedResults(
-            await executeLibrarySearch(query, limit: limit, smartPlan: plan),
+            await executeLibrarySearch(query, limit: limit, smartPlan: plan, onStage: onStage),
             rootPath: managedRootPath,
             allowedCategories: allowedCategories
         ))
@@ -843,10 +1031,106 @@ final class ChatService {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
+    private func resolvedSkillActivation(
+        for task: String,
+        sessionID: Int64?,
+        capability: AgentSkillCapability,
+        providerMode: ChatProviderMode,
+        modelOverride: String?
+    ) async -> AgentSkillActivation {
+        guard let skillService else {
+            return AgentSkillActivation(names: [], context: "")
+        }
+
+        var selected = Set(skillService.defaultSkillNames(for: capability))
+        if capability == .libraryAnswer {
+            selected.formUnion(skillService.defaultSkillNames(for: .search))
+        }
+        selected.formUnion(skillService.explicitSkillNames(in: task))
+        if let sessionID {
+            selected.formUnion(activeSkillNames(for: sessionID))
+        }
+
+        // Defaults, explicit requests, and session skills are deterministic. Ask the
+        // model to route only when additional candidate skills remain.
+        let candidateNames = skillService.dynamicSkillNames(
+            for: capability,
+            excluding: selected
+        )
+        let selectionPrompt = skillService.selectionSystemPrompt(candidateNames: candidateNames)
+        if !selectionPrompt.isEmpty,
+           let provider = skillSelectionProvider(
+               for: providerMode,
+               modelOverride: modelOverride
+           ) {
+            do {
+                let response = try await provider.chat(
+                    [
+                        ChatTurn(role: .system, content: selectionPrompt),
+                        ChatTurn(role: .user, content: task),
+                    ],
+                    context: nil
+                )
+                try Task.checkCancellation()
+                selected.formUnion(
+                    skillService.decodeSelectedSkillNames(
+                        response,
+                        allowedNames: candidateNames
+                    )
+                )
+            } catch {
+                if Task.isCancelled { return AgentSkillActivation(names: [], context: "") }
+                AppLogService.shared.write(
+                    "Agent Skill selection fell back to defaults",
+                    category: .chat,
+                    level: .warning,
+                    metadata: ["error": error.localizedDescription]
+                )
+            }
+        }
+
+        if let sessionID {
+            selected = mergeActiveSkillNames(selected, for: sessionID)
+        }
+        return skillService.activate(names: selected.sorted())
+    }
+
+    private func activeSkillNames(for sessionID: Int64) -> Set<String> {
+        activatedSkillsLock.lock()
+        defer { activatedSkillsLock.unlock() }
+        return activatedSkillNamesBySession[sessionID] ?? []
+    }
+
+    private func mergeActiveSkillNames(
+        _ names: Set<String>,
+        for sessionID: Int64
+    ) -> Set<String> {
+        activatedSkillsLock.lock()
+        defer { activatedSkillsLock.unlock() }
+        activatedSkillNamesBySession[sessionID, default: []].formUnion(names)
+        return activatedSkillNamesBySession[sessionID] ?? names
+    }
+
+    private func skillSelectionProvider(
+        for providerMode: ChatProviderMode,
+        modelOverride: String?
+    ) -> LLMProvider? {
+        switch providerMode {
+        case .configured:
+            guard settings.llmChoice != AppSettings.LLMChoice.none.rawValue else { return nil }
+            return providedLLMProvider ?? settings.makeLLMProvider(modelOverride: modelOverride)
+        case let .local(model):
+            return settings.makeLocalLLMProvider(modelOverride: model)
+        case .vectorOnly:
+            return nil
+        }
+    }
+
     private func resolvedSmartSearchPlan(
         for query: String,
         providerMode: ChatProviderMode = .configured,
         modelOverride: String? = nil,
+        skillContext: String = "",
         onIntentUpdate: ((String) -> Void)? = nil
     ) async -> (plan: SmartLibrarySearchPlan, usedAI: Bool) {
         let fallbackPlan = Self.fallbackSmartSearchPlan(for: query)
@@ -869,7 +1153,10 @@ final class ChatService {
             var reply = ""
             var lastIntent = ""
             for try await chunk in provider.streamChat([
-                ChatTurn(role: .system, content: Self.smartSearchSystemPrompt()),
+                ChatTurn(
+                    role: .system,
+                    content: smartSearchSystemPrompt(skillContext: skillContext)
+                ),
                 ChatTurn(role: .user, content: query),
             ], context: nil) {
                 try Task.checkCancellation()
@@ -891,7 +1178,9 @@ final class ChatService {
         limit: Int,
         smartPlan: SmartLibrarySearchPlan?,
         includeSemantic: Bool = true,
-        rerankCandidateLimit: Int = 24
+        includeChunkContent: Bool = true,
+        rerankCandidateLimit: Int = 32,
+        onStage: ((LibrarySearchProgressStage) -> Void)? = nil
     ) async -> [LibrarySearchResult] {
         await executeLibrarySearchDetails(
             rawQuery,
@@ -899,7 +1188,9 @@ final class ChatService {
             smartPlan: smartPlan,
             sortByConfidence: true,
             includeSemantic: includeSemantic,
-            rerankCandidateLimit: rerankCandidateLimit
+            includeChunkContent: includeChunkContent,
+            rerankCandidateLimit: rerankCandidateLimit,
+            onStage: onStage
         ).results
     }
 
@@ -909,8 +1200,10 @@ final class ChatService {
         smartPlan: SmartLibrarySearchPlan?,
         sortByConfidence: Bool = false,
         includeSemantic: Bool = true,
-        rerankCandidateLimit: Int = 24,
-        onReranking: (() -> Void)? = nil
+        includeChunkContent: Bool = true,
+        rerankCandidateLimit: Int = 32,
+        onReranking: (() -> Void)? = nil,
+        onStage: ((LibrarySearchProgressStage) -> Void)? = nil
     ) async -> LibrarySearchExecution {
         let searchStartedAt = Date()
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -925,11 +1218,12 @@ final class ChatService {
         let effectiveSemanticQuery = semanticQuery.isEmpty
             ? Self.contentSearchQuery(in: query)
             : semanticQuery
-        // Keep model paraphrases in vector retrieval only. Lexical ranking must use terms
-        // grounded in the user's original wording, otherwise translated grammar can become evidence.
+        // The planner's aliases are grounded in the user's requested concepts. They let
+        // a localized query match source text in another language without treating a
+        // free-form model paraphrase as lexical evidence.
         let terms = Self.librarySearchTerms(
             query,
-            additionalTerms: effectivePlan.keywords
+            additionalTerms: effectivePlan.weightedLexicalTerms
                 + [effectivePlan.exactName].compactMap { $0 }
                 + effectivePlan.folderTerms
         )
@@ -938,50 +1232,107 @@ final class ChatService {
         } ?? Self.relativeDateIntent(in: query)
         let isRelativeDateOnlyQuery = relativeDateIntent != nil
             && Self.isRelativeDateOnlyQuery(query)
+        onStage?(.matchingMetadata)
         let lexicalStartedAt = Date()
         var lexicalByID = [Int64: LibraryLexicalMatch]()
         let lexicalCandidates = (try? store.files(
-            matchingAny: Array(terms.prefix(8)),
+            matchingAny: Array(terms.prefix(24)),
             limit: max(200, min(800, limit * 3))
         )) ?? []
-        for file in lexicalCandidates {
+        let lexicalCandidateIDs = Set(lexicalCandidates.compactMap(\.id))
+        let entityTerms = Self.routedEntityTerms(in: query, plan: effectivePlan)
+        let chunkRoute = Self.chunkRoute(
+            query: query,
+            plan: effectivePlan,
+            lexicalCandidateCount: lexicalCandidates.count,
+            entityTerms: entityTerms,
+            includeChunkContent: includeChunkContent
+        )
+        let chunkLexicalHits: [VectorSearchHit]
+        switch chunkRoute {
+        case .disabled:
+            chunkLexicalHits = []
+        case .scopedEvidence:
+            onStage?(.matchingContent)
+            chunkLexicalHits = (try? store.chunkTextMatches(
+                terms: Array(terms.prefix(8)),
+                fileIDs: lexicalCandidateIDs,
+                limit: max(80, min(400, limit * 2))
+            )) ?? []
+        case .globalRecall:
+            onStage?(.matchingContent)
+            let recallTerms = Self.uniqueSearchTerms(
+                entityTerms
+                    + Self.distinctiveSearchIdentifiers(in: query)
+                    + effectivePlan.weightedLexicalTerms.filter(Self.isDistinctiveSearchIdentifier)
+                    + terms.sorted { $0.count > $1.count }
+            )
+            chunkLexicalHits = (try? store.chunkTextMatches(
+                terms: Array(recallTerms.prefix(4)),
+                limit: max(40, min(120, limit))
+            )) ?? []
+        }
+        var chunkHitByFileID = [Int64: VectorSearchHit]()
+        for hit in chunkLexicalHits where hit.score > (chunkHitByFileID[hit.fileId]?.score ?? -.infinity) {
+            chunkHitByFileID[hit.fileId] = hit
+        }
+        var candidatesByID = Dictionary(uniqueKeysWithValues: lexicalCandidates.compactMap { file in
+            file.id.map { ($0, file) }
+        })
+        let missingFileIDs = Set(chunkHitByFileID.keys).subtracting(candidatesByID.keys)
+        if !missingFileIDs.isEmpty,
+           let missingFiles = try? store.files(ids: missingFileIDs) {
+            candidatesByID.merge(missingFiles) { existing, _ in existing }
+        }
+        for file in candidatesByID.values {
             guard !Task.isCancelled else {
                 return LibrarySearchExecution(results: [], semanticHitsByFile: [:])
             }
             guard let id = file.id,
-                  let match = Self.libraryLexicalMatch(file: file, query: query, terms: terms) else {
+                  let match = Self.libraryLexicalMatch(
+                    file: file,
+                    query: query,
+                    terms: terms,
+                    weightedKeywords: effectivePlan.weightedKeywords,
+                    additionalContent: chunkHitByFileID[id]?.chunkText
+                  ) else {
                 continue
             }
             if let existing = lexicalByID[id], match.score <= existing.score { continue }
             lexicalByID[id] = match
         }
-        let lexicalMilliseconds = Int(Date().timeIntervalSince(lexicalStartedAt) * 1_000)
+        var lexicalMilliseconds = Int(Date().timeIntervalSince(lexicalStartedAt) * 1_000)
+        var usedDeferredContentFallback = false
 
         var semanticByID = [Int64: VectorSearchHit]()
         var semanticHitsByFile = [Int64: [VectorSearchHit]]()
         var acceptedSemanticCount = 0
         var effectiveSemanticThreshold: Float?
-        let entityStartedAt = Date()
-        let entityTerms = IndexerService.extractedEntityTerms(from: query)
-        let entityHits = (try? store.entityChunkMatches(
-            terms: entityTerms,
-            limit: max(20, min(limit * 2, 60))
-        )) ?? []
-        guard !Task.isCancelled else {
-            return LibrarySearchExecution(results: [], semanticHitsByFile: [:])
-        }
-        let entityMilliseconds = Int(Date().timeIntervalSince(entityStartedAt) * 1_000)
+        var entityMilliseconds = 0
         var entityByID = [Int64: VectorSearchHit]()
-        for hit in entityHits {
-            semanticHitsByFile[hit.fileId, default: []].append(hit)
-            if hit.score > (entityByID[hit.fileId]?.score ?? -.infinity) {
-                entityByID[hit.fileId] = hit
+        if !entityTerms.isEmpty {
+            onStage?(.matchingEntities)
+            let entityStartedAt = Date()
+            let entityHits = (try? store.entityChunkMatches(
+                terms: entityTerms,
+                limit: max(20, min(limit * 2, 60))
+            )) ?? []
+            guard !Task.isCancelled else {
+                return LibrarySearchExecution(results: [], semanticHitsByFile: [:])
+            }
+            entityMilliseconds = Int(Date().timeIntervalSince(entityStartedAt) * 1_000)
+            for hit in entityHits {
+                semanticHitsByFile[hit.fileId, default: []].append(hit)
+                if hit.score > (entityByID[hit.fileId]?.score ?? -.infinity) {
+                    entityByID[hit.fileId] = hit
+                }
             }
         }
         var embeddingMilliseconds = 0
         var vectorMilliseconds = 0
         var rerankerMilliseconds = 0
         if includeSemantic, !effectiveSemanticQuery.isEmpty, !Task.isCancelled {
+            onStage?(.embeddingQuery)
             let embeddingStartedAt = Date()
             let queryVector = try? await activeEmbedder().embed(effectiveSemanticQuery)
             embeddingMilliseconds = Int(Date().timeIntervalSince(embeddingStartedAt) * 1_000)
@@ -989,6 +1340,7 @@ final class ChatService {
                 guard !Task.isCancelled else {
                     return LibrarySearchExecution(results: [], semanticHitsByFile: [:])
                 }
+                onStage?(.searchingVectors)
                 let vectorStore = providedVectorStore ?? AppStateIndexerProxy.shared.vectorStore
                 let vectorStartedAt = Date()
                 let hits = await vectorStore.searchChunks(queryVector, k: max(40, min(limit * 6, 120)))
@@ -1005,6 +1357,7 @@ final class ChatService {
                 effectiveSemanticThreshold = dynamicallyAccepted.map(\.score).min()
                 if settings.makeRerankingProvider() != nil, dynamicallyAccepted.count > 1 {
                     onReranking?()
+                    onStage?(.reranking)
                 }
                 let rerankerStartedAt = Date()
                 let acceptedHits = await rerankedSemanticHits(
@@ -1020,6 +1373,53 @@ final class ChatService {
                     }
                 }
             }
+        }
+
+        // Generic conceptual searches normally rely on indexed file text and vectors.
+        // Only fall back to a global chunk scan when every faster lane produced no
+        // candidate, preserving recall for stale or truncated file-level extraction.
+        if includeChunkContent,
+           chunkRoute == .disabled,
+           lexicalByID.isEmpty,
+           semanticByID.isEmpty,
+           entityByID.isEmpty,
+           !terms.isEmpty,
+           !Task.isCancelled {
+            usedDeferredContentFallback = true
+            onStage?(.matchingContent)
+            let fallbackStartedAt = Date()
+            let fallbackTerms = Array(terms.sorted { $0.count > $1.count }.prefix(2))
+            let fallbackHits = (try? store.chunkTextMatches(
+                terms: fallbackTerms,
+                limit: max(40, min(120, limit))
+            )) ?? []
+            var fallbackFileIDs = Set<Int64>()
+            for hit in fallbackHits {
+                fallbackFileIDs.insert(hit.fileId)
+                if hit.score > (chunkHitByFileID[hit.fileId]?.score ?? -.infinity) {
+                    chunkHitByFileID[hit.fileId] = hit
+                }
+            }
+            let missingFallbackFileIDs = fallbackFileIDs.subtracting(candidatesByID.keys)
+            if !missingFallbackFileIDs.isEmpty,
+               let fallbackFiles = try? store.files(ids: missingFallbackFileIDs) {
+                candidatesByID.merge(fallbackFiles) { existing, _ in existing }
+            }
+            for fileID in fallbackFileIDs {
+                guard let file = candidatesByID[fileID],
+                      let match = Self.libraryLexicalMatch(
+                        file: file,
+                        query: query,
+                        terms: terms,
+                        weightedKeywords: effectivePlan.weightedKeywords,
+                        additionalContent: chunkHitByFileID[fileID]?.chunkText
+                      ) else {
+                    continue
+                }
+                if let existing = lexicalByID[fileID], match.score <= existing.score { continue }
+                lexicalByID[fileID] = match
+            }
+            lexicalMilliseconds += Int(Date().timeIntervalSince(fallbackStartedAt) * 1_000)
         }
 
         var structuredByID = [Int64: FileRecord]()
@@ -1053,6 +1453,7 @@ final class ChatService {
             }
         }
 
+        onStage?(.assemblingResults)
         let lexicalRank = Dictionary(uniqueKeysWithValues: lexicalByID
             .sorted { lhs, rhs in
                 lhs.value.score == rhs.value.score
@@ -1094,7 +1495,13 @@ final class ChatService {
             } ?? false
             var score = 0.0
             if let rank = lexicalRank[fileID] { score += 0.36 / Double(60 + rank) }
-            if let rank = semanticRank[fileID] { score += 0.44 / Double(60 + rank) }
+            if let rank = semanticRank[fileID] {
+                score += 0.44 / Double(60 + rank)
+                // Preserve score magnitude as well as rank. Otherwise a weak lexical
+                // hit can overtake a materially stronger semantic or reranker result
+                // because adjacent reciprocal ranks differ only slightly.
+                score += Double(semantic?.score ?? 0) * 0.20
+            }
             if let rank = entityRank[fileID] { score += 0.20 / Double(60 + rank) }
             if isExactNameMatch { score += 0.10 }
 
@@ -1117,18 +1524,34 @@ final class ChatService {
             let semanticSnippet = (entity ?? semantic)?.chunkText.flatMap {
                 Self.compactExcerpt($0, terms: terms)
             }
-            let confidence = max(
-                max(
-                    max(
-                        isExactNameMatch ? 1 : (lexical?.confidence ?? 0),
-                        semantic.map { Self.semanticConfidence(for: $0) } ?? 0
-                    ),
-                    entity == nil ? 0 : 0.98
-                ),
-                lexical == nil && semantic == nil && entity == nil
+            let confidence = Self.calibratedSearchConfidence(
+                lexical: lexical,
+                semantic: semantic,
+                entity: entity,
+                isExactNameMatch: isExactNameMatch,
+                structuredOnly: lexical == nil && semantic == nil && entity == nil
                     ? Self.structuredOnlyConfidence(for: effectivePlan)
                     : 0
             )
+            var evidence = lexical?.evidence ?? []
+            if entity != nil {
+                evidence.append(LibrarySearchEvidence(
+                    kind: .entity,
+                    label: "Exact entity",
+                    detail: nil
+                ))
+            }
+            if let semantic {
+                evidence.append(contentsOf: Self.semanticKeywordEvidence(
+                    in: semantic.chunkText,
+                    weightedKeywords: effectivePlan.weightedKeywords
+                ))
+                evidence.append(LibrarySearchEvidence(
+                    kind: .semantic,
+                    label: effectiveSemanticQuery,
+                    detail: nil
+                ))
+            }
             return LibrarySearchResult(
                 file: file,
                 score: score,
@@ -1137,7 +1560,8 @@ final class ChatService {
                 snippet: lexical?.snippet ?? semanticSnippet,
                 sectionPath: (entity ?? semantic)?.sectionPath ?? [],
                 pageStart: (entity ?? semantic)?.pageStart,
-                pageEnd: (entity ?? semantic)?.pageEnd
+                pageEnd: (entity ?? semantic)?.pageEnd,
+                evidence: Array(Self.uniqueSearchEvidence(evidence).prefix(3))
             )
         }
 
@@ -1222,8 +1646,14 @@ final class ChatService {
             "library search stages completed",
             category: .performance,
             metadata: [
+                "chunkCandidates": "\(chunkHitByFileID.count)",
+                "chunkRoute": chunkRoute.rawValue,
+                "deferredContentFallback": "\(usedDeferredContentFallback)",
                 "embeddingMs": "\(embeddingMilliseconds)",
+                "entityRouted": "\(!entityTerms.isEmpty)",
                 "entityMs": "\(entityMilliseconds)",
+                "fileCandidates": "\(lexicalCandidates.count)",
+                "lexicalMatches": "\(lexicalByID.count)",
                 "lexicalMs": "\(lexicalMilliseconds)",
                 "rerankerMs": "\(rerankerMilliseconds)",
                 "results": "\(sortedResults.count)",
@@ -1265,6 +1695,7 @@ final class ChatService {
     private func relatedFiles(for question: String,
                               attachedFilePath: String?,
                               smartSearchPlan: SmartLibrarySearchPlan?,
+                              skillContext: String,
                               onReranking: (() -> Void)? = nil) async -> (
                                   files: [FileRecord],
                                   matches: [ChatRelatedFileMatch],
@@ -1280,7 +1711,8 @@ final class ChatService {
                canReuseIndex(for: indexedFile) {
                 let context = await indexedAttachedFileContext(
                     question: question,
-                    file: indexedFile
+                    file: indexedFile,
+                    skillContext: skillContext
                 )
                 return ([indexedFile], [], context)
             }
@@ -1320,7 +1752,8 @@ final class ChatService {
             files.append(attachedRecord)
             contextParts.append(buildAttachedFileContext(
                 file: attachedRecord,
-                extractedText: String(extracted.text.prefix(Self.attachedContextCharacterLimit))
+                extractedText: String(extracted.text.prefix(Self.attachedContextCharacterLimit)),
+                skillContext: skillContext
             ))
             // Chat with File is isolated: it uses only the current file and skips library-wide vector and keyword search.
             return (files, [], contextParts.joined(separator: "\n\n"))
@@ -1370,7 +1803,8 @@ final class ChatService {
         }
         contextParts.append(buildLibraryContext(
             from: execution.results,
-            matchedChunks: matchedChunks
+            matchedChunks: matchedChunks,
+            skillContext: skillContext
         ))
         return (files, matches, contextParts.joined(separator: "\n\n"))
     }
@@ -1396,7 +1830,11 @@ final class ChatService {
         return canReuseIndex(for: file)
     }
 
-    private func indexedAttachedFileContext(question: String, file: FileRecord) async -> String {
+    private func indexedAttachedFileContext(
+        question: String,
+        file: FileRecord,
+        skillContext: String
+    ) async -> String {
         var selectedChunks = [VectorSearchHit]()
         if let fileID = file.id,
            let queryVector = try? await activeEmbedder().embed(question),
@@ -1423,7 +1861,11 @@ final class ChatService {
         }
 
         if !selectedChunks.isEmpty {
-            return buildIndexedAttachedFileContext(file: file, chunks: selectedChunks)
+            return buildIndexedAttachedFileContext(
+                file: file,
+                chunks: selectedChunks,
+                skillContext: skillContext
+            )
         }
 
         let storedText = [file.title, file.note, file.contentText]
@@ -1432,7 +1874,8 @@ final class ChatService {
             .joined(separator: "\n\n")
         return buildAttachedFileContext(
             file: file,
-            extractedText: String(storedText.prefix(Self.attachedContextCharacterLimit))
+            extractedText: String(storedText.prefix(Self.attachedContextCharacterLimit)),
+            skillContext: skillContext
         )
     }
 
@@ -1503,6 +1946,67 @@ final class ChatService {
         return uniqueSearchTerms(
             variants.flatMap(relevanceTerms(in:)).filter(isLexicalEvidenceTerm)
         )
+    }
+
+    private static func inferredContentSearchMode(in query: String) -> LibrarySearchContentMode {
+        if hasExplicitIndexedContentIntent(in: query) {
+            return .indexedContent
+        }
+        if inferredExactFileName(in: query) != nil {
+            return .metadataOnly
+        }
+        let hasContentTerms = !contentSearchTerms(in: query).isEmpty
+        let hasStructuralConstraint = relativeDateIntent(in: query) != nil
+            || !requestedYears(in: query).isEmpty
+            || !inferredFileExtensions(in: query).isEmpty
+            || !inferredSearchCategories(in: query).isEmpty
+            || inferredItemKind(in: query) != .any
+        return !hasContentTerms && hasStructuralConstraint ? .metadataOnly : .automatic
+    }
+
+    private static func hasExplicitIndexedContentIntent(in query: String) -> Bool {
+        let normalized = query.lowercased()
+        let markers = [
+            "contains", "containing", "mentions", "mentioning", "says", "text", "content",
+            "body", "full text", "exact phrase", "keyword",
+            "\u{5305}\u{542B}", "\u{542B}\u{6709}", "\u{63D0}\u{5230}", "\u{51FA}\u{73B0}",
+            "\u{6B63}\u{6587}", "\u{5185}\u{5BB9}", "\u{5168}\u{6587}", "\u{5173}\u{952E}\u{8BCD}",
+        ]
+        if markers.contains(where: normalized.contains) {
+            return true
+        }
+        let quoteCharacters: Set<Character> = ["\"", "\u{201C}", "\u{201D}", "\u{300C}", "\u{300D}"]
+        return normalized.filter { quoteCharacters.contains($0) }.count >= 2
+    }
+
+    private static func routedEntityTerms(
+        in query: String,
+        plan: SmartLibrarySearchPlan
+    ) -> [String] {
+        if plan.contentMode == .metadataOnly, plan.exactName != nil {
+            return []
+        }
+        let requestedYearTerms = Set(requestedYears(in: query).map(String.init))
+        return IndexerService.extractedEntityTerms(from: query).filter { term in
+            !(plan.dateInterval != nil && requestedYearTerms.contains(term))
+        }
+    }
+
+    private static func chunkRoute(
+        query: String,
+        plan: SmartLibrarySearchPlan,
+        lexicalCandidateCount: Int,
+        entityTerms: [String],
+        includeChunkContent: Bool
+    ) -> LibrarySearchChunkRoute {
+        guard includeChunkContent else { return .disabled }
+        let explicitlySearchesContent = plan.contentMode == .indexedContent
+            || hasExplicitIndexedContentIntent(in: query)
+        let needsIdentifierEvidence = !entityTerms.isEmpty
+        guard explicitlySearchesContent || needsIdentifierEvidence else {
+            return .disabled
+        }
+        return lexicalCandidateCount > 0 ? .scopedEvidence : .globalRecall
     }
 
     /// Preserves the original phrase while exposing generic word boundaries that
@@ -1612,7 +2116,8 @@ final class ChatService {
             .contains { normalized.contains($0) }
     }
 
-    private static func smartSearchSystemPrompt(
+    private func smartSearchSystemPrompt(
+        skillContext: String,
         now: Date = Date(),
         calendar: Calendar = .current
     ) -> String {
@@ -1623,6 +2128,7 @@ final class ChatService {
         formatter.dateFormat = "yyyy-MM-dd"
         let today = formatter.string(from: now)
         return PromptCatalog.Search.planner(today: today)
+            + (skillContext.isEmpty ? "" : "\n\n\(skillContext)")
     }
 
     static func streamedSearchIntent(in response: String) -> String? {
@@ -1682,6 +2188,11 @@ final class ChatService {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
             .prefix(8)
+        let weightedKeywords = normalizedWeightedKeywords(
+            payload.weightedKeywords ?? [],
+            fallbackKeywords: Array(keywords),
+            query: fallbackQuery
+        )
         let categories = Set((payload.categories ?? []).compactMap {
             FileCategory(rawValue: $0.lowercased())
         })
@@ -1722,6 +2233,7 @@ final class ChatService {
         return SmartLibrarySearchPlan(
             semanticQuery: effectiveSemanticQuery,
             keywords: Array(keywords),
+            weightedKeywords: weightedKeywords,
             exactName: exactName,
             fileExtensions: fileExtensions,
             categories: categories,
@@ -1733,6 +2245,9 @@ final class ChatService {
             maximumSizeBytes: sizeBounds.maximum,
             hasNote: payload.hasNote,
             isIndexed: payload.isIndexed,
+            contentMode: LibrarySearchContentMode(
+                rawValue: payload.contentMode?.lowercased() ?? ""
+            ) ?? .automatic,
             sort: LibrarySearchSort(rawValue: payload.sort?.lowercased() ?? "") ?? .relevance
         )
     }
@@ -1750,9 +2265,15 @@ final class ChatService {
                   let end = calendar.date(byAdding: .year, value: 1, to: start) else { return nil }
             return DateInterval(start: start, end: end)
         }()
+        let keywords = Array(contentSearchTerms(in: query).prefix(8))
         return SmartLibrarySearchPlan(
             semanticQuery: contentSearchQuery(in: query),
-            keywords: Array(contentSearchTerms(in: query).prefix(8)),
+            keywords: keywords,
+            weightedKeywords: normalizedWeightedKeywords(
+                [],
+                fallbackKeywords: keywords,
+                query: query
+            ),
             exactName: inferredExactFileName(in: query),
             fileExtensions: inferredFileExtensions(in: query),
             categories: inferredSearchCategories(in: query),
@@ -1764,6 +2285,7 @@ final class ChatService {
             maximumSizeBytes: nil,
             hasNote: inferredNoteRequirement(in: query),
             isIndexed: inferredIndexRequirement(in: query),
+            contentMode: inferredContentSearchMode(in: query),
             sort: inferredSort(in: query)
         )
     }
@@ -1797,6 +2319,11 @@ final class ChatService {
         return SmartLibrarySearchPlan(
             semanticQuery: semanticQuery,
             keywords: Array(uniqueSearchTerms(aiPlan.keywords.filter(isLexicalEvidenceTerm)).prefix(8)),
+            weightedKeywords: reconciledWeightedKeywords(
+                aiPlan.weightedKeywords,
+                fallback: fallback.weightedKeywords,
+                query: query
+            ),
             exactName: fallback.exactName ?? aiPlan.exactName,
             fileExtensions: useLocalExtensions ? fallback.fileExtensions : aiPlan.fileExtensions,
             categories: useLocalCategories ? fallback.categories : aiPlan.categories,
@@ -1808,8 +2335,176 @@ final class ChatService {
             maximumSizeBytes: bounds.maximum,
             hasNote: fallback.hasNote,
             isIndexed: fallback.isIndexed,
+            contentMode: aiPlan.contentMode == .automatic
+                ? fallback.contentMode
+                : aiPlan.contentMode,
             sort: aiPlan.sort
         )
+    }
+
+    private static func normalizedWeightedKeywords(
+        _ provided: [SmartSearchKeyword],
+        fallbackKeywords: [String],
+        query: String
+    ) -> [SmartSearchKeyword] {
+        let inferred = inferredWeightedKeywords(for: query, fallbackKeywords: fallbackKeywords)
+        return reconciledWeightedKeywords(provided, fallback: inferred, query: query)
+    }
+
+    private static func reconciledWeightedKeywords(
+        _ primary: [SmartSearchKeyword],
+        fallback: [SmartSearchKeyword],
+        query: String
+    ) -> [SmartSearchKeyword] {
+        var concepts = [SmartSearchKeyword]()
+        for keyword in primary + fallback {
+            let term = keyword.term.trimmingCharacters(in: .whitespacesAndNewlines)
+            let canonical = keyword.canonical.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !term.isEmpty || !canonical.isEmpty else { continue }
+            let resolvedCanonical = canonical.isEmpty ? term : canonical
+            let sanitized = SmartSearchKeyword(
+                term: term.isEmpty ? resolvedCanonical : term,
+                canonical: resolvedCanonical,
+                aliases: keyword.allTerms.filter {
+                    $0.localizedCaseInsensitiveCompare(resolvedCanonical) != .orderedSame
+                },
+                weight: min(max(keyword.weight, 0.05), 1),
+                role: keyword.role,
+                required: keyword.role == .core && keyword.required
+            )
+            if let index = concepts.firstIndex(where: { conceptsOverlap($0, sanitized) }) {
+                concepts[index] = mergedSearchConcept(concepts[index], sanitized)
+            } else {
+                concepts.append(sanitized)
+            }
+        }
+
+        // Alias relationships can bridge multiple planner entries. Merge transitively so
+        // localized aliases and abbreviations count as one independent concept.
+        var didMerge = true
+        while didMerge {
+            didMerge = false
+            outer: for first in concepts.indices {
+                for second in concepts.indices where second > first {
+                    guard conceptsOverlap(concepts[first], concepts[second]) else { continue }
+                    concepts[first] = mergedSearchConcept(concepts[first], concepts[second])
+                    concepts.remove(at: second)
+                    didMerge = true
+                    break outer
+                }
+            }
+        }
+
+        // A planner can emit a compact query such as "SingaporeREP" in addition to
+        // the already independent Singapore and REP concepts. It remains useful for
+        // lexical recall, but cannot become another required core concept.
+        concepts = concepts.enumerated().map { index, keyword in
+            guard keyword.role == .core,
+                  isConcatenationOfOtherConcepts(keyword, among: concepts, excluding: index) else {
+                return keyword
+            }
+            return SmartSearchKeyword(
+                term: keyword.term,
+                canonical: keyword.canonical,
+                aliases: keyword.aliases,
+                weight: keyword.weight,
+                role: .support,
+                required: false
+            )
+        }
+        return concepts
+            .sorted { lhs, rhs in
+                if lhs.normalizedWeight != rhs.normalizedWeight {
+                    return lhs.normalizedWeight > rhs.normalizedWeight
+                }
+                return lhs.canonical.localizedCaseInsensitiveCompare(rhs.canonical) == .orderedAscending
+            }
+            .prefix(6)
+            .map { $0 }
+    }
+
+    private static func conceptsOverlap(_ lhs: SmartSearchKeyword, _ rhs: SmartSearchKeyword) -> Bool {
+        let lhsTerms = Set(lhs.allTerms.map(normalizedConceptTerm).filter { !$0.isEmpty })
+        let rhsTerms = Set(rhs.allTerms.map(normalizedConceptTerm).filter { !$0.isEmpty })
+        return !lhsTerms.isDisjoint(with: rhsTerms)
+    }
+
+    private static func mergedSearchConcept(
+        _ lhs: SmartSearchKeyword,
+        _ rhs: SmartSearchKeyword
+    ) -> SmartSearchKeyword {
+        let preferred = rhs.normalizedWeight > lhs.normalizedWeight ? rhs : lhs
+        let secondary = preferred == lhs ? rhs : lhs
+        let role: SmartSearchKeywordRole
+        if lhs.role == .core || rhs.role == .core {
+            role = .core
+        } else if lhs.role == .support || rhs.role == .support {
+            role = .support
+        } else {
+            role = .format
+        }
+        let canonical = preferred.canonical
+        return SmartSearchKeyword(
+            term: preferred.term,
+            canonical: canonical,
+            aliases: uniqueSearchTerms(preferred.allTerms + secondary.allTerms)
+                .filter { $0.localizedCaseInsensitiveCompare(canonical) != .orderedSame },
+            weight: max(lhs.normalizedWeight, rhs.normalizedWeight),
+            role: role,
+            required: role == .core && (lhs.required || rhs.required)
+        )
+    }
+
+    private static func isConcatenationOfOtherConcepts(
+        _ keyword: SmartSearchKeyword,
+        among concepts: [SmartSearchKeyword],
+        excluding excludedIndex: Int
+    ) -> Bool {
+        let otherTerms = concepts.enumerated().flatMap { index, concept -> [(index: Int, value: String)] in
+            guard index != excludedIndex else { return [] }
+            return concept.allTerms.compactMap { term in
+                let normalized = normalizedConceptTerm(term)
+                return normalized.count >= 2 ? (index, normalized) : nil
+            }
+        }
+        for term in keyword.allTerms {
+            var remaining = normalizedConceptTerm(term)
+            guard remaining.count >= 4 else { continue }
+            var matchedConcepts = Set<Int>()
+            while !remaining.isEmpty {
+                guard let match = otherTerms
+                    .filter({ remaining.hasPrefix($0.value) })
+                    .sorted(by: { $0.value.count > $1.value.count })
+                    .first else {
+                    break
+                }
+                matchedConcepts.insert(match.index)
+                remaining.removeFirst(match.value.count)
+            }
+            if remaining.isEmpty, matchedConcepts.count >= 2 { return true }
+        }
+        return false
+    }
+
+    private static func normalizedConceptTerm(_ value: String) -> String {
+        value.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private static func inferredWeightedKeywords(
+        for query: String,
+        fallbackKeywords: [String]
+    ) -> [SmartSearchKeyword] {
+        fallbackKeywords.map { term in
+            let normalized = term.trimmingCharacters(in: .whitespacesAndNewlines)
+            return SmartSearchKeyword(
+                term: normalized,
+                canonical: normalized,
+                aliases: [],
+                weight: 0.8,
+                role: .core,
+                required: true
+            )
+        }
     }
 
     private static func structuredOnlyConfidence(for plan: SmartLibrarySearchPlan?) -> Double {
@@ -2230,6 +2925,13 @@ final class ChatService {
         let kind: LibrarySearchMatchKind
         let rankingKind: LibrarySearchMatchKind
         let snippet: String?
+        let coreCoverage: Double
+        let requiredCoreMissing: Bool
+        let matchedDistinctiveIdentifier: Bool
+        let allowsSingleIdentifierRecall: Bool
+        let hasExactPhrase: Bool
+        let hasExactCoreConceptPhrase: Bool
+        let evidence: [LibrarySearchEvidence]
     }
 
     private struct LibraryConfidenceEvidence {
@@ -2251,15 +2953,24 @@ final class ChatService {
     private static func libraryLexicalMatch(
         file: FileRecord,
         query: String,
-        terms: [String]
+        terms: [String],
+        weightedKeywords: [SmartSearchKeyword],
+        additionalContent: String? = nil
     ) -> LibraryLexicalMatch? {
         let normalizedQuery = query.lowercased()
         let name = file.name.lowercased()
         let stem = URL(fileURLWithPath: name).deletingPathExtension().lastPathComponent
         let title = (file.title ?? "").lowercased()
         let note = (file.note ?? "").lowercased()
-        let content = (file.contentText ?? "").lowercased()
+        let indexedContent = file.contentText ?? ""
+        // File-level FTS already established that this file is a lexical candidate.
+        // Prefer the bounded matching chunk for evidence instead of rescanning the
+        // complete extracted body several times during scoring.
+        let contentSource = additionalContent.flatMap { $0.isEmpty ? nil : $0 }
+            ?? indexedContent
+        let content = contentSource.lowercased()
         let path = file.path.lowercased()
+        let normalizedTerms = terms.map { $0.lowercased() }
 
         var evidence: LibraryConfidenceEvidence?
         func considerEvidence(
@@ -2275,7 +2986,7 @@ final class ChatService {
             )
         }
 
-        let evidenceTerms = terms.filter { !$0.isEmpty && $0 != normalizedQuery }
+        let evidenceTerms = normalizedTerms.filter { !$0.isEmpty && $0 != normalizedQuery }
         func evidenceStrength(in source: String) -> Double? {
             if source.contains(normalizedQuery) { return 1 }
             guard !evidenceTerms.isEmpty else { return nil }
@@ -2313,7 +3024,7 @@ final class ChatService {
             considerEvidence(
                 confidence: 0.90 + (0.09 * strength),
                 kind: .content,
-                source: file.contentText
+                source: additionalContent ?? indexedContent
             )
         }
         if let strength = evidenceStrength(in: path) {
@@ -2335,7 +3046,7 @@ final class ChatService {
         } else if stem.contains(normalizedQuery) || name.contains(normalizedQuery) {
             consider(200, .fileName, file.title ?? file.note ?? file.displayPath)
         }
-        if content.contains(normalizedQuery) { consider(400, .content, file.contentText) }
+        if content.contains(normalizedQuery) { consider(400, .content, additionalContent ?? indexedContent) }
         if note.contains(normalizedQuery) { consider(400, .note, file.note) }
         if path.contains(normalizedQuery) { consider(200, .path, file.displayPath) }
         if title == normalizedQuery { consider(110, .title, file.title) }
@@ -2351,10 +3062,10 @@ final class ChatService {
             guard priority > termMatch?.priority ?? -1 else { return }
             termMatch = (priority, kind, source)
         }
-        for term in terms where term != normalizedQuery {
+        for term in normalizedTerms where term != normalizedQuery {
             if content.contains(term) {
                 termScore += 40
-                recordTermMatch(priority: 5, kind: .content, source: file.contentText)
+                recordTermMatch(priority: 5, kind: .content, source: additionalContent ?? indexedContent)
             } else if note.contains(term) {
                 termScore += 40
                 recordTermMatch(priority: 5, kind: .note, source: file.note)
@@ -2375,14 +3086,257 @@ final class ChatService {
             best?.score += termScore
         }
         guard let best, let evidence else { return nil }
+        let keywordEvidence = lexicalKeywordEvidence(
+            file: file,
+            normalizedQuery: normalizedQuery,
+            weightedKeywords: weightedKeywords,
+            distinctiveQueryIdentifiers: distinctiveSearchIdentifiers(in: query),
+            additionalContent: additionalContent
+        )
+        let hasExactPhrase = [name, title, note, content, path].contains { source in
+            !normalizedQuery.isEmpty && source.contains(normalizedQuery)
+        }
+        let calibratedConfidence = lexicalConfidence(
+            fallback: evidence.confidence,
+            coreCoverage: keywordEvidence.coreCoverage,
+            requiredCoreMissing: keywordEvidence.requiredCoreMissing,
+            matchedDistinctiveIdentifier: keywordEvidence.matchedDistinctiveIdentifier,
+            allowsSingleIdentifierRecall: allowsSingleIdentifierRecall(in: query),
+            hasExactPhrase: hasExactPhrase,
+            hasExactCoreConceptPhrase: keywordEvidence.hasExactCoreConceptPhrase,
+            matchedAnyKeyword: !keywordEvidence.evidence.isEmpty
+        )
         return LibraryLexicalMatch(
             file: file,
             score: best.score,
-            confidence: min(evidence.confidence, 1),
+            confidence: calibratedConfidence,
             kind: evidence.kind,
             rankingKind: best.kind,
-            snippet: evidence.source.flatMap { compactExcerpt($0, terms: terms) }
+            snippet: evidence.source.flatMap { compactExcerpt($0, terms: terms) },
+            coreCoverage: keywordEvidence.coreCoverage,
+            requiredCoreMissing: keywordEvidence.requiredCoreMissing,
+            matchedDistinctiveIdentifier: keywordEvidence.matchedDistinctiveIdentifier,
+            allowsSingleIdentifierRecall: allowsSingleIdentifierRecall(in: query),
+            hasExactPhrase: hasExactPhrase,
+            hasExactCoreConceptPhrase: keywordEvidence.hasExactCoreConceptPhrase,
+            evidence: keywordEvidence.evidence
         )
+    }
+
+    private struct LexicalKeywordEvidence {
+        let coreCoverage: Double
+        let requiredCoreMissing: Bool
+        let matchedDistinctiveIdentifier: Bool
+        let hasExactCoreConceptPhrase: Bool
+        let evidence: [LibrarySearchEvidence]
+    }
+
+    private static func lexicalKeywordEvidence(
+        file: FileRecord,
+        normalizedQuery: String,
+        weightedKeywords: [SmartSearchKeyword],
+        distinctiveQueryIdentifiers: [String],
+        additionalContent: String?
+    ) -> LexicalKeywordEvidence {
+        guard !weightedKeywords.isEmpty else {
+            return LexicalKeywordEvidence(
+                coreCoverage: 0,
+                requiredCoreMissing: false,
+                matchedDistinctiveIdentifier: false,
+                hasExactCoreConceptPhrase: false,
+                evidence: []
+            )
+        }
+
+        let effectiveContent = additionalContent.flatMap { $0.isEmpty ? nil : $0 }
+            ?? file.contentText
+            ?? ""
+        let sources: [(kind: LibrarySearchMatchKind, value: String)] = [
+            (.fileName, file.name),
+            (.title, file.title ?? ""),
+            (.note, file.note ?? ""),
+            (.content, effectiveContent),
+            (.path, file.path),
+        ]
+        let coreKeywords = weightedKeywords.filter { $0.role == .core }
+        let totalCoreWeight = coreKeywords.reduce(0) { $0 + $1.normalizedWeight }
+        var matchedCoreWeight = 0.0
+        var requiredCoreMissing = false
+        var hasExactCoreConceptPhrase = false
+        var matchedDistinctiveIdentifier = sources.contains { source in
+            distinctiveQueryIdentifiers.contains { identifier in
+                source.value.range(
+                    of: identifier,
+                    options: [.caseInsensitive, .diacriticInsensitive]
+                ) != nil
+            }
+        }
+        var evidence = [LibrarySearchEvidence]()
+        var seenEvidence = Set<String>()
+
+        for keyword in weightedKeywords {
+            let matchingTerm = keyword.allTerms.first { term in
+                sources.contains { source in
+                    source.value.range(
+                        of: term,
+                        options: [.caseInsensitive, .diacriticInsensitive]
+                    ) != nil
+                }
+            }
+            if let matchingTerm {
+                if isDistinctiveSearchIdentifier(matchingTerm) {
+                    matchedDistinctiveIdentifier = true
+                }
+                if keyword.role == .core {
+                    matchedCoreWeight += keyword.normalizedWeight
+                }
+                let evidenceKey = "\(keyword.canonical.lowercased())|\(matchingTerm.lowercased())"
+                if seenEvidence.insert(evidenceKey).inserted {
+                    evidence.append(LibrarySearchEvidence(
+                        kind: .keyword,
+                        label: keyword.canonical,
+                        detail: isDistinctiveSearchIdentifier(keyword.term)
+                            ? keyword.term
+                            : matchingTerm
+                    ))
+                }
+            } else if keyword.role == .core && keyword.required {
+                requiredCoreMissing = true
+            }
+            if keyword.role == .core,
+               keyword.allTerms.contains(where: { term in
+                   isStrongConceptPhrase(term)
+                       && sources.dropLast().contains(where: { source in
+                           source.value.range(
+                               of: term,
+                               options: [.caseInsensitive, .diacriticInsensitive]
+                           ) != nil
+                       })
+               }) {
+                hasExactCoreConceptPhrase = true
+            }
+        }
+
+        let coreCoverage = totalCoreWeight > 0
+            ? min(matchedCoreWeight / totalCoreWeight, 1)
+            : 0
+        if sources.contains(where: { source in
+            !normalizedQuery.isEmpty && source.value.range(
+                of: normalizedQuery,
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) != nil
+        }) {
+            evidence.insert(
+                LibrarySearchEvidence(kind: .exactPhrase, label: normalizedQuery, detail: nil),
+                at: 0
+            )
+        }
+        return LexicalKeywordEvidence(
+            coreCoverage: coreCoverage,
+            requiredCoreMissing: requiredCoreMissing,
+            matchedDistinctiveIdentifier: matchedDistinctiveIdentifier,
+            hasExactCoreConceptPhrase: hasExactCoreConceptPhrase,
+            evidence: evidence
+        )
+    }
+
+    /// A short uppercase code or a value containing digits is a user-provided
+    /// identifier, not a generic word. It can qualify a result for display even
+    /// if other natural-language query terms are absent from an indexed source.
+    private static func isDistinctiveSearchIdentifier(_ rawValue: String) -> Bool {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (2...32).contains(value.count),
+              value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) }),
+              value.unicodeScalars.allSatisfy({ $0.isASCII }) else {
+            return false
+        }
+        let hasDigit = value.unicodeScalars.contains { CharacterSet.decimalDigits.contains($0) }
+        let letters = value.filter(\.isLetter)
+        let isUppercaseAcronym = letters.count >= 2
+            && value == value.uppercased()
+            && value != value.lowercased()
+        return hasDigit || isUppercaseAcronym
+    }
+
+    /// A complete multi-word or CJK concept is stronger evidence than a short acronym.
+    /// It is intentionally language-agnostic and is evaluated only after the planner's
+    /// independent core concepts have been verified.
+    private static func isStrongConceptPhrase(_ rawValue: String) -> Bool {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !isDistinctiveSearchIdentifier(value) else { return false }
+        let wordCount = value.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
+        let cjkCharacterCount = value.unicodeScalars.reduce(into: 0) { count, scalar in
+            if (0x4E00...0x9FFF).contains(scalar.value) { count += 1 }
+        }
+        return wordCount >= 2 || cjkCharacterCount >= 4
+    }
+
+    private static func distinctiveSearchIdentifiers(in query: String) -> [String] {
+        lexicalTokenVariants(in: query).filter(isDistinctiveSearchIdentifier)
+    }
+
+    private static func allowsSingleIdentifierRecall(in query: String) -> Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.contains("?"), !trimmed.contains("？") else { return false }
+        let contentWords = strippingStructuralPhrases(from: trimmed)
+            .split(whereSeparator: { $0.isWhitespace })
+        return (1...2).contains(contentWords.count)
+    }
+
+    private static func semanticKeywordEvidence(
+        in text: String?,
+        weightedKeywords: [SmartSearchKeyword]
+    ) -> [LibrarySearchEvidence] {
+        guard let text, !text.isEmpty else { return [] }
+        return weightedKeywords.compactMap { keyword in
+            guard let matchingTerm = keyword.allTerms.first(where: { term in
+                text.range(of: term, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }) else {
+                return nil
+            }
+            return LibrarySearchEvidence(
+                kind: .keyword,
+                label: keyword.canonical,
+                detail: matchingTerm
+            )
+        }
+    }
+
+    private static func uniqueSearchEvidence(
+        _ evidence: [LibrarySearchEvidence]
+    ) -> [LibrarySearchEvidence] {
+        var seen = Set<String>()
+        return evidence.filter { item in
+            let key = "\(item.kind.rawValue)|\(item.label.lowercased())|\(item.detail?.lowercased() ?? "")"
+            return seen.insert(key).inserted
+        }
+    }
+
+    private static func lexicalConfidence(
+        fallback: Double,
+        coreCoverage: Double,
+        requiredCoreMissing: Bool,
+        matchedDistinctiveIdentifier: Bool,
+        allowsSingleIdentifierRecall: Bool,
+        hasExactPhrase: Bool,
+        hasExactCoreConceptPhrase: Bool,
+        matchedAnyKeyword: Bool
+    ) -> Double {
+        if hasExactPhrase { return min(fallback, 1) }
+        guard matchedAnyKeyword else { return min(fallback, 0.45) }
+        if requiredCoreMissing {
+            guard matchedDistinctiveIdentifier, allowsSingleIdentifierRecall else {
+                return min(0.49, 0.24 + (0.25 * coreCoverage))
+            }
+            return min(0.65, max(0.52, 0.40 + (0.40 * coreCoverage)))
+        }
+        if coreCoverage > 0 {
+            if hasExactCoreConceptPhrase, coreCoverage >= 0.8 {
+                return min(0.96, max(fallback, 0.90 + (0.06 * coreCoverage)))
+            }
+            return min(0.78, 0.42 + (0.36 * coreCoverage))
+        }
+        return min(0.45, fallback)
     }
 
     static func dynamicallyAcceptedSemanticHits(_ hits: [VectorSearchHit]) -> [VectorSearchHit] {
@@ -2395,17 +3349,37 @@ final class ChatService {
     private func rerankedSemanticHits(
         _ hits: [VectorSearchHit],
         query: String,
-        maximumCandidates: Int = 24
+        maximumCandidates: Int = 32
     ) async -> [VectorSearchHit] {
         guard let provider = settings.makeRerankingProvider(), hits.count > 1 else { return hits }
-        let candidates = Array(hits.prefix(maximumCandidates))
-        let documents = candidates.map { $0.chunkText ?? "" }
+        let partition = Self.rerankerCandidatePartition(
+            hits,
+            maximumCandidates: maximumCandidates
+        )
+        let candidates = partition.candidates
+        guard candidates.count > 1 else { return candidates + partition.tail }
+        let documents = candidates.map {
+            Self.rerankerInputText($0.chunkText ?? "", maximumTokens: 512)
+        }
+        let cacheKey = Self.rerankerCacheKey(
+            providerName: provider.name,
+            query: query,
+            candidates: candidates,
+            documents: documents
+        )
         do {
-            let results = try await provider.rerank(
-                query: query,
-                documents: documents,
-                topN: candidates.count
-            )
+            let cachedResults = await rerankResultCache.results(for: cacheKey)
+            let results: [RerankItem]
+            if let cachedResults {
+                results = cachedResults
+            } else {
+                results = try await provider.rerank(
+                    query: query,
+                    documents: documents,
+                    topN: candidates.count
+                )
+                await rerankResultCache.insert(results, for: cacheKey)
+            }
             let resultByIndex = Dictionary(uniqueKeysWithValues: results.map { ($0.index, $0.score) })
             let reranked = candidates.enumerated().compactMap { index, hit -> VectorSearchHit? in
                 guard let score = resultByIndex[index] else { return nil }
@@ -2423,23 +3397,93 @@ final class ChatService {
                     entityTerms: hit.entityTerms
                 )
             }.sorted { $0.score > $1.score }
-            guard !reranked.isEmpty else { return hits }
+            guard !reranked.isEmpty else { return candidates + partition.tail }
             AppLogService.shared.write(
                 "RAG candidates reranked",
                 category: .vectorSearch,
                 level: .debug,
-                metadata: ["provider": provider.name, "candidates": "\(candidates.count)"]
+                metadata: [
+                    "cacheHit": "\(cachedResults != nil)",
+                    "inputCandidates": "\(hits.count)",
+                    "provider": provider.name,
+                    "rerankedCandidates": "\(candidates.count)",
+                    "retainedTail": "\(partition.tail.count)",
+                ]
             )
-            return reranked
+            return reranked + partition.tail
         } catch {
             AppLogService.shared.write(
                 "RAG reranker unavailable; fused retrieval order retained: \(error.localizedDescription)",
                 category: .vectorSearch,
                 level: .warning,
-                metadata: ["provider": provider.name]
+                metadata: [
+                    "inputCandidates": "\(hits.count)",
+                    "provider": provider.name,
+                    "rerankedCandidates": "\(candidates.count)",
+                    "retainedTail": "\(partition.tail.count)",
+                ]
             )
-            return hits
+            return candidates + partition.tail
         }
+    }
+
+    static func rerankerCandidatePartition(
+        _ hits: [VectorSearchHit],
+        maximumCandidates: Int
+    ) -> (candidates: [VectorSearchHit], tail: [VectorSearchHit]) {
+        let safeLimit = max(1, maximumCandidates)
+        var uniqueHits = [VectorSearchHit]()
+        var seenFileIDs = Set<Int64>()
+        uniqueHits.reserveCapacity(hits.count)
+        for hit in hits where seenFileIDs.insert(hit.fileId).inserted {
+            uniqueHits.append(hit)
+        }
+
+        var candidates = [VectorSearchHit]()
+        var tail = [VectorSearchHit]()
+        candidates.reserveCapacity(min(safeLimit, uniqueHits.count))
+        for hit in uniqueHits {
+            let text = hit.chunkText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if candidates.count < safeLimit, !text.isEmpty {
+                candidates.append(hit)
+            } else {
+                tail.append(hit)
+            }
+        }
+        return (candidates, tail)
+    }
+
+    static func rerankerInputText(_ text: String, maximumTokens: Int) -> String {
+        guard maximumTokens > 0 else { return "" }
+        let characters = Array(text)
+        let weights = TokenCounter.estimatedWeights(characters)
+        var estimatedTokens = 0.0
+        var endIndex = 0
+        while endIndex < characters.count,
+              estimatedTokens + weights[endIndex] <= Double(maximumTokens) {
+            estimatedTokens += weights[endIndex]
+            endIndex += 1
+        }
+        guard endIndex < characters.count else { return text }
+        return String(characters.prefix(endIndex)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func rerankerCacheKey(
+        providerName: String,
+        query: String,
+        candidates: [VectorSearchHit],
+        documents: [String]
+    ) -> Int {
+        var hasher = Hasher()
+        hasher.combine(providerName)
+        hasher.combine(query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        for (candidate, document) in zip(candidates, documents) {
+            hasher.combine(candidate.fileId)
+            hasher.combine(candidate.chunkIndex)
+            hasher.combine(candidate.score.bitPattern)
+            hasher.combine(document)
+        }
+        return hasher.finalize()
     }
 
     private static func semanticConfidence(for hit: VectorSearchHit) -> Double {
@@ -2457,6 +3501,45 @@ final class ChatService {
             base = 0.60
         }
         return min(base + (0.09 * strength), 1)
+    }
+
+    /// Confidence is intentionally stricter than recall. A single generic formatting
+    /// word (for example, "diagram") may retrieve a useful candidate, but it must not
+    /// be presented as a near-certain answer to a request with missing core concepts.
+    private static func calibratedSearchConfidence(
+        lexical: LibraryLexicalMatch?,
+        semantic: VectorSearchHit?,
+        entity: VectorSearchHit?,
+        isExactNameMatch: Bool,
+        structuredOnly: Double
+    ) -> Double {
+        if isExactNameMatch { return 1 }
+        if entity != nil { return 0.98 }
+
+        let lexicalConfidence = lexical?.confidence ?? 0
+        let semanticScoreConfidence = semantic.map { semanticConfidence(for: $0) } ?? 0
+        guard let lexical else {
+            // A semantic-only result is useful, but requires a stronger signal before
+            // appearing as high confidence because no requested concept was verified.
+            return semantic == nil ? structuredOnly : min(semanticScoreConfidence, 0.74)
+        }
+        if lexical.hasExactPhrase { return max(lexicalConfidence, min(semanticScoreConfidence, 0.97)) }
+        if lexical.requiredCoreMissing
+            && !(lexical.matchedDistinctiveIdentifier && lexical.allowsSingleIdentifierRecall) {
+            return min(max(lexicalConfidence, semanticScoreConfidence), 0.49)
+        }
+        if lexical.coreCoverage > 0 {
+            if lexical.hasExactCoreConceptPhrase, lexical.coreCoverage >= 0.8 {
+                return min(max(lexicalConfidence, semanticScoreConfidence), 0.96)
+            }
+            // High confidence requires both substantial core-concept coverage and
+            // semantic support, unless a complete planner concept phrase was verified.
+            if lexical.coreCoverage >= 0.8, semantic != nil {
+                return min(max(lexicalConfidence, semanticScoreConfidence), 0.96)
+            }
+            return min(max(lexicalConfidence, semanticScoreConfidence), 0.78)
+        }
+        return min(max(lexicalConfidence, semanticScoreConfidence), 0.74)
     }
 
     private static func compactExcerpt(_ source: String, terms: [String], limit: Int = 240) -> String? {
@@ -2491,9 +3574,13 @@ final class ChatService {
         return provider
     }
 
-    private func buildLibraryContext(from results: [LibrarySearchResult],
-                                     matchedChunks: [Int64: [VectorSearchHit]]) -> String {
+    private func buildLibraryContext(
+        from results: [LibrarySearchResult],
+        matchedChunks: [Int64: [VectorSearchHit]],
+        skillContext: String
+    ) -> String {
         let responseInstructions = PromptCatalog.Chat.libraryAnswerInstructions
+            + (skillContext.isEmpty ? "" : "\n\n\(skillContext)")
         guard !results.isEmpty else {
             return responseInstructions + "\n\n" + PromptCatalog.Chat.emptyLibraryAnswer
         }
@@ -2505,11 +3592,12 @@ final class ChatService {
         for (index, result) in results.enumerated() {
             let file = result.file
             let userNote = file.note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let matchedFileChunks = file.id.flatMap { matchedChunks[$0] } ?? []
             var fileLines = [
                 "FILE START",
                 "Source ID: [F\(index + 1)]",
                 "Retrieval rank (internal): \(index + 1)",
-                "Retrieval evidence (internal): \(Self.libraryEvidenceLabel(for: result)); confidence \(result.confidencePercent)%",
+                "Retrieval evidence (internal): \(Self.libraryEvidenceLabel(for: result, matchedChunks: matchedFileChunks)); confidence \(result.confidencePercent)%",
                 "Name: \(file.name)",
             ]
             if let id = file.id, let chunks = matchedChunks[id], !chunks.isEmpty {
@@ -2577,9 +3665,14 @@ final class ChatService {
         return lines.joined(separator: "\n\n")
     }
 
-    private func buildAttachedFileContext(file: FileRecord, extractedText: String) -> String {
+    private func buildAttachedFileContext(
+        file: FileRecord,
+        extractedText: String,
+        skillContext: String
+    ) -> String {
         """
         \(PromptCatalog.Chat.attachedFileInstructions)
+        \(skillContext)
 
         ATTACHED FILE START
         Name: \(file.name)
@@ -2590,8 +3683,19 @@ final class ChatService {
         """
     }
 
-    private static func libraryEvidenceLabel(for result: LibrarySearchResult) -> String {
+    private static func libraryEvidenceLabel(
+        for result: LibrarySearchResult,
+        matchedChunks: [VectorSearchHit] = []
+    ) -> String {
         if result.confidence >= 1, result.matchKind == .fileName { return "exact filename" }
+        if matchedChunks.contains(where: {
+            switch $0.kind {
+            case .text, .table, .list, .picture, .transcript: return true
+            case .title, .note, .metadata: return false
+            }
+        }) {
+            return "extracted content"
+        }
         if result.confidence >= 0.90 { return "extracted content" }
         if result.confidence >= 0.75 { return "user note" }
         if result.confidence >= 0.60 { return "file metadata" }
@@ -2617,8 +3721,11 @@ final class ChatService {
         }
     }
 
-    private func buildIndexedAttachedFileContext(file: FileRecord,
-                                                 chunks: [VectorSearchHit]) -> String {
+    private func buildIndexedAttachedFileContext(
+        file: FileRecord,
+        chunks: [VectorSearchHit],
+        skillContext: String
+    ) -> String {
         var excerpts = [String]()
         var characterCount = 0
         for chunk in chunks {
@@ -2645,7 +3752,8 @@ final class ChatService {
 
         return buildAttachedFileContext(
             file: file,
-            extractedText: excerpts.joined(separator: "\n\n")
+            extractedText: excerpts.joined(separator: "\n\n"),
+            skillContext: skillContext
         )
     }
 

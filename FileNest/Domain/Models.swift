@@ -314,9 +314,56 @@ struct Rule: Identifiable, Codable, Equatable {
     var priority: Int
     var enabled: Bool
     var action: String = RuleAction.organize.rawValue
+    /// Empty means every watched folder. Otherwise the rule applies only to files
+    /// located in one of these folders or their descendants.
+    var sourceDirectoriesJSON: String = "[]"
 
     var typeEnum: RuleType { RuleType(rawValue: type) ?? .rule }
     var actionEnum: RuleAction { RuleAction(rawValue: action) ?? .organize }
+
+    var sourceDirectories: [String] {
+        get {
+            guard let data = sourceDirectoriesJSON.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+                return []
+            }
+            return Self.normalizedSourceDirectories(decoded)
+        }
+        set {
+            let normalized = Self.normalizedSourceDirectories(newValue)
+            let data = (try? JSONEncoder().encode(normalized)) ?? Data("[]".utf8)
+            sourceDirectoriesJSON = String(decoding: data, as: UTF8.self)
+        }
+    }
+
+    var usesSpecificSourceDirectories: Bool {
+        !sourceDirectories.isEmpty
+    }
+
+    func appliesToSource(of file: FileRecord) -> Bool {
+        let directories = sourceDirectories
+        guard !directories.isEmpty else { return true }
+        let filePath = Self.canonicalPath(file.path)
+        return directories.contains { directory in
+            let rootPath = Self.canonicalPath(directory)
+            return filePath == rootPath || filePath.hasPrefix(rootPath + "/")
+        }
+    }
+
+    private static func normalizedSourceDirectories(_ paths: [String]) -> [String] {
+        Array(Set(paths.compactMap { path in
+            let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return URL(fileURLWithPath: trimmed).standardizedFileURL.path
+        })).sorted()
+    }
+
+    private static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+    }
 }
 
 extension Rule: FetchableRecord, MutablePersistableRecord {
@@ -324,6 +371,7 @@ extension Rule: FetchableRecord, MutablePersistableRecord {
     enum CodingKeys: String, CodingKey {
         case id, name, type, pattern, priority, enabled, action
         case targetFolder = "target_folder"
+        case sourceDirectoriesJSON = "source_directories"
     }
     mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
 }
@@ -355,6 +403,229 @@ extension ChatSession: FetchableRecord, MutablePersistableRecord {
 struct ChatRelatedFileMatch: Codable, Equatable, Hashable {
     let fileID: Int64
     let confidence: Double
+}
+
+enum RAGFeedbackRating: String, Codable, CaseIterable, Identifiable {
+    case accurate
+    case inaccurate
+
+    var id: String { rawValue }
+}
+
+enum RAGFeedbackPolicy {
+    static let strongResultRankLimit = 10
+    static let strongResultConfidenceThreshold = 0.70
+
+    /// A single-file annotation also evaluates the quality of the result set.
+    /// The result is accurate only when the selected file was both prominently
+    /// ranked and returned with sufficiently strong confidence.
+    static func defaultRating(
+        selectedFileRank: Int?,
+        confidence: Double?
+    ) -> RAGFeedbackRating {
+        guard let selectedFileRank,
+              (1...strongResultRankLimit).contains(selectedFileRank),
+              let confidence,
+              confidence >= strongResultConfidenceThreshold else {
+            return .inaccurate
+        }
+        return .accurate
+    }
+}
+
+enum RAGFeedbackAnalysisStatus: String, Codable {
+    case pending
+    case analyzing
+    case applied
+    case failed
+}
+
+enum RAGFeedbackSourceKind: String, Codable {
+    case chat
+    case search
+    case smartSearch = "smart_search"
+}
+
+/// Structured local feedback for one chat answer or library-search result set.
+struct RAGFeedbackRecord: Identifiable, Codable, Equatable {
+    var id: Int64?
+    var sourceKey: String
+    var sourceKind: String
+    var messageID: Int64?
+    var sessionID: Int64?
+    var searchQuery: String?
+    var resultFileIDsJSON: String?
+    var rating: String
+    var reason: String?
+    var bestFileID: Int64?
+    var bestFileReason: String?
+    var analysisStatus: String
+    var analysisSummary: String?
+    var analysisError: String?
+    var createdAt: Date
+    var updatedAt: Date
+    var analyzedAt: Date?
+}
+
+extension RAGFeedbackRecord: FetchableRecord, MutablePersistableRecord {
+    static let databaseTableName = "rag_feedback"
+    enum CodingKeys: String, CodingKey {
+        case id, rating, reason
+        case sourceKey = "source_key"
+        case sourceKind = "source_kind"
+        case messageID = "message_id"
+        case sessionID = "session_id"
+        case searchQuery = "search_query"
+        case resultFileIDsJSON = "result_file_ids"
+        case bestFileID = "best_file_id"
+        case bestFileReason = "best_file_reason"
+        case analysisStatus = "analysis_status"
+        case analysisSummary = "analysis_summary"
+        case analysisError = "analysis_error"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case analyzedAt = "analyzed_at"
+    }
+    mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
+}
+
+enum AISystemSkillScope: String, Codable, CaseIterable, Identifiable {
+    case search
+    case answer
+    case both
+
+    var id: String { rawValue }
+
+    func applies(to requestedScope: AISystemSkillScope) -> Bool {
+        self == .both || requestedScope == .both || self == requestedScope
+    }
+}
+
+/// A concise, auditable instruction synthesized from local RAG feedback.
+struct AISystemSkill: Identifiable, Codable, Equatable {
+    var id: Int64?
+    var key: String
+    var title: String
+    var scope: String
+    var instructions: String
+    var rationale: String?
+    var enabled: Bool
+    var version: Int
+    var sourceFeedbackCount: Int
+    var createdAt: Date
+    var updatedAt: Date
+
+    var scopeValue: AISystemSkillScope {
+        AISystemSkillScope(rawValue: scope) ?? .both
+    }
+}
+
+extension AISystemSkill: FetchableRecord, MutablePersistableRecord {
+    static let databaseTableName = "ai_system_skills"
+    enum CodingKeys: String, CodingKey {
+        case id, key, title, scope, instructions, rationale, enabled, version
+        case sourceFeedbackCount = "source_feedback_count"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+    mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
+}
+
+enum ReindexJobStatus: String, Codable {
+    case running
+    case interrupted
+    case failed
+}
+
+enum ReindexJobFileState: String, Codable {
+    case pending
+    case processing
+    case completed
+    case failed
+}
+
+struct ReindexJobFileItem: Identifiable, Equatable, Sendable {
+    let fileID: Int64
+    let name: String
+    let path: String
+    let ext: String
+    let state: ReindexJobFileState
+    let updatedAt: Date
+
+    var id: Int64 { fileID }
+}
+
+struct ReindexJobSummary: Equatable, Sendable {
+    let job: ReindexJobRecord
+    let pending: Int
+    let processing: Int
+    let completed: Int
+    let failed: Int
+    let files: [ReindexJobFileItem]
+
+    var total: Int {
+        max(job.total, pending + processing + completed + failed)
+    }
+}
+
+/// Durable reindex descriptor used to resume work after application termination.
+struct ReindexJobRecord: Identifiable, Codable, Equatable, Sendable {
+    var id: Int64?
+    var kind: String
+    var rebuildVectorSpace: Bool
+    var contentCategoriesJSON: String
+    var onlyUnindexedFiles: Bool
+    var includeUnindexedFiles: Bool
+    var retrievalIndexOnly: Bool
+    var forceSourceReprocessing: Bool
+    var onlyMediaFiles: Bool
+    var fileCategoriesJSON: String
+    var targetEmbeddingSignature: String
+    var status: String
+    var total: Int
+    var createdAt: Date
+    var updatedAt: Date
+
+    var statusValue: ReindexJobStatus {
+        ReindexJobStatus(rawValue: status) ?? .interrupted
+    }
+
+    var contentCategoryRawValues: [String] {
+        Self.decodeStrings(contentCategoriesJSON)
+    }
+
+    var fileCategoryRawValues: [String] {
+        Self.decodeStrings(fileCategoriesJSON)
+    }
+
+    static func encodeStrings<S: Sequence>(_ values: S) -> String where S.Element == String {
+        let data = (try? JSONEncoder().encode(Array(values).sorted())) ?? Data("[]".utf8)
+        return String(data: data, encoding: .utf8) ?? "[]"
+    }
+
+    private static func decodeStrings(_ value: String) -> [String] {
+        guard let data = value.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+    }
+}
+
+extension ReindexJobRecord: FetchableRecord, MutablePersistableRecord {
+    static let databaseTableName = "reindex_jobs"
+    enum CodingKeys: String, CodingKey {
+        case id, kind, status, total
+        case rebuildVectorSpace = "rebuild_vector_space"
+        case contentCategoriesJSON = "content_categories"
+        case onlyUnindexedFiles = "only_unindexed_files"
+        case includeUnindexedFiles = "include_unindexed_files"
+        case retrievalIndexOnly = "retrieval_index_only"
+        case forceSourceReprocessing = "force_source_reprocessing"
+        case onlyMediaFiles = "only_media_files"
+        case fileCategoriesJSON = "file_categories"
+        case targetEmbeddingSignature = "target_embedding_signature"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+    mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
 }
 
 struct ChatMessage: Identifiable, Codable, Equatable {

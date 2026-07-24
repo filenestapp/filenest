@@ -355,7 +355,7 @@ private enum PaddleOCRServiceError: LocalizedError {
     var errorDescription: String? { "The installation command failed" }
 }
 
-final class FallbackOCRProvider: OCRProvider {
+final class FallbackOCRProvider: OCRProvider, ManagedOCRProviderLifecycle {
     let name: String
     private let primary: OCRProvider
     private let fallback: OCRProvider
@@ -389,6 +389,15 @@ final class FallbackOCRProvider: OCRProvider {
         }
     }
 
+    func shutdown() async {
+        if let primary = primary as? ManagedOCRProviderLifecycle {
+            await primary.shutdown()
+        }
+        if let fallback = fallback as? ManagedOCRProviderLifecycle {
+            await fallback.shutdown()
+        }
+    }
+
     private static func isWeak(_ result: OCRRecognitionResult) -> Bool {
         let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return true }
@@ -410,7 +419,7 @@ final class FallbackOCRProvider: OCRProvider {
 }
 
 /// Persistent Python worker that reuses the PaddleOCR pipeline instead of reloading the model for every page.
-final class PaddleOCRProvider: OCRProvider, @unchecked Sendable {
+final class PaddleOCRProvider: OCRProvider, ManagedOCRProviderLifecycle, @unchecked Sendable {
     let name = "paddleocr:PP-OCRv6"
     private let pythonExecutableURL: URL?
     private let workerSource: String
@@ -421,13 +430,14 @@ final class PaddleOCRProvider: OCRProvider, @unchecked Sendable {
     private var workerOutput: FileHandle?
     private var readBuffer = Data()
     private var activeRequestID: String?
+    private var isShuttingDown = false
 
     init(pythonExecutableURL: URL? = nil, workerScript: String? = nil) {
         self.pythonExecutableURL = pythonExecutableURL
         self.workerSource = workerScript ?? Self.workerScript
     }
 
-    deinit { terminateWorker() }
+    deinit { requestWorkerShutdown() }
 
     func recognize(imageData: Data, mimeType: String) async throws -> String {
         try await recognizeResult(imageData: imageData, mimeType: mimeType).text
@@ -458,8 +468,36 @@ final class PaddleOCRProvider: OCRProvider, @unchecked Sendable {
                 }
             }
         } onCancel: { [weak self] in
-            self?.terminateWorker()
+            self?.requestWorkerShutdown()
         }
+    }
+
+    /// Closes the worker's input stream first so Python can finish the active
+    /// inference and let Paddle release its native thread pool normally. Paddle's
+    /// native runtime is not signal-safe during inference, so a slow worker is
+    /// allowed to finish in the background instead of being force-terminated.
+    func shutdown() async {
+        let process = beginShutdown()
+        requestWorkerShutdown()
+        guard let process else { return }
+        if await Self.waitForExit(process, timeout: 6) {
+            await waitForPendingRequests()
+            clearWorker(process)
+            return
+        }
+
+        AppLogService.shared.write(
+            "PaddleOCR worker is still finishing its active request after stdin closed; leaving it to exit normally",
+            category: .indexExtraction,
+            level: .warning
+        )
+    }
+
+    private func beginShutdown() -> Process? {
+        processLock.lock()
+        defer { processLock.unlock() }
+        isShuttingDown = true
+        return workerProcess
     }
 
     private func run(python: URL,
@@ -534,9 +572,20 @@ final class PaddleOCRProvider: OCRProvider, @unchecked Sendable {
 
     private func ensureWorker(python: URL) -> FileHandle? {
         processLock.lock()
+        guard !isShuttingDown else {
+            processLock.unlock()
+            return nil
+        }
         if let process = workerProcess, process.isRunning, let input = workerInput {
             processLock.unlock()
             return input
+        }
+        if let process = workerProcess, !process.isRunning {
+            workerProcess = nil
+            workerInput = nil
+            workerOutput = nil
+            activeRequestID = nil
+            readBuffer.removeAll(keepingCapacity: true)
         }
         processLock.unlock()
 
@@ -582,6 +631,40 @@ final class PaddleOCRProvider: OCRProvider, @unchecked Sendable {
         processLock.unlock()
     }
 
+    private func requestWorkerShutdown() {
+        processLock.lock()
+        let input = workerInput
+        workerInput = nil
+        processLock.unlock()
+        try? input?.close()
+    }
+
+    private func clearWorker(_ process: Process) {
+        processLock.lock()
+        guard workerProcess === process else {
+            processLock.unlock()
+            return
+        }
+        let input = workerInput
+        let output = workerOutput
+        workerProcess = nil
+        workerInput = nil
+        workerOutput = nil
+        activeRequestID = nil
+        readBuffer.removeAll(keepingCapacity: true)
+        processLock.unlock()
+        try? input?.close()
+        try? output?.close()
+    }
+
+    private func waitForPendingRequests() async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                continuation.resume()
+            }
+        }
+    }
+
     private func terminateWorker(requestID: String? = nil) {
         processLock.lock()
         if let requestID, activeRequestID != requestID {
@@ -595,6 +678,14 @@ final class PaddleOCRProvider: OCRProvider, @unchecked Sendable {
         activeRequestID = nil
         processLock.unlock()
         if process?.isRunning == true { process?.terminate() }
+    }
+
+    private static func waitForExit(_ process: Process, timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return !process.isRunning
     }
 
     private static let workerScript = #"""

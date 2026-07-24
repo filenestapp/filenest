@@ -3,6 +3,26 @@ import GRDB
 @testable import FileNest
 
 final class SQLiteStoreTests: XCTestCase {
+    private final class FeedbackAnalysisProvider: LLMProvider, @unchecked Sendable {
+        let name = "feedback-analysis-stub"
+
+        func chat(_ messages: [ChatTurn], context: String?) async throws -> String {
+            """
+            {
+              "summary": "Exact concept phrases should carry more weight.",
+              "skills": [{
+                "key": "prefer-complete-core-phrases",
+                "title": "Prefer complete core phrases",
+                "scope": "search",
+                "instructions": "Prioritize complete exact core phrases over isolated generic terms.",
+                "rationale": "The selected file contains the complete requested concept.",
+                "confidence": 0.91
+              }]
+            }
+            """
+        }
+    }
+
     private var temporaryDirectory: URL!
     private var store: SQLiteStore!
 
@@ -39,6 +59,60 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(file.contentHash, "verified-hash")
         XCTAssertEqual(file.title, "Quarterly report")
         XCTAssertNil(file.indexedAt)
+    }
+
+    func testReindexJobPersistsCompletedFilesAndResetsInterruptedWork() throws {
+        let firstID = try store.upsertFile(makeFile(path: filePath("first.pdf"), title: "First"))
+        let secondID = try store.upsertFile(makeFile(path: filePath("second.pdf"), title: "Second"))
+        let now = Date()
+        let job = try store.createReindexJob(
+            ReindexJobRecord(
+                id: nil,
+                kind: "full-reindex",
+                rebuildVectorSpace: true,
+                contentCategoriesJSON: ReindexJobRecord.encodeStrings(["ocr", "chunking"]),
+                onlyUnindexedFiles: false,
+                includeUnindexedFiles: false,
+                retrievalIndexOnly: false,
+                forceSourceReprocessing: true,
+                onlyMediaFiles: false,
+                fileCategoriesJSON: ReindexJobRecord.encodeStrings(["documents"]),
+                targetEmbeddingSignature: "embedding-v2",
+                status: ReindexJobStatus.running.rawValue,
+                total: 2,
+                createdAt: now,
+                updatedAt: now
+            ),
+            fileIDs: [firstID, secondID]
+        )
+        let jobID = try XCTUnwrap(job.id)
+        store.markReindexJobFile(jobID: jobID, fileID: firstID, state: .completed)
+        try store.dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE reindex_job_files SET state = ? WHERE job_id = ? AND file_id = ?",
+                arguments: [ReindexJobFileState.processing.rawValue, jobID, secondID]
+            )
+        }
+
+        let reopened = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let resumed = try XCTUnwrap(reopened.resumableReindexJob())
+        let progress = try reopened.reindexJobProgress(jobID: jobID)
+        let summary = try XCTUnwrap(reopened.latestReindexJobSummary())
+
+        XCTAssertEqual(resumed.id, jobID)
+        XCTAssertEqual(resumed.statusValue, .interrupted)
+        XCTAssertEqual(resumed.contentCategoryRawValues, ["chunking", "ocr"])
+        XCTAssertEqual(resumed.fileCategoryRawValues, ["documents"])
+        XCTAssertEqual(progress.completed, 1)
+        XCTAssertEqual(progress.totalFiles, 2)
+        XCTAssertEqual(summary.completed, 1)
+        XCTAssertEqual(summary.pending, 1)
+        XCTAssertEqual(summary.failed, 0)
+        XCTAssertEqual(summary.files.map(\.fileID), [secondID, firstID])
+        XCTAssertEqual(
+            try reopened.reindexJobFileIDs(jobID: jobID, includeCompleted: false),
+            [secondID]
+        )
     }
 
     func testDuplicateGroupsRetainOldestFileAndCountReclaimableBytes() {
@@ -337,6 +411,41 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(Set(matches.compactMap(\.id)), Set([invoiceID, quarterID]))
     }
 
+    func testChunkTextSearchCanBeRestrictedToFileLevelFTSCandidates() throws {
+        let includedID = try store.upsertFile(makeFile(
+            path: filePath("included.txt"),
+            title: "Included"
+        ))
+        let excludedID = try store.upsertFile(makeFile(
+            path: filePath("excluded.txt"),
+            title: "Excluded"
+        ))
+        try store.dbPool.write { db in
+            for (fileID, text) in [
+                (includedID, "Singapore re-entry permit"),
+                (excludedID, "Another Singapore re-entry permit"),
+            ] {
+                try db.execute(
+                    sql: """
+                        INSERT INTO document_chunks(
+                            file_id, chunk_idx, text, contextual_text, section_path, kind
+                        ) VALUES (?, 0, ?, ?, '[]', 'text')
+                        """,
+                    arguments: [fileID, text, text]
+                )
+            }
+        }
+
+        let matches = try store.chunkTextMatches(
+            terms: ["re-entry permit"],
+            fileIDs: [includedID],
+            limit: 20
+        )
+
+        XCTAssertEqual(matches.map(\.fileId), [includedID])
+        XCTAssertFalse(matches.contains { $0.fileId == excludedID })
+    }
+
     func testRecentlyOrganizedFilesUsesRootLimitAndMetadataProjection() throws {
         let managedRoot = temporaryDirectory.appendingPathComponent("managed", isDirectory: true)
         var older = makeFile(
@@ -445,6 +554,10 @@ final class SQLiteStoreTests: XCTestCase {
         rule.targetFolder = "Contracts"
         rule.priority = 10
         rule.action = RuleAction.ignore.rawValue
+        rule.sourceDirectories = [
+            "/Users/example/Downloads",
+            "/Users/example/Desktop",
+        ]
 
         XCTAssertEqual(try store.upsertRule(rule), id)
         let updated = try XCTUnwrap(store.allRules().first)
@@ -452,6 +565,13 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(updated.targetFolder, "Contracts")
         XCTAssertEqual(updated.priority, 10)
         XCTAssertEqual(updated.actionEnum, .ignore)
+        XCTAssertEqual(
+            updated.sourceDirectories,
+            [
+                "/Users/example/Desktop",
+                "/Users/example/Downloads",
+            ]
+        )
 
         try store.deleteRule(id: id)
         XCTAssertTrue(try store.allRules().isEmpty)
@@ -608,6 +728,153 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(stored.responseProvider, "ollama")
         XCTAssertEqual(stored.responseModel, "qwen3.5:9b")
         XCTAssertEqual(stored.feedback, "helpful")
+    }
+
+    func testRAGFeedbackSupportsChatAndSearchSources() throws {
+        let session = try store.createChatSession()
+        let sessionID = try XCTUnwrap(session.id)
+        let messageID = try store.addChatMessage(ChatMessage(
+            id: nil,
+            role: ChatRole.assistant.rawValue,
+            content: "Answer",
+            ts: Date(),
+            relatedFileIds: nil,
+            sessionId: sessionID
+        ))
+        let bestFileID = try store.upsertFile(makeFile(
+            path: filePath("permit.pdf"),
+            title: "Re-entry permit"
+        ))
+
+        let chatFeedback = try store.upsertRAGFeedback(
+            messageID: messageID,
+            sessionID: sessionID,
+            rating: .inaccurate,
+            reason: "The ranking missed the exact phrase.",
+            bestFileID: bestFileID,
+            bestFileReason: "It contains the complete permit title."
+        )
+        XCTAssertEqual(chatFeedback.sourceKind, RAGFeedbackSourceKind.chat.rawValue)
+        XCTAssertEqual(chatFeedback.bestFileID, bestFileID)
+        XCTAssertEqual(chatFeedback.analysisStatus, RAGFeedbackAnalysisStatus.pending.rawValue)
+
+        let searchFeedback = try store.upsertSearchFeedback(
+            query: "Singapore permit",
+            sourceKind: .smartSearch,
+            resultFileIDs: [bestFileID],
+            rating: .accurate,
+            reason: nil,
+            bestFileID: bestFileID,
+            bestFileReason: nil
+        )
+        XCTAssertEqual(searchFeedback.sourceKind, RAGFeedbackSourceKind.smartSearch.rawValue)
+        XCTAssertEqual(searchFeedback.searchQuery, "Singapore permit")
+        XCTAssertEqual(try store.ragFeedbackRecords().count, 2)
+    }
+
+    func testAISystemSkillUpsertVersionsAndScopeFiltering() throws {
+        let first = try store.upsertAISystemSkill(
+            key: "prefer-complete-phrases",
+            title: "Prefer complete phrases",
+            scope: .search,
+            instructions: "Prefer complete core phrases over isolated generic terms.",
+            rationale: "Complete phrases carry stronger evidence."
+        )
+        XCTAssertEqual(first.version, 1)
+        XCTAssertEqual(first.sourceFeedbackCount, 1)
+
+        let updated = try store.upsertAISystemSkill(
+            key: "prefer-complete-phrases",
+            title: "Prefer exact core phrases",
+            scope: .search,
+            instructions: "Prioritize complete exact core phrases during retrieval.",
+            rationale: "Repeated feedback confirms the ranking signal."
+        )
+        XCTAssertEqual(updated.version, 2)
+        XCTAssertEqual(updated.sourceFeedbackCount, 2)
+        XCTAssertEqual(try store.enabledAISystemSkills(for: .search).count, 1)
+        XCTAssertTrue(try store.enabledAISystemSkills(for: .answer).isEmpty)
+
+        try store.setAISystemSkillEnabled(id: try XCTUnwrap(updated.id), enabled: false)
+        XCTAssertTrue(try store.enabledAISystemSkills(for: .search).isEmpty)
+    }
+
+    @MainActor
+    func testRAGLearningAnalysisCreatesAuditableSkill() async throws {
+        let session = try store.createChatSession()
+        let sessionID = try XCTUnwrap(session.id)
+        _ = try store.addChatMessage(ChatMessage(
+            id: nil,
+            role: ChatRole.user.rawValue,
+            content: "Find the complete permit phrase",
+            ts: Date(),
+            relatedFileIds: nil,
+            sessionId: sessionID
+        ))
+        let fileID = try store.upsertFile(makeFile(
+            path: filePath("permit.pdf"),
+            title: "Complete re-entry permit"
+        ))
+        let relatedIDs = String(
+            decoding: try JSONEncoder().encode([fileID]),
+            as: UTF8.self
+        )
+        let messageID = try store.addChatMessage(ChatMessage(
+            id: nil,
+            role: ChatRole.assistant.rawValue,
+            content: "A weaker file was ranked first.",
+            ts: Date(),
+            relatedFileIds: relatedIDs,
+            sessionId: sessionID
+        ))
+        let feedback = try store.upsertRAGFeedback(
+            messageID: messageID,
+            sessionID: sessionID,
+            rating: .inaccurate,
+            reason: "The exact phrase should rank higher.",
+            bestFileID: fileID,
+            bestFileReason: "It contains the complete phrase."
+        )
+        let managedSkills = temporaryDirectory.appendingPathComponent("managed-skills")
+        let skillService = AgentSkillService(
+            store: store,
+            managedDirectory: managedSkills,
+            sharedUserDirectory: temporaryDirectory.appendingPathComponent("shared-skills"),
+            bundledDirectory: temporaryDirectory.appendingPathComponent("bundled-skills")
+        )
+        _ = skillService.refresh()
+        let service = RAGLearningService(
+            store: store,
+            settings: AppSettings(store: store),
+            skillService: skillService,
+            providedProvider: FeedbackAnalysisProvider()
+        )
+
+        await service.analyzeFeedback(id: feedback.id)
+
+        let applied = try XCTUnwrap(store.ragFeedback(id: try XCTUnwrap(feedback.id)))
+        XCTAssertEqual(applied.analysisStatus, RAGFeedbackAnalysisStatus.applied.rawValue)
+        let skill = try XCTUnwrap(store.allAISystemSkills().first)
+        XCTAssertEqual(skill.key, "prefer-complete-core-phrases")
+        XCTAssertEqual(skill.scopeValue, .search)
+        XCTAssertTrue(skill.instructions.contains("complete exact core phrases"))
+        let learnedSkill = try XCTUnwrap(
+            skillService.enabledSkills().first {
+                $0.name == "prefer-complete-core-phrases"
+            }
+        )
+        XCTAssertEqual(learnedSkill.origin, .managed)
+        XCTAssertTrue(
+            skillService.activate(names: [learnedSkill.name]).context
+                .contains("complete exact core phrases")
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: managedSkills
+                    .appendingPathComponent("prefer-complete-core-phrases/SKILL.md")
+                    .path
+            )
+        )
     }
 
     func testChatHistoryPagesLoadNewestMessagesFirstWithoutReadingWholeSession() throws {

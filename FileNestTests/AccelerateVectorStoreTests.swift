@@ -311,6 +311,43 @@ final class AccelerateVectorStoreTests: XCTestCase {
         XCTAssertEqual(vectorStore.count, 2)
     }
 
+    func testShadowRebuildSurvivesWarmupAndResumesAfterRelaunch() async throws {
+        let fileID = try insertFile(named: "resume-shadow.md")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let activeStored = await vectorStore.replace(
+            fileId: fileID,
+            chunks: [EmbeddingChunk(vector: [1, 0], text: "active generation")],
+            model: "shared-model"
+        )
+        XCTAssertTrue(activeStored)
+        let shadowStarted = await vectorStore.beginShadowRebuild()
+        XCTAssertTrue(shadowStarted)
+        let shadowStored = await vectorStore.replaceShadow(
+            fileId: fileID,
+            chunks: [EmbeddingChunk(vector: [0, 1], text: "resumed generation")],
+            model: "shared-model"
+        )
+        XCTAssertTrue(shadowStored)
+        var metadata = try XCTUnwrap(store.file(id: fileID))
+        metadata.indexedAt = Date(timeIntervalSince1970: 4_000)
+        metadata.indexSignature = "resumed-signature"
+        let metadataStored = await vectorStore.stageShadowMetadata(metadata)
+        XCTAssertTrue(metadataStored)
+
+        let relaunchedStore = AccelerateVectorStore(store: store)
+        await relaunchedStore.loadAll()
+
+        let stagedFileIDs = await relaunchedStore.shadowStagedFileIDs()
+        XCTAssertEqual(stagedFileIDs, Set([fileID]))
+        let resumed = await relaunchedStore.beginShadowRebuild(resumeIfAvailable: true)
+        XCTAssertTrue(resumed)
+        let committed = await relaunchedStore.commitShadowRebuild(expectedFileCount: 1)
+        XCTAssertTrue(committed)
+        let hits = await relaunchedStore.searchChunks([0, 1], k: 1)
+        XCTAssertEqual(hits.first?.chunkText, "resumed generation")
+        XCTAssertEqual(try store.file(id: fileID)?.indexSignature, "resumed-signature")
+    }
+
     func testDiscardedOrIncompleteShadowRebuildPreservesActiveIndex() async throws {
         let fileId = try insertFile(named: "preserved.md")
         let vectorStore = AccelerateVectorStore(store: store)

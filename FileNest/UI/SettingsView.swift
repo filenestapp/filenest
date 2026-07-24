@@ -1,12 +1,14 @@
 import AppKit
 import SwiftUI
 
-/// Standalone settings window that centralizes all persistent configuration.
+/// Settings workspace embedded in the primary FileNest window.
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
+    private let onBack: (() -> Void)?
     @State private var newDir = ""
     @State private var selectedSection: SettingsSection = .general
+    @State private var settingsSearchText = ""
     @State private var selectedModelProfileID = OllamaModelRecommendation.defaultProfile.id
     @State private var modelPendingDeletion: OllamaModelInfo?
     @State private var isShowingDeleteRerankerConfirmation = false
@@ -23,36 +25,26 @@ struct SettingsView: View {
     @State private var isShowingOrganizeExistingConfirmation = false
     @State private var existingWatchDirectoryInventories: [WatchDirectoryInventory] = []
 
+    init(onBack: (() -> Void)? = nil) {
+        self.onBack = onBack
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            header
+        HStack(spacing: 0) {
+            settingsSidebar
+                .frame(width: 250)
 
-            TabView(selection: $selectedSection) {
-                DeferredSettingsPage { generalSettings }
-                    .tabItem { Label("General", systemImage: "gearshape") }
-                    .tag(SettingsSection.general)
+            Rectangle()
+                .fill(FileNestTheme.border)
+                .frame(width: 1)
 
-                DeferredSettingsPage { indexSettings }
-                    .tabItem { Label("Index & Organize", systemImage: "externaldrive.badge.magnifyingglass") }
-                    .tag(SettingsSection.indexing)
-
-                DeferredSettingsPage { aiSettings }
-                    .tabItem { Label("AI Models", systemImage: "cpu") }
-                    .tag(SettingsSection.aiModels)
-
-                DeferredSettingsPage { StatisticsView(embeddedInSettings: true) }
-                    .tabItem { Label("Statistics", systemImage: "chart.bar.xaxis") }
-                    .tag(SettingsSection.statistics)
-
-                DeferredSettingsPage { RulesView(embeddedInSettings: true) }
-                    .tabItem { Label("Organization Rules", systemImage: "list.bullet.rectangle.portrait") }
-                    .tag(SettingsSection.rules)
-            }
-            .padding(.top, 8)
+            settingsDetail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 960, idealWidth: 1040, minHeight: 700, idealHeight: 760)
         .background(FileNestTheme.surface)
         .onAppear {
+            appState.refreshReindexJobSummary()
             selectedSection = appState.selectedSettingsSection
             vectorExtensionsDraft = appState.settings.vectorizeExtensions.joined(separator: ", ")
             updateFeedDraft = appState.updates.feedURLString
@@ -66,6 +58,14 @@ struct SettingsView: View {
         }
         .onChange(of: appState.selectedSettingsSection) { section in
             selectedSection = section
+        }
+        .onChange(of: appState.hasReindexActivity) { hasActivity in
+            if !hasActivity && selectedSection == .reindexActivity {
+                selectedSection = .indexing
+            }
+        }
+        .onChange(of: selectedSection) { section in
+            appState.selectSettingsSection(section)
         }
         .task(id: selectedSection) {
             guard selectedSection == .aiModels else { return }
@@ -182,26 +182,173 @@ struct SettingsView: View {
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            BrandMark(size: 34)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("FileNest Settings")
-                    .font(.system(size: 19, weight: .semibold))
-                Text("Manage file watching, organization rules, indexing, AI models, and statistics")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Label("Changes save automatically", systemImage: "checkmark.circle")
-                .font(.system(size: 11))
-                .foregroundStyle(FileNestTheme.success)
+    private var filteredSettingsSections: [SettingsSection] {
+        let query = settingsSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let availableSections = SettingsSection.allCases.filter {
+            $0 != .reindexActivity || appState.hasReindexActivity
         }
-        .padding(.horizontal, 24)
-        .frame(height: 76)
+        guard !query.isEmpty else { return availableSections }
+        return availableSections.filter { section in
+            section.matchesSettingsSearch(query) ||
+                appState.settings.localized(section.label).localizedCaseInsensitiveContains(query) ||
+                appState.settings.localized(section.detail).localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var settingsSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let onBack {
+                Button(action: onBack) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Back to FileNest")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                    }
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 14)
+                .frame(height: 44)
+                .help("Back to FileNest")
+            } else {
+                HStack(spacing: 9) {
+                    BrandMark(size: 24)
+                    Text("FileNest Settings")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .padding(.horizontal, 14)
+                .frame(height: 44)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                TextField("Search settings", text: $settingsSearchText)
+                    .textFieldStyle(.plain)
+                if !settingsSearchText.isEmpty {
+                    Button {
+                        settingsSearchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear Search")
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(
+                FileNestTheme.elevatedSurface,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(FileNestTheme.border, lineWidth: 1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 8)
+
+            if filteredSettingsSections.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.tertiary)
+                    Text("No Settings Found")
+                        .font(.system(size: 12, weight: .medium))
+                    Text("Try a different search term.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(
+                    selection: Binding<SettingsSection?>(
+                        get: { selectedSection },
+                        set: { if let section = $0 { selectedSection = section } }
+                    )
+                ) {
+                    ForEach(SettingsSectionGroup.allCases) { group in
+                        let sections = filteredSettingsSections.filter { $0.group == group }
+                        if !sections.isEmpty {
+                            Section(LocalizedStringKey(group.label)) {
+                                ForEach(sections) { section in
+                                    Label {
+                                        Text(LocalizedStringKey(section.label))
+                                            .lineLimit(1)
+                                    } icon: {
+                                        Image(systemName: section.icon)
+                                            .frame(width: 16)
+                                    }
+                                    .tag(section)
+                                }
+                            }
+                        }
+                    }
+                }
+                .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
+            }
+        }
+        .background(.ultraThinMaterial)
+    }
+
+    private var settingsDetail: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Image(systemName: selectedSection.icon)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(FileNestTheme.accent)
+                    .frame(width: 30, height: 30)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(LocalizedStringKey(selectedSection.label))
+                        .font(.system(size: 20, weight: .semibold))
+                    Text(LocalizedStringKey(selectedSection.detail))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Label("Changes save automatically", systemImage: "checkmark.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(FileNestTheme.success)
+            }
+            .padding(.horizontal, 24)
+            .frame(height: 76)
+            .background(FileNestTheme.surface)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(FileNestTheme.border).frame(height: 1)
+            }
+
+            settingsPage
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
         .background(FileNestTheme.surface)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(FileNestTheme.border).frame(height: 1)
+    }
+
+    @ViewBuilder
+    private var settingsPage: some View {
+        switch selectedSection {
+        case .general:
+            DeferredSettingsPage { generalSettings }
+        case .indexing:
+            DeferredSettingsPage { indexSettings }
+        case .reindexActivity:
+            ReindexActivityView()
+        case .aiModels:
+            DeferredSettingsPage { aiSettings }
+        case .aiSkills:
+            DeferredSettingsPage { AISkillsSettingsView() }
+        case .statistics:
+            DeferredSettingsPage { StatisticsView(embeddedInSettings: true) }
+        case .rules:
+            DeferredSettingsPage { RulesView(embeddedInSettings: true) }
         }
     }
 
@@ -848,7 +995,10 @@ struct SettingsView: View {
             Section("Chat Model") {
                 Picker("Source", selection: Binding(
                     get: { appState.settings.llmChoice },
-                    set: { appState.settings.setLLMChoice($0) }
+                    set: {
+                        appState.settings.setLLMChoice($0)
+                        appState.processPendingRAGFeedbackIfPossible()
+                    }
                 )) {
                     ForEach(AppSettings.LLMChoice.allCases) { choice in
                         Text(LocalizedStringKey(choice.label)).tag(choice.rawValue)

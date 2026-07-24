@@ -106,6 +106,10 @@ The macOS implementation is the normative baseline. “Platform equivalent” me
 | Markdown rendering | Read structured answers | message view | Markdown renderer | message content | High |
 | Voice dictation | Enter questions by voice | composer | OS speech/dictation | draft only | Platform-specific |
 | Response metrics | Show/provider-model/token/timing evidence | message metadata/statistics | ChatService/store | messages, token usage | High |
+| Standard Agent Skills | Activate reusable search, grounded-answer, single-file, and feedback-learning workflows from standard `SKILL.md` packages | Smart Search, Find with Chat, Chat with File, feedback processing | `AgentSkillService`, `ChatService` | bundled/shared/managed skill packages | High on macOS |
+| Progressive skill routing | Load only skill metadata during discovery, then activate full instructions by capability, explicit `$skill-name`, semantic match, or conversation reuse | automatic agent routing | `AgentSkillService` | runtime activation state | High on macOS |
+| Result evaluation and best-file marking | Record accurate/inaccurate ratings, reasons, and the most accurate file for search and chat results | result/message actions | feedback editor, `AppState`, store | RAG feedback records | High on macOS |
+| Feedback-driven skill learning | Analyze saved evaluations with the configured AI and safely evolve an existing managed skill or create a distinct reusable skill | automatic/retry feedback analysis | `RAGLearningService`, `AgentSkillService` | audit rows + managed `SKILL.md` packages | High on macOS |
 
 ## AI, diagnostics, statistics, and updates
 
@@ -119,6 +123,7 @@ The macOS implementation is the normative baseline. “Platform equivalent” me
 | FFmpeg and Whisper management | Detect/install media decoding, install the isolated OpenAI Whisper runtime, and download/delete transcription models | onboarding and AI settings | managed media service managers | service files + model files | High on macOS and Windows |
 | Verified managed updates | Resolve official Ollama assets and verify Ollama, Docling, and PaddleOCR updates before activation | AI/index settings | update/service managers | service files | High |
 | Connectivity checks | Test every configured capability | AI settings | connectivity tester | none | High |
+| Skill management and diagnostics | Review, enable, disable, refresh, reveal, or remove standard skills and inspect invalid/shadowed packages | AI Skills settings | `AISkillsSettingsView`, `AgentSkillService` | skill packages + disabled-name setting | High on macOS |
 | Statistics | Understand files, index health, tokens, activity, categories, and storage | Statistics | store | files, vectors, usage | High |
 | Structured logs | Diagnose by category and severity | diagnostics | log service | log files | High |
 | Export/clear logs | Share or reset diagnostics | General settings | log service | log files | High |

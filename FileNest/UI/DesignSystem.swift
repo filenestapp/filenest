@@ -468,6 +468,33 @@ struct IndexingActivitySymbol: View {
     }
 }
 
+/// Shared AI activity indicator for operations that are waiting on analysis,
+/// retrieval planning, or a language model rather than file-system indexing.
+struct AIThinkingActivitySymbol: View {
+    var isAnimating: Bool = true
+    var size: CGFloat = 13
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.35, paused: !isAnimating)) { timeline in
+            let phase = pulsePhase(at: timeline.date)
+            Image(systemName: "brain.head.profile")
+                .font(.system(size: size, weight: .medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(FileNestTheme.accent)
+                .scaleEffect(1 + (0.08 * phase))
+                .opacity(0.72 + (0.28 * phase))
+        }
+        .frame(width: size + 3, height: size + 3)
+        .accessibilityLabel("Thinking")
+    }
+
+    private func pulsePhase(at date: Date) -> CGFloat {
+        guard isAnimating else { return 0 }
+        let elapsed = date.timeIntervalSinceReferenceDate
+        return CGFloat((sin(elapsed * .pi * 2 / 1.2) + 1) / 2)
+    }
+}
+
 struct IndexingButtonLabel: View {
     let defaultTitle: String
     @ObservedObject var appState: AppState
@@ -620,7 +647,9 @@ struct AutomaticProcessingQueueView: View {
                 ForEach(items) { item in
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
-                            Text(item.fileName)
+                            Text(verbatim: item.fileName == "File"
+                                 ? appState.settings.localized("File")
+                                 : item.fileName)
                                 .font(.system(size: 10, weight: .medium))
                                 .lineLimit(1)
                                 .truncationMode(.middle)

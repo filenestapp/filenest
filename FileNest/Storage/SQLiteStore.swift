@@ -286,6 +286,47 @@ final class SQLiteStore: @unchecked Sendable {
                 END
                 """)
 
+            try db.create(table: "reindex_jobs", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("kind", .text).notNull()
+                t.column("rebuild_vector_space", .boolean).notNull()
+                t.column("content_categories", .text).notNull().defaults(to: "[]")
+                t.column("only_unindexed_files", .boolean).notNull()
+                t.column("include_unindexed_files", .boolean).notNull()
+                t.column("retrieval_index_only", .boolean).notNull()
+                t.column("force_source_reprocessing", .boolean).notNull()
+                t.column("only_media_files", .boolean).notNull()
+                t.column("file_categories", .text).notNull().defaults(to: "[]")
+                t.column("target_embedding_signature", .text).notNull()
+                t.column("status", .text).notNull()
+                t.column("total", .integer).notNull()
+                t.column("created_at", .datetime).notNull()
+                t.column("updated_at", .datetime).notNull()
+            }
+            try db.create(
+                index: "idx_reindex_jobs_status",
+                on: "reindex_jobs",
+                columns: ["status", "updated_at"],
+                ifNotExists: true
+            )
+            try db.create(table: "reindex_job_files", ifNotExists: true) { t in
+                t.column("job_id", .integer)
+                    .notNull()
+                    .references("reindex_jobs", onDelete: .cascade)
+                t.column("file_id", .integer)
+                    .notNull()
+                    .references("files", onDelete: .cascade)
+                t.column("state", .text).notNull()
+                t.column("updated_at", .datetime).notNull()
+                t.primaryKey(["job_id", "file_id"])
+            }
+            try db.create(
+                index: "idx_reindex_job_files_state",
+                on: "reindex_job_files",
+                columns: ["job_id", "state"],
+                ifNotExists: true
+            )
+
             try db.create(table: "library_search_history", ifNotExists: true) { t in
                 t.autoIncrementedPrimaryKey("id")
                 t.column("query", .text).notNull()
@@ -563,10 +604,14 @@ final class SQLiteStore: @unchecked Sendable {
                 t.column("priority", .integer).notNull().defaults(to: 0)
                 t.column("enabled", .boolean).notNull().defaults(to: true)
                 t.column("action", .text).notNull().defaults(to: RuleAction.organize.rawValue)
+                t.column("source_directories", .text).notNull().defaults(to: "[]")
             }
             let ruleColumns = try db.columns(in: "rules").map(\.name)
             if !ruleColumns.contains("action") {
                 try db.execute(sql: "ALTER TABLE rules ADD COLUMN action TEXT NOT NULL DEFAULT 'organize'")
+            }
+            if !ruleColumns.contains("source_directories") {
+                try db.execute(sql: "ALTER TABLE rules ADD COLUMN source_directories TEXT NOT NULL DEFAULT '[]'")
             }
 
             try db.create(table: "chat_messages", ifNotExists: true) { t in
@@ -630,6 +675,57 @@ final class SQLiteStore: @unchecked Sendable {
                 index: "idx_chat_sessions_updated",
                 on: "chat_sessions",
                 columns: ["updated_at"],
+                ifNotExists: true
+            )
+
+            try db.create(table: "rag_feedback", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("source_key", .text).notNull().unique()
+                t.column("source_kind", .text).notNull()
+                t.column("message_id", .integer)
+                    .references("chat_messages", onDelete: .cascade)
+                t.column("session_id", .integer)
+                    .references("chat_sessions", onDelete: .cascade)
+                t.column("search_query", .text)
+                t.column("result_file_ids", .text)
+                t.column("rating", .text).notNull()
+                t.column("reason", .text)
+                t.column("best_file_id", .integer)
+                    .references("files", onDelete: .setNull)
+                t.column("best_file_reason", .text)
+                t.column("analysis_status", .text)
+                    .notNull()
+                    .defaults(to: RAGFeedbackAnalysisStatus.pending.rawValue)
+                t.column("analysis_summary", .text)
+                t.column("analysis_error", .text)
+                t.column("created_at", .datetime).notNull()
+                t.column("updated_at", .datetime).notNull()
+                t.column("analyzed_at", .datetime)
+            }
+            try db.create(
+                index: "idx_rag_feedback_status",
+                on: "rag_feedback",
+                columns: ["analysis_status", "updated_at"],
+                ifNotExists: true
+            )
+
+            try db.create(table: "ai_system_skills", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("key", .text).notNull().unique()
+                t.column("title", .text).notNull()
+                t.column("scope", .text).notNull()
+                t.column("instructions", .text).notNull()
+                t.column("rationale", .text)
+                t.column("enabled", .boolean).notNull().defaults(to: true)
+                t.column("version", .integer).notNull().defaults(to: 1)
+                t.column("source_feedback_count", .integer).notNull().defaults(to: 1)
+                t.column("created_at", .datetime).notNull()
+                t.column("updated_at", .datetime).notNull()
+            }
+            try db.create(
+                index: "idx_ai_system_skills_enabled",
+                on: "ai_system_skills",
+                columns: ["enabled", "scope", "updated_at"],
                 ifNotExists: true
             )
 
@@ -1408,6 +1504,84 @@ final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    /// Finds bounded lexical candidates in Docling, OCR, and transcript chunks
+    /// without maintaining a second full-text index for the chunk table.
+    func chunkTextMatches(
+        terms: [String],
+        fileIDs: Set<Int64>? = nil,
+        limit: Int
+    ) throws -> [VectorSearchHit] {
+        let normalizedTerms = Array(Set(terms.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }.filter { $0.count >= 2 })).sorted().prefix(8)
+        guard !normalizedTerms.isEmpty, limit > 0 else { return [] }
+        if let fileIDs, fileIDs.isEmpty { return [] }
+
+        let scoreExpression = normalizedTerms.map { _ in
+            "CASE WHEN instr(lower(c.contextual_text), ?) > 0 OR instr(lower(c.text), ?) > 0 THEN 1 ELSE 0 END"
+        }.joined(separator: " + ")
+        let clauses = normalizedTerms.map { _ in
+            "(instr(lower(c.contextual_text), ?) > 0 OR instr(lower(c.text), ?) > 0)"
+        }.joined(separator: " OR ")
+
+        return try dbPool.read { db in
+            var arguments = StatementArguments()
+            for term in normalizedTerms { arguments += [term, term] }
+            let fileConstraint: String
+            if let fileIDs {
+                let sortedFileIDs = fileIDs.sorted()
+                fileConstraint = "c.file_id IN (\(Array(repeating: "?", count: sortedFileIDs.count).joined(separator: ","))) AND "
+                arguments += StatementArguments(sortedFileIDs)
+            } else {
+                fileConstraint = ""
+            }
+            for term in normalizedTerms { arguments += [term, term] }
+            arguments += [max(1, min(limit, 400))]
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT c.file_id, c.chunk_idx, c.contextual_text AS chunk_text,
+                           c.section_path, c.page_start, c.page_end, c.kind,
+                           c.parent_idx, p.text AS parent_text, c.entity_terms,
+                           (\(scoreExpression)) AS match_score
+                    FROM document_chunks c
+                    LEFT JOIN document_parents p
+                      ON p.file_id = c.file_id AND p.parent_idx = c.parent_idx
+                    WHERE \(fileConstraint)(\(clauses))
+                    ORDER BY match_score DESC, c.file_id, c.chunk_idx
+                    LIMIT ?
+                    """,
+                arguments: arguments
+            )
+            return rows.map { row in
+                let sectionJSON = (row["section_path"] as String?) ?? "[]"
+                let sectionPath = (try? JSONDecoder().decode(
+                    [String].self,
+                    from: Data(sectionJSON.utf8)
+                )) ?? []
+                let entityJSON = (row["entity_terms"] as String?) ?? "[]"
+                let entityTerms = (try? JSONDecoder().decode(
+                    [String].self,
+                    from: Data(entityJSON.utf8)
+                )) ?? []
+                let matchCount = (row["match_score"] as Int?) ?? 1
+                return VectorSearchHit(
+                    fileId: row["file_id"],
+                    score: min(1, 0.62 + Float(matchCount - 1) * 0.10),
+                    chunkText: row["chunk_text"],
+                    chunkIndex: row["chunk_idx"],
+                    sectionPath: sectionPath,
+                    pageStart: row["page_start"],
+                    pageEnd: row["page_end"],
+                    kind: DocumentChunkKind(rawValue: (row["kind"] as String?) ?? "") ?? .text,
+                    parentIndex: row["parent_idx"],
+                    parentText: row["parent_text"],
+                    entityTerms: entityTerms
+                )
+            }
+        }
+    }
+
     /// Returns high-precision chunk matches for identifiers extracted during indexing.
     /// This lane complements semantic similarity for invoice numbers, emails, dates, and IDs.
     func entityChunkMatches(terms: [String], limit: Int) throws -> [VectorSearchHit] {
@@ -2030,7 +2204,19 @@ final class SQLiteStore: @unchecked Sendable {
         try dbPool.write { db in
             if let id = rule.id {
                 let r = rule
-                try r.update(db, columns: ["name", "type", "pattern", "target_folder", "priority", "enabled", "action"])
+                try r.update(
+                    db,
+                    columns: [
+                        "name",
+                        "type",
+                        "pattern",
+                        "target_folder",
+                        "priority",
+                        "enabled",
+                        "action",
+                        "source_directories",
+                    ]
+                )
                 return id
             } else {
                 var r = rule
@@ -2311,6 +2497,272 @@ final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    // MARK: - RAG feedback and system skills
+
+    @discardableResult
+    func upsertRAGFeedback(
+        messageID: Int64,
+        sessionID: Int64,
+        rating: RAGFeedbackRating,
+        reason: String?,
+        bestFileID: Int64?,
+        bestFileReason: String?
+    ) throws -> RAGFeedbackRecord {
+        try upsertRAGFeedback(
+            sourceKey: "chat:\(messageID)",
+            sourceKind: .chat,
+            messageID: messageID,
+            sessionID: sessionID,
+            searchQuery: nil,
+            resultFileIDs: [],
+            rating: rating,
+            reason: reason,
+            bestFileID: bestFileID,
+            bestFileReason: bestFileReason
+        )
+    }
+
+    @discardableResult
+    func upsertSearchFeedback(
+        query: String,
+        sourceKind: RAGFeedbackSourceKind,
+        resultFileIDs: [Int64],
+        rating: RAGFeedbackRating,
+        reason: String?,
+        bestFileID: Int64?,
+        bestFileReason: String?
+    ) throws -> RAGFeedbackRecord {
+        let normalizedQuery = query
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return try upsertRAGFeedback(
+            sourceKey: "\(sourceKind.rawValue):\(normalizedQuery)",
+            sourceKind: sourceKind,
+            messageID: nil,
+            sessionID: nil,
+            searchQuery: query,
+            resultFileIDs: resultFileIDs,
+            rating: rating,
+            reason: reason,
+            bestFileID: bestFileID,
+            bestFileReason: bestFileReason
+        )
+    }
+
+    @discardableResult
+    private func upsertRAGFeedback(
+        sourceKey: String,
+        sourceKind: RAGFeedbackSourceKind,
+        messageID: Int64?,
+        sessionID: Int64?,
+        searchQuery: String?,
+        resultFileIDs: [Int64],
+        rating: RAGFeedbackRating,
+        reason: String?,
+        bestFileID: Int64?,
+        bestFileReason: String?
+    ) throws -> RAGFeedbackRecord {
+        let now = Date()
+        let resultFileIDsJSON = resultFileIDs.isEmpty
+            ? nil
+            : (try? JSONEncoder().encode(resultFileIDs))
+                .flatMap { String(data: $0, encoding: .utf8) }
+        return try dbPool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO rag_feedback(
+                        source_key, source_kind, message_id, session_id, search_query,
+                        result_file_ids, rating, reason, best_file_id, best_file_reason,
+                        analysis_status, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_key) DO UPDATE SET
+                        source_kind = excluded.source_kind,
+                        session_id = excluded.session_id,
+                        message_id = excluded.message_id,
+                        search_query = excluded.search_query,
+                        result_file_ids = excluded.result_file_ids,
+                        rating = excluded.rating,
+                        reason = excluded.reason,
+                        best_file_id = excluded.best_file_id,
+                        best_file_reason = excluded.best_file_reason,
+                        analysis_status = excluded.analysis_status,
+                        analysis_summary = NULL,
+                        analysis_error = NULL,
+                        analyzed_at = NULL,
+                        updated_at = excluded.updated_at
+                    """,
+                arguments: [
+                    sourceKey,
+                    sourceKind.rawValue,
+                    messageID,
+                    sessionID,
+                    searchQuery,
+                    resultFileIDsJSON,
+                    rating.rawValue,
+                    reason,
+                    bestFileID,
+                    bestFileReason,
+                    RAGFeedbackAnalysisStatus.pending.rawValue,
+                    now,
+                    now,
+                ]
+            )
+            return try RAGFeedbackRecord
+                .filter(Column("source_key") == sourceKey)
+                .fetchOne(db)!
+        }
+    }
+
+    func ragFeedback(messageID: Int64) throws -> RAGFeedbackRecord? {
+        try dbPool.read { db in
+            try RAGFeedbackRecord
+                .filter(Column("message_id") == messageID)
+                .fetchOne(db)
+        }
+    }
+
+    func ragFeedback(sourceKey: String) throws -> RAGFeedbackRecord? {
+        try dbPool.read { db in
+            try RAGFeedbackRecord
+                .filter(Column("source_key") == sourceKey)
+                .fetchOne(db)
+        }
+    }
+
+    func deleteRAGFeedback(messageID: Int64) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "DELETE FROM rag_feedback WHERE message_id = ?",
+                arguments: [messageID]
+            )
+        }
+    }
+
+    func ragFeedback(id: Int64) throws -> RAGFeedbackRecord? {
+        try dbPool.read { db in
+            try RAGFeedbackRecord.fetchOne(db, key: id)
+        }
+    }
+
+    func ragFeedbackRecords(limit: Int = 100) throws -> [RAGFeedbackRecord] {
+        let safeLimit = max(1, min(limit, 500))
+        return try dbPool.read { db in
+            try RAGFeedbackRecord
+                .order(Column("updated_at").desc)
+                .limit(safeLimit)
+                .fetchAll(db)
+        }
+    }
+
+    func pendingRAGFeedback(limit: Int = 20) throws -> [RAGFeedbackRecord] {
+        let safeLimit = max(1, min(limit, 100))
+        return try dbPool.read { db in
+            try RAGFeedbackRecord
+                .filter([
+                    RAGFeedbackAnalysisStatus.pending.rawValue,
+                    RAGFeedbackAnalysisStatus.failed.rawValue,
+                ].contains(Column("analysis_status")))
+                .order(Column("updated_at").asc)
+                .limit(safeLimit)
+                .fetchAll(db)
+        }
+    }
+
+    func updateRAGFeedbackAnalysis(
+        id: Int64,
+        status: RAGFeedbackAnalysisStatus,
+        summary: String? = nil,
+        error: String? = nil
+    ) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE rag_feedback
+                    SET analysis_status = ?,
+                        analysis_summary = ?,
+                        analysis_error = ?,
+                        analyzed_at = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    status.rawValue,
+                    summary,
+                    error,
+                    status == .applied ? Date() : nil,
+                    Date(),
+                    id,
+                ]
+            )
+        }
+    }
+
+    func allAISystemSkills() throws -> [AISystemSkill] {
+        try dbPool.read { db in
+            try AISystemSkill
+                .order(Column("updated_at").desc)
+                .fetchAll(db)
+        }
+    }
+
+    func enabledAISystemSkills(for scope: AISystemSkillScope) throws -> [AISystemSkill] {
+        try allAISystemSkills().filter {
+            $0.enabled && $0.scopeValue.applies(to: scope)
+        }
+    }
+
+    @discardableResult
+    func upsertAISystemSkill(
+        key: String,
+        title: String,
+        scope: AISystemSkillScope,
+        instructions: String,
+        rationale: String?
+    ) throws -> AISystemSkill {
+        let now = Date()
+        return try dbPool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO ai_system_skills(
+                        key, title, scope, instructions, rationale, enabled,
+                        version, source_feedback_count, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, 1, 1, 1, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        title = excluded.title,
+                        scope = excluded.scope,
+                        instructions = excluded.instructions,
+                        rationale = excluded.rationale,
+                        enabled = 1,
+                        version = ai_system_skills.version + 1,
+                        source_feedback_count = ai_system_skills.source_feedback_count + 1,
+                        updated_at = excluded.updated_at
+                """,
+                arguments: [key, title, scope.rawValue, instructions, rationale, now, now]
+            )
+            try db.execute(sql: "UPDATE library_revision SET revision = revision + 1 WHERE id = 1")
+            return try AISystemSkill
+                .filter(Column("key") == key)
+                .fetchOne(db)!
+        }
+    }
+
+    func setAISystemSkillEnabled(id: Int64, enabled: Bool) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE ai_system_skills SET enabled = ?, updated_at = ? WHERE id = ?",
+                arguments: [enabled, Date(), id]
+            )
+            try db.execute(sql: "UPDATE library_revision SET revision = revision + 1 WHERE id = 1")
+        }
+    }
+
+    func deleteAISystemSkill(id: Int64) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM ai_system_skills WHERE id = ?", arguments: [id])
+            try db.execute(sql: "UPDATE library_revision SET revision = revision + 1 WHERE id = 1")
+        }
+    }
+
     // MARK: - settings (k/v)
     func getSetting(_ key: String) -> String? {
         try? dbPool.read { db in
@@ -2328,6 +2780,230 @@ final class SQLiteStore: @unchecked Sendable {
                 sql: "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 arguments: [key, value]
             )
+        }
+    }
+
+    // MARK: - Durable reindex jobs
+
+    func createReindexJob(_ descriptor: ReindexJobRecord, fileIDs: [Int64]) throws -> ReindexJobRecord {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM reindex_jobs")
+            var record = descriptor
+            try record.insert(db)
+            guard let jobID = record.id else {
+                throw DatabaseError(message: "Unable to persist reindex job")
+            }
+            let now = Date()
+            for fileID in Set(fileIDs) {
+                try db.execute(
+                    sql: """
+                        INSERT INTO reindex_job_files(job_id, file_id, state, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                    arguments: [jobID, fileID, ReindexJobFileState.pending.rawValue, now]
+                )
+            }
+            return record
+        }
+    }
+
+    func resumableReindexJob() throws -> ReindexJobRecord? {
+        try dbPool.write { db in
+            guard var job = try ReindexJobRecord
+                .order(Column("updated_at").desc)
+                .fetchOne(db),
+                  let jobID = job.id else {
+                return nil
+            }
+            try db.execute(
+                sql: """
+                    UPDATE reindex_job_files
+                    SET state = ?, updated_at = ?
+                    WHERE job_id = ? AND state = ?
+                    """,
+                arguments: [
+                    ReindexJobFileState.pending.rawValue,
+                    Date(),
+                    jobID,
+                    ReindexJobFileState.processing.rawValue,
+                ]
+            )
+            job.status = ReindexJobStatus.interrupted.rawValue
+            job.updatedAt = Date()
+            try job.update(db)
+            return job
+        }
+    }
+
+    func hasResumableReindexJob() -> Bool {
+        (try? dbPool.read { db in
+            try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS(SELECT 1 FROM reindex_jobs LIMIT 1)"
+            ) ?? false
+        }) ?? false
+    }
+
+    func latestReindexJobSummary(fileLimit: Int = 200) throws -> ReindexJobSummary? {
+        try dbPool.read { db in
+            guard let job = try ReindexJobRecord
+                .order(Column("updated_at").desc)
+                .fetchOne(db),
+                  let jobID = job.id else {
+                return nil
+            }
+
+            let counts = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT
+                        SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) AS pending,
+                        SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) AS processing,
+                        SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) AS completed,
+                        SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) AS failed
+                    FROM reindex_job_files
+                    WHERE job_id = ?
+                    """,
+                arguments: [
+                    ReindexJobFileState.pending.rawValue,
+                    ReindexJobFileState.processing.rawValue,
+                    ReindexJobFileState.completed.rawValue,
+                    ReindexJobFileState.failed.rawValue,
+                    jobID,
+                ]
+            )
+
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT
+                        rjf.file_id,
+                        COALESCE(f.name, 'Unknown file') AS name,
+                        COALESCE(f.path, '') AS path,
+                        COALESCE(f.ext, '') AS ext,
+                        rjf.state,
+                        rjf.updated_at
+                    FROM reindex_job_files rjf
+                    LEFT JOIN files f ON f.id = rjf.file_id
+                    WHERE rjf.job_id = ?
+                    ORDER BY
+                        CASE rjf.state
+                            WHEN 'processing' THEN 0
+                            WHEN 'failed' THEN 1
+                            WHEN 'pending' THEN 2
+                            ELSE 3
+                        END,
+                        rjf.updated_at DESC,
+                        rjf.file_id DESC
+                    LIMIT ?
+                    """,
+                arguments: [jobID, max(fileLimit, 1)]
+            )
+            let files = rows.compactMap { row -> ReindexJobFileItem? in
+                let rawState: String = row["state"]
+                guard let state = ReindexJobFileState(rawValue: rawState) else { return nil }
+                return ReindexJobFileItem(
+                    fileID: row["file_id"],
+                    name: row["name"],
+                    path: row["path"],
+                    ext: row["ext"],
+                    state: state,
+                    updatedAt: row["updated_at"]
+                )
+            }
+            return ReindexJobSummary(
+                job: job,
+                pending: counts?["pending"] ?? 0,
+                processing: counts?["processing"] ?? 0,
+                completed: counts?["completed"] ?? 0,
+                failed: counts?["failed"] ?? 0,
+                files: files
+            )
+        }
+    }
+
+    func reindexJobFileIDs(jobID: Int64, includeCompleted: Bool) throws -> [Int64] {
+        try dbPool.read { db in
+            if includeCompleted {
+                return try Int64.fetchAll(
+                    db,
+                    sql: "SELECT file_id FROM reindex_job_files WHERE job_id = ? ORDER BY file_id",
+                    arguments: [jobID]
+                )
+            }
+            return try Int64.fetchAll(
+                db,
+                sql: """
+                    SELECT file_id
+                    FROM reindex_job_files
+                    WHERE job_id = ? AND state != ?
+                    ORDER BY file_id
+                    """,
+                arguments: [jobID, ReindexJobFileState.completed.rawValue]
+            )
+        }
+    }
+
+    func reindexJobProgress(jobID: Int64) throws -> (completed: Int, failed: Int, totalFiles: Int) {
+        try dbPool.read { db in
+            let completed = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM reindex_job_files WHERE job_id = ? AND state = ?",
+                arguments: [jobID, ReindexJobFileState.completed.rawValue]
+            ) ?? 0
+            let failed = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM reindex_job_files WHERE job_id = ? AND state = ?",
+                arguments: [jobID, ReindexJobFileState.failed.rawValue]
+            ) ?? 0
+            let total = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM reindex_job_files WHERE job_id = ?",
+                arguments: [jobID]
+            ) ?? 0
+            return (completed, failed, total)
+        }
+    }
+
+    func markReindexJobFile(
+        jobID: Int64,
+        fileID: Int64,
+        state: ReindexJobFileState
+    ) {
+        try? dbPool.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE reindex_job_files
+                    SET state = ?, updated_at = ?
+                    WHERE job_id = ? AND file_id = ?
+                    """,
+                arguments: [state.rawValue, Date(), jobID, fileID]
+            )
+            try db.execute(
+                sql: "UPDATE reindex_jobs SET updated_at = ? WHERE id = ?",
+                arguments: [Date(), jobID]
+            )
+        }
+    }
+
+    func setReindexJobStatus(jobID: Int64, status: ReindexJobStatus) {
+        try? dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE reindex_jobs SET status = ?, updated_at = ? WHERE id = ?",
+                arguments: [status.rawValue, Date(), jobID]
+            )
+        }
+    }
+
+    func deleteReindexJob(jobID: Int64) {
+        try? dbPool.write { db in
+            try db.execute(sql: "DELETE FROM reindex_jobs WHERE id = ?", arguments: [jobID])
+        }
+    }
+
+    func deleteAllReindexJobs() {
+        try? dbPool.write { db in
+            try db.execute(sql: "DELETE FROM reindex_jobs")
         }
     }
 

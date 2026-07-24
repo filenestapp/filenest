@@ -117,12 +117,25 @@ final class DoclingDocumentProcessor: @unchecked Sendable {
                 return nil
             }
             clearActiveRequest(requestID)
-            let chunks = rawChunks.compactMap { value -> StructuredDocumentChunk? in
+            let decodedChunks = rawChunks.compactMap { value -> StructuredDocumentChunk? in
                 if let object = value as? [String: Any] { return Self.decodeChunk(object) }
                 if let text = value as? String {
                     return StructuredDocumentChunk(text: text)
                 }
                 return nil
+            }
+            let chunks = Self.removingCorruptedTextLayerChunks(from: decodedChunks)
+            if chunks.count < decodedChunks.count {
+                AppLogService.shared.write(
+                    "Discarded corrupted PDF text-layer chunks after OCR recovery",
+                    category: .indexExtraction,
+                    level: .notice,
+                    metadata: [
+                        "file": source.lastPathComponent,
+                        "discardedChunks": "\(decodedChunks.count - chunks.count)",
+                        "remainingChunks": "\(chunks.count)",
+                    ]
+                )
             }
             guard !chunks.isEmpty else { return nil }
             let text = String(chunks.map(\.contextualText).joined(separator: "\n\n")
@@ -166,6 +179,52 @@ final class DoclingDocumentProcessor: @unchecked Sendable {
             tokenizerProfile: tokenizerProfile,
             tokenizerVersion: tokenizerVersion,
             tokenCountAccuracy: tokenCountAccuracy
+        )
+    }
+
+    /// Discards an unusable embedded PDF text layer only when the same document already
+    /// contains substantial readable text, typically recovered through OCR. This protects
+    /// normal documents and prevents symbol-heavy font-encoding artifacts from polluting
+    /// the file body, lexical index, and embedding space.
+    static func removingCorruptedTextLayerChunks(
+        from source: [StructuredDocumentChunk]
+    ) -> [StructuredDocumentChunk] {
+        let readableChunks = source.filter { isSubstantiallyReadable($0.text) }
+        guard !readableChunks.isEmpty else { return source }
+
+        let filtered = source.filter { !isLikelyCorruptedTextLayer($0.text) }
+        return filtered.isEmpty ? source : filtered
+    }
+
+    private static func isSubstantiallyReadable(_ text: String) -> Bool {
+        let metrics = textQualityMetrics(text)
+        return metrics.total >= 80 && metrics.letterRatio >= 0.25
+    }
+
+    private static func isLikelyCorruptedTextLayer(_ text: String) -> Bool {
+        let metrics = textQualityMetrics(text)
+        guard metrics.total >= 24 else { return false }
+        return metrics.letterRatio <= 0.01
+            && metrics.digitRatio <= 0.35
+            && metrics.symbolRatio >= 0.65
+    }
+
+    private static func textQualityMetrics(_ text: String) -> (
+        total: Int,
+        letterRatio: Double,
+        digitRatio: Double,
+        symbolRatio: Double
+    ) {
+        let characters = text.filter { !$0.isWhitespace }
+        guard !characters.isEmpty else { return (0, 0, 0, 0) }
+        let letterCount = characters.filter(\.isLetter).count
+        let digitCount = characters.filter(\.isNumber).count
+        let total = characters.count
+        return (
+            total,
+            Double(letterCount) / Double(total),
+            Double(digitCount) / Double(total),
+            Double(total - letterCount - digitCount) / Double(total)
         )
     }
 
