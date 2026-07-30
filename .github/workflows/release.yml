@@ -169,7 +169,56 @@ jobs:
               CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
               DEVELOPMENT_TEAM="$MACOS_TEAM_ID" \
               CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
+              OTHER_CODE_SIGN_FLAGS="--timestamp" \
               build
+
+            app=".build/ReleaseDerivedData/Build/Products/Release/FileNest.app"
+            sparkle="$app/Contents/Frameworks/Sparkle.framework"
+            sparkle_version="$sparkle/Versions/B"
+
+            # Xcode's Embed & Sign phase does not re-sign Sparkle's nested helpers.
+            # Sign from the innermost services outward, following Sparkle's
+            # distribution guidance, then re-sign the containing app.
+            codesign --force --sign "$SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              "$sparkle_version/XPCServices/Installer.xpc"
+            codesign --force --sign "$SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              --preserve-metadata=entitlements \
+              "$sparkle_version/XPCServices/Downloader.xpc"
+            codesign --force --sign "$SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              "$sparkle_version/Autoupdate"
+            codesign --force --sign "$SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              "$sparkle_version/Updater.app"
+            codesign --force --sign "$SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              "$sparkle"
+            codesign --force --sign "$SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              --preserve-metadata=entitlements \
+              "$app"
+
+            signed_targets=(
+              "$sparkle_version/XPCServices/Installer.xpc"
+              "$sparkle_version/XPCServices/Downloader.xpc"
+              "$sparkle_version/Autoupdate"
+              "$sparkle_version/Updater.app"
+              "$sparkle"
+              "$app"
+            )
+            for target in "${signed_targets[@]}"; do
+              signature_details="$(codesign -dvv "$target" 2>&1)"
+              if ! grep -Fq "Authority=Developer ID Application:" <<< "$signature_details"; then
+                echo "Developer ID signature is missing from $target" >&2
+                exit 1
+              fi
+              if ! grep -Fq "Timestamp=" <<< "$signature_details"; then
+                echo "Secure timestamp is missing from $target" >&2
+                exit 1
+              fi
+            done
           else
             xcodebuild "${build_args[@]}" \
               CODE_SIGNING_ALLOWED=NO \
