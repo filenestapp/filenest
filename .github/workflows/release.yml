@@ -35,7 +35,7 @@ env:
 jobs:
   macos:
     name: macOS package
-    runs-on: macos-15
+    runs-on: macos-26
     outputs:
       distribution_ready: ${{ steps.signing.outputs.distribution_ready }}
     env:
@@ -239,7 +239,7 @@ jobs:
           )
 
       - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-macos
           path: ${{ runner.temp }}/release-assets/*
@@ -342,7 +342,7 @@ jobs:
           Set-Content -Path "release/SHA256SUMS-Windows.txt" -Value $checksums -Encoding ascii
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-windows
           path: |
@@ -382,7 +382,7 @@ jobs:
           fi
 
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: release-*
           path: release-assets
