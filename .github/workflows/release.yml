@@ -197,15 +197,41 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
 
           if [[ "$DISTRIBUTION_READY" == "true" ]]; then
+            notarize_and_require_acceptance() {
+              local artifact="$1"
+              local result_path="$RUNNER_TEMP/notary-$(basename "$artifact").json"
+              local submission_id=""
+              local status=""
+              local submit_exit=0
+
+              xcrun notarytool submit "$artifact" \
+                --key "$NOTARY_KEY_PATH" \
+                --key-id "$MACOS_NOTARY_KEY_ID" \
+                --issuer "$MACOS_NOTARY_ISSUER_ID" \
+                --wait \
+                --output-format json > "$result_path" || submit_exit=$?
+
+              cat "$result_path"
+              submission_id="$(plutil -extract id raw "$result_path" 2>/dev/null || true)"
+              status="$(plutil -extract status raw "$result_path" 2>/dev/null || true)"
+
+              if [[ "$submit_exit" -ne 0 || "$status" != "Accepted" ]]; then
+                if [[ -n "$submission_id" ]]; then
+                  echo "Notarization was not accepted. Fetching Apple's diagnostic log." >&2
+                  xcrun notarytool log "$submission_id" \
+                    --key "$NOTARY_KEY_PATH" \
+                    --key-id "$MACOS_NOTARY_KEY_ID" \
+                    --issuer "$MACOS_NOTARY_ISSUER_ID" || true
+                fi
+                return 1
+              fi
+            }
+
             zip_path="$output/FileNest-${version}-macOS.zip"
             dmg_path="$output/FileNest-${version}-macOS.dmg"
 
             ditto -c -k --sequesterRsrc --keepParent "$app" "$zip_path"
-            xcrun notarytool submit "$zip_path" \
-              --key "$NOTARY_KEY_PATH" \
-              --key-id "$MACOS_NOTARY_KEY_ID" \
-              --issuer "$MACOS_NOTARY_ISSUER_ID" \
-              --wait
+            notarize_and_require_acceptance "$zip_path"
             xcrun stapler staple "$app"
 
             ditto "$app" "$staging/FileNest.app"
@@ -214,11 +240,7 @@ jobs:
               -srcfolder "$staging" \
               -ov -format UDZO "$dmg_path"
             codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$dmg_path"
-            xcrun notarytool submit "$dmg_path" \
-              --key "$NOTARY_KEY_PATH" \
-              --key-id "$MACOS_NOTARY_KEY_ID" \
-              --issuer "$MACOS_NOTARY_ISSUER_ID" \
-              --wait
+            notarize_and_require_acceptance "$dmg_path"
             xcrun stapler staple "$dmg_path"
             xcrun stapler validate "$dmg_path"
             spctl -a -vv -t exec "$app"

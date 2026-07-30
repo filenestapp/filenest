@@ -1,0 +1,55 @@
+name: Notarization Diagnostic Log
+
+on:
+  workflow_dispatch:
+    inputs:
+      submission_id:
+        description: Apple notarization submission UUID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  log:
+    name: Fetch Apple notary log
+    runs-on: macos-26
+    timeout-minutes: 10
+    env:
+      MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+      MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+      MACOS_NOTARY_PRIVATE_KEY_BASE64: ${{ secrets.MACOS_NOTARY_PRIVATE_KEY_BASE64 }}
+
+    steps:
+      - name: Validate input and credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${{ inputs.submission_id }}" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+            echo "Invalid notarization submission ID." >&2
+            exit 1
+          fi
+          required_values=(
+            "$MACOS_NOTARY_KEY_ID"
+            "$MACOS_NOTARY_ISSUER_ID"
+            "$MACOS_NOTARY_PRIVATE_KEY_BASE64"
+          )
+          for value in "${required_values[@]}"; do
+            if [[ -z "$value" ]]; then
+              echo "GitHub notarization credentials are incomplete." >&2
+              exit 1
+            fi
+          done
+
+      - name: Fetch diagnostic log
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/AuthKey_${MACOS_NOTARY_KEY_ID}.p8"
+          printf '%s' "$MACOS_NOTARY_PRIVATE_KEY_BASE64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          xcrun notarytool log "${{ inputs.submission_id }}" \
+            --key "$key_path" \
+            --key-id "$MACOS_NOTARY_KEY_ID" \
+            --issuer "$MACOS_NOTARY_ISSUER_ID"
