@@ -22,8 +22,17 @@ configs/deploy.env
 # Local release, QA, and scratch artifacts
 /deliverables/
 /tmp/
+/website/downloads/
 /website/qa-*.png
 /designs/**/reference-source/
+*.dmg
+*.pkg
+*.exe
+*.msi
+*.msix
+*.AppImage
+*.deb
+*.rpm
 
 # Root-level artifacts accidentally emitted by frontend and coverage tooling
 /*.js
