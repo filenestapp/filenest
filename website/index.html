@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#4f46e5" />
+    <meta name="theme-color" content="#eef1f5" />
     <meta
       name="description"
       content="FileNest is a local-first intelligent file manager for macOS and Windows. Search, organize, and chat with your files without sending them away by default."
@@ -25,7 +25,7 @@
     <meta name="twitter:image" content="https://filenestapp.com/assets/filenest-og.png" />
     <link rel="canonical" href="https://filenestapp.com/" />
     <link rel="icon" href="assets/app-icon.png" />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260730-3" />
     <title>FileNest — Your files, understood</title>
     <script type="application/ld+json">
       {
@@ -40,7 +40,7 @@
       }
     </script>
   </head>
-  <body>
+  <body class="site-main site-main--native">
     <a class="skip-link" href="#main" data-i18n="a11y.skip">Skip to content</a>
 
     <header class="site-header" data-header>
@@ -62,6 +62,7 @@
       </button>
 
       <nav class="site-nav" id="site-navigation" aria-label="Primary navigation" data-nav>
+        <a href="#video-demo" data-i18n="nav.video">Product film</a>
         <a href="#demo" data-i18n="nav.demo">Live demo</a>
         <a href="#privacy" data-i18n="nav.privacy">Privacy</a>
         <a href="#platforms" data-i18n="nav.platforms">Platforms</a>
@@ -72,7 +73,7 @@
         <button class="locale-switch" type="button" data-locale-switch aria-label="Switch language">
           <span data-locale-label>ZH</span>
         </button>
-        <a class="header-cta" href="download.html" data-i18n="nav.cta">Release status</a>
+        <a class="header-cta" href="downloads/FileNest-0.2.0-macOS.dmg" download data-i18n="nav.cta">Download</a>
       </div>
     </header>
 
@@ -91,9 +92,10 @@
             Index, search, and chat with the files already on your computer using local AI. In local mode, content, indexes, notes, and conversations stay on this device.
           </p>
           <div class="hero__actions">
-            <a class="button button--primary" href="#demo" data-i18n="hero.primaryCta">Explore local AI</a>
-            <a class="button button--quiet" href="#privacy" data-i18n="hero.secondaryCta">How local-first works</a>
+            <a class="button button--primary" href="downloads/FileNest-0.2.0-macOS.dmg" download data-i18n="hero.primaryCta">Download for macOS</a>
+            <a class="button button--quiet" href="#demo" data-i18n="hero.secondaryCta">Explore the live demo</a>
           </div>
+          <p class="hero__download-note" data-i18n="hero.downloadNote">Version 0.2.0 · 13.7 MB · macOS 13 or later</p>
           <div class="hero__trust-grid" aria-label="Local AI, privacy, and security guarantees">
             <span><strong data-i18n="hero.localAiTitle">Local AI</strong><small data-i18n="hero.localAiBody">Ollama, OCR, and embeddings</small></span>
             <span><strong data-i18n="hero.privateIndexTitle">Private index</strong><small data-i18n="hero.privateIndexBody">Stored on this device</small></span>
@@ -103,14 +105,21 @@
 
         <div class="hero__visual" aria-label="FileNest application preview">
           <div class="hero__halo" aria-hidden="true"></div>
-          <div class="app-window">
-            <img
-              src="assets/filenest-chat-current.webp"
-              alt="FileNest finding the most relevant contract files from a natural-language request"
-              data-i18n-alt="images.hero"
-              width="2584"
-              height="1500"
-            />
+          <div class="native-hero-window">
+            <div class="native-hero-window__bar" aria-hidden="true">
+              <span class="native-hero-window__dots"><i></i><i></i><i></i></span>
+              <span>Find with Chat</span>
+              <span class="native-hero-window__state">Local</span>
+            </div>
+            <div class="app-window">
+              <img
+                src="assets/filenest-chat-current.webp"
+                alt="FileNest finding the most relevant contract files from a natural-language request"
+                data-i18n-alt="images.hero"
+                width="2584"
+                height="1500"
+              />
+            </div>
           </div>
           <span class="capture-note" data-i18n="hero.captureNote">Actual UI · mock workspace</span>
           <div class="floating-proof floating-proof--privacy">
@@ -149,6 +158,36 @@
         <div class="format-list" aria-hidden="true">
           <span>PDF</span><span>DOCX</span><span>XLSX</span><span>PPTX</span><span>Images</span><span>Audio</span><span>Video</span><span>Projects</span>
         </div>
+      </section>
+
+      <section class="product-film section" id="video-demo" aria-labelledby="product-film-title">
+        <div class="section-heading section-heading--centered">
+          <p class="section-intro" data-i18n="video.intro">See it in motion</p>
+          <h2 id="product-film-title" data-i18n="video.title">A real workspace, moving at the speed of thought.</h2>
+          <p data-i18n="video.body">A short product film with the current FileNest UI and a fictional, privacy-safe workspace.</p>
+        </div>
+        <figure class="product-film__frame">
+          <div class="product-film__meta">
+            <span><i aria-hidden="true"></i><span data-i18n="video.meta">32-second product film · silent</span></span>
+            <button type="button" class="product-film__toggle" data-product-video-toggle aria-pressed="true" data-i18n="video.pause">Pause motion</button>
+          </div>
+          <video
+            class="product-film__video"
+            data-product-video
+            autoplay
+            muted
+            loop
+            playsinline
+            preload="metadata"
+            poster="media/filenest-homepage-poster.jpg"
+            aria-label="FileNest product film"
+            data-i18n-aria-label="video.ariaLabel"
+          >
+            <source src="media/filenest-homepage-loop.mp4" type="video/mp4" />
+            <span data-i18n="video.fallback">Your browser does not support embedded video.</span>
+          </video>
+          <figcaption data-i18n="video.caption">Actual FileNest UI · fictional files only · local-first workflows</figcaption>
+        </figure>
       </section>
 
       <section class="demo-lab section" id="demo" data-demo-lab>
@@ -413,7 +452,7 @@
             <div class="platform-panel" id="mac-panel" role="tabpanel" aria-labelledby="mac-tab" data-platform-panel="mac">
               <h3 data-i18n="platforms.macTitle">Native where it matters.</h3>
               <p data-i18n="platforms.macBody">A SwiftUI app with menu bar presence, Finder integration, native previews, system appearance, and global quick search. macOS 13 and later.</p>
-              <span class="release-state release-state--active" data-i18n="platforms.macState">Product behavior baseline</span>
+              <span class="release-state release-state--active" data-i18n="platforms.macState">Available now for macOS</span>
             </div>
             <div class="platform-panel" id="windows-panel" role="tabpanel" aria-labelledby="windows-tab" data-platform-panel="windows" hidden>
               <h3 data-i18n="platforms.windowsTitle">Parity without impersonation.</h3>
@@ -457,11 +496,11 @@
           <img src="assets/app-icon.png" alt="FileNest app icon" width="128" height="128" loading="lazy" />
         </div>
         <div class="availability__copy">
-          <p data-i18n="availability.intro">FileNest is preparing for public release</p>
+          <p data-i18n="availability.intro">Available now for macOS</p>
           <h2 data-i18n="availability.title">Make room for the work. Not the file hunt.</h2>
-          <p data-i18n="availability.body">macOS is the current product baseline. Windows 11 is completing native release validation for x64 and ARM64.</p>
+          <p data-i18n="availability.body">Download the notarized FileNest app for macOS 13 or later. Windows 11 is completing native release validation for x64 and ARM64.</p>
         </div>
-        <a class="button button--primary" href="download.html" data-i18n="availability.cta">View release status</a>
+        <a class="button button--primary" href="downloads/FileNest-0.2.0-macOS.dmg" download data-i18n="availability.cta">Download for macOS</a>
       </section>
     </main>
 
@@ -477,7 +516,7 @@
         <a href="#demo" data-i18n="footer.demo">Live demo</a>
         <a href="#privacy" data-i18n="footer.privacy">Privacy</a>
         <a href="#questions" data-i18n="footer.questions">Questions</a>
-        <a href="download.html" data-i18n="footer.release">Release status</a>
+        <a href="download.html" data-i18n="footer.release">Download</a>
       </nav>
       <div class="footer-meta">
         <a class="footer-domain" href="https://filenestapp.com/">filenestapp.com</a>
@@ -485,6 +524,6 @@
       </div>
     </footer>
 
-    <script src="script.js" defer></script>
+    <script src="script.js?v=20260730-3" defer></script>
   </body>
 </html>
