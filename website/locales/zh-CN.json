@@ -4,14 +4,15 @@
     "description": "FileNest 是面向 macOS 和 Windows 的本地优先智能文件管理器。在默认不上传文件的前提下，搜索、整理并与文件对话。"
   },
   "a11y": { "skip": "跳到主要内容", "menu": "打开导航" },
-  "nav": { "demo": "交互演示", "privacy": "隐私", "platforms": "平台", "questions": "常见问题", "cta": "发布状态" },
+  "nav": { "video": "产品短片", "demo": "交互演示", "privacy": "隐私", "platforms": "平台", "questions": "常见问题", "cta": "下载" },
   "hero": {
     "status": "本地 AI · 适用于 macOS 13+ 与 Windows 11",
     "titleLine1": "你的文件，",
     "titleLine2": "真正被理解。",
     "lede": "使用本地 AI，为电脑上的文件建立索引、搜索和对话。在本地模式下，内容、索引、笔记和会话都会留在这台设备上。",
-    "primaryCta": "体验本地 AI",
-    "secondaryCta": "了解本地优先",
+    "primaryCta": "下载 macOS 版",
+    "secondaryCta": "体验交互演示",
+    "downloadNote": "0.2.0 版本 · 13.7 MB · 支持 macOS 13 及以上版本",
     "trust1": "默认本地处理",
     "trust2": "无需注册账号",
     "trust3": "是否使用云端由你决定",
@@ -30,6 +31,17 @@
     "captureNote": "真实界面 · 模拟工作区"
   },
   "formats": { "label": "一个文件库，接住散落在桌面各处的内容" },
+  "video": {
+    "intro": "看看它如何运转",
+    "title": "真实工作区，跟上你的思路。",
+    "body": "一支简短的产品短片，展示当前 FileNest 界面与完全虚构、保护隐私的工作区。",
+    "meta": "32 秒产品短片 · 无声播放",
+    "pause": "暂停动画",
+    "play": "播放动画",
+    "caption": "真实 FileNest 界面 · 仅使用虚构文件 · 本地优先工作流",
+    "ariaLabel": "FileNest 产品短片",
+    "fallback": "你的浏览器不支持内嵌视频。"
+  },
   "demo": {
     "intro": "五种工作流，一个私有工作区。",
     "title": "看 FileNest 如何把散落的文件变成答案。",
@@ -132,7 +144,7 @@
     "body": "同一套产品逻辑，遵循不同操作系统各自的使用习惯。",
     "macTitle": "该原生的地方，坚持原生。",
     "macBody": "基于 SwiftUI，提供菜单栏常驻、Finder 集成、原生预览、系统外观与全局快捷搜索。支持 macOS 13 及以上版本。",
-    "macState": "当前产品行为基线",
+    "macState": "macOS 版现已可下载",
     "windowsTitle": "功能对齐，也尊重 Windows。",
     "windowsBody": "面向 Windows 11，提供系统托盘、原生 Shell 操作、安全凭据存储，以及对齐的搜索、聊天、索引和规则体验。",
     "windowsState": "正在完成原生发布验证"
@@ -150,10 +162,10 @@
     "a4": "可以。你既可以通过 Ollama 使用兼容的本地模型，也可以分别为聊天、Embedding 和 OCR 配置 OpenAI-compatible 或 Anthropic 云端服务。"
   },
   "availability": {
-    "intro": "FileNest 正在为公开发布做准备",
+    "intro": "macOS 版现已可下载",
     "title": "把空间留给工作，不要留给找文件。",
-    "body": "macOS 是当前产品行为基线；Windows 11 正在完成 x64 与 ARM64 的原生发布验证。",
-    "cta": "查看发布状态"
+    "body": "下载经过公证的 FileNest macOS 版，支持 macOS 13 及以上版本。Windows 11 正在完成 x64 与 ARM64 的原生发布验证。",
+    "cta": "下载 macOS 版"
   },
   "footer": {
     "tagline": "本地优先的智能文件管理。",
@@ -162,7 +174,7 @@
     "demo": "交互演示",
     "privacy": "隐私",
     "questions": "常见问题",
-    "release": "发布状态"
+    "release": "下载"
   },
   "images": {
     "hero": "FileNest 根据自然语言请求找到最相关的合同文件",

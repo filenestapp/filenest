@@ -201,10 +201,10 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(reply, "answer")
         let request = try XCTUnwrap(URLProtocolStub.request(for: endpoint))
         XCTAssertEqual(request.httpMethod, "POST")
-        XCTAssertEqual(request.timeoutInterval, 120)
+        XCTAssertEqual(request.timeoutInterval, LLMRequestTimeout.firstResponse)
         let body = try requestJSON(request)
         XCTAssertEqual(body["model"] as? String, "qwen")
-        XCTAssertEqual(body["stream"] as? Bool, false)
+        XCTAssertEqual(body["stream"] as? Bool, true)
         XCTAssertEqual(body["think"] as? Bool, false)
         let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         XCTAssertEqual(messages.map { $0["role"] }, ["system", "user"])
@@ -256,7 +256,7 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(reply, "cloud answer")
         let request = try XCTUnwrap(URLProtocolStub.request(for: endpoint))
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
-        XCTAssertEqual(request.timeoutInterval, 60)
+        XCTAssertEqual(request.timeoutInterval, LLMRequestTimeout.firstResponse)
         XCTAssertEqual(try requestJSON(request)["model"] as? String, "test-model")
     }
 
@@ -966,14 +966,51 @@ with open(\#(markerPath), "w", encoding="utf-8") as marker:
 
     private func registerJSON(_ url: String, status: Int, object: Any) {
         URLProtocolStub.register(url) { request in
+            let requestBody = request.httpBody ?? URLProtocolStub.requestBody(for: url)
+            let isStreaming = requestBody.flatMap { data in
+                (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["stream"] as? Bool
+            } == true
+            let responseData: Data
+            let contentType: String
+            if isStreaming {
+                responseData = try self.streamingResponseData(for: object)
+                contentType = "text/event-stream"
+            } else {
+                responseData = try JSONSerialization.data(withJSONObject: object)
+                contentType = "application/json"
+            }
             let response = try XCTUnwrap(HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
                 statusCode: status,
                 httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: ["Content-Type": contentType]
             ))
-            return (response, try JSONSerialization.data(withJSONObject: object))
+            return (response, responseData)
         }
+    }
+
+    private func streamingResponseData(for object: Any) throws -> Data {
+        let object = try XCTUnwrap(object as? [String: Any])
+        if let message = object["message"] as? [String: Any] {
+            return try JSONSerialization.data(withJSONObject: ["message": message])
+        }
+        if let choices = object["choices"] as? [[String: Any]],
+           let message = choices.first?["message"] as? [String: Any],
+           let content = message["content"] as? String {
+            let event = try JSONSerialization.data(withJSONObject: [
+                "choices": [["delta": ["content": content]]],
+            ])
+            return Data("data: ".utf8) + event + Data("\n\ndata: [DONE]\n".utf8)
+        }
+        if let blocks = object["content"] as? [[String: Any]],
+           let text = blocks.first(where: { $0["type"] as? String == "text" })?["text"] as? String {
+            let event = try JSONSerialization.data(withJSONObject: [
+                "type": "content_block_delta",
+                "delta": ["type": "text_delta", "text": text],
+            ])
+            return Data("data: ".utf8) + event + Data("\n\ndata: {\"type\":\"message_stop\"}\n".utf8)
+        }
+        return Data()
     }
 
     private func requestJSON(_ request: URLRequest) throws -> [String: Any] {

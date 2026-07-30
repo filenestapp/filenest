@@ -8,6 +8,9 @@ export type AppLanguage = 'system' | 'zh-Hans' | 'en'
 export type AutoOrganizeMode = 'immediate' | 'batched'
 export type ReindexMode = 'all' | 'unindexed' | 'embeddings' | 'media'
 export type CloudApiFormat = 'openai' | 'anthropic'
+export type AgentSkillOrigin = 'bundled' | 'sharedUser' | 'managed'
+export type AgentSkillCapability = 'search' | 'library-answer' | 'attached-file-answer' | 'feedback-learning'
+export type AgentSkillExecutionRoute = 'retrieval' | 'complete-document' | 'map-reduce'
 
 export interface FileRecord {
   id: number
@@ -117,6 +120,7 @@ export interface Settings {
   watchDirs: string[]
   organizedRoot: string
   enabledExtensions: string[]
+  customFileExtensions: string[]
   excludeHidden: boolean
   classifyStrategy: 'rule' | 'hybrid'
   llmChoice: LlmChoice
@@ -130,6 +134,7 @@ export interface Settings {
   cloudBaseUrl: string
   cloudModel: string
   cloudContextWindowTokens: number
+  cloudContextWindowOverrides: Record<string, number>
   cloudEmbeddingBaseUrl: string
   cloudEmbeddingApiKey: string
   cloudEmbeddingModel: string
@@ -169,6 +174,24 @@ export interface Settings {
   automaticUpdateChecks: boolean
   automaticallyDownloadsUpdates: boolean
   updateFeedUrl: string
+}
+
+export interface AgentSkillDiagnostic {
+  path: string
+  message: string
+  severity: 'warning' | 'error'
+}
+
+export interface AgentSkill {
+  name: string
+  description: string
+  metadata: Record<string, string>
+  allowedTools: string | null
+  skillFilePath: string
+  origin: AgentSkillOrigin
+  resources: Array<{ relativePath: string; kind: string }>
+  diagnostics: AgentSkillDiagnostic[]
+  enabled: boolean
 }
 
 export interface AppStatistics {
@@ -281,6 +304,8 @@ export interface AppSnapshot {
   ffmpeg: ManagedMediaServiceStatus
   whisper: ManagedMediaServiceStatus
   reranker: { state: 'unavailable' | 'installed' | 'starting' | 'running' | 'failed'; installing: boolean; progress: number | null; message: string; error: string | null; modelDiskBytes: number }
+  agentSkills: AgentSkill[]
+  agentSkillDiagnostics: AgentSkillDiagnostic[]
 }
 
 export interface SendChatRequest {
@@ -297,7 +322,8 @@ export interface ChatStreamEvent {
   delta?: string
   message?: ChatMessage
   error?: string
-  stage?: 'planning' | 'searching' | 'reranking' | 'retrieved' | 'generating' | 'verifying'
+  stage?: 'planning' | 'searching' | 'reranking' | 'retrieved' | 'preparing-document' | 'processing-document' | 'reducing-document' | 'generating' | 'verifying'
+  documentProgress?: { completed: number; total: number }
   searchIntent?: string
   relatedFileIds?: number[]
 }
@@ -382,5 +408,10 @@ export interface FileNestApi {
   checkForUpdates(): Promise<string>
   exportLogs(): Promise<string | null>
   clearLogs(): Promise<number>
+  refreshAgentSkills(): Promise<void>
+  setAgentSkillEnabled(skillPath: string, enabled: boolean): Promise<void>
+  importAgentSkill(): Promise<void>
+  deleteAgentSkill(skillPath: string): Promise<void>
+  openAgentSkillsFolder(): Promise<string>
   onStateChanged(callback: () => void): () => void
 }

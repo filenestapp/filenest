@@ -1202,6 +1202,68 @@ final class AccelerateVectorStore: VectorStore, @unchecked Sendable {
         }
     }
 
+    func searchChunks(
+        _ query: [Float],
+        allowedFileIDs: Set<Int64>,
+        k: Int
+    ) async -> [VectorSearchHit] {
+        guard k > 0, !allowedFileIDs.isEmpty, Self.isValidVector(query) else { return [] }
+        // SQLite has a bounded host-parameter count. Very broad filters are better
+        // served by ANN overfetch plus in-memory filtering than a giant IN clause.
+        guard allowedFileIDs.count <= 800 else {
+            return Array(await searchChunks(query, k: min(max(k * 8, k), 2_000))
+                .filter { allowedFileIDs.contains($0.fileId) }
+                .prefix(k))
+        }
+        let normalized = Self.normalize(query)
+        let sortedFileIDs = allowedFileIDs.sorted()
+        let placeholders = Array(repeating: "?", count: sortedFileIDs.count)
+            .joined(separator: ", ")
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                do {
+                    let hits = try self.store.dbPool.read { db -> [VectorSearchHit] in
+                        var arguments = StatementArguments([Self.encode(normalized)])
+                        arguments += StatementArguments(sortedFileIDs)
+                        arguments += [normalized.count, k]
+                        let rows = try Row.fetchAll(
+                            db,
+                            sql: """
+                            SELECT e.file_id, e.chunk_idx,
+                                   COALESCE(c.contextual_text, e.chunk_text) AS chunk_text,
+                                   c.section_path, c.page_start, c.page_end, c.kind,
+                                   c.parent_idx, p.text AS parent_text, c.entity_terms,
+                                   vec_distance_cosine(e.vector, ?) AS distance
+                            FROM embeddings e
+                            LEFT JOIN document_chunks c
+                              ON c.file_id = e.file_id AND c.chunk_idx = e.chunk_idx
+                            LEFT JOIN document_parents p
+                              ON p.file_id = c.file_id AND p.parent_idx = c.parent_idx
+                            WHERE e.file_id IN (\(placeholders)) AND e.dim = ?
+                            ORDER BY distance, e.id
+                            LIMIT ?
+                            """,
+                            arguments: arguments
+                        )
+                        return rows.map { Self.hit(from: $0) }
+                    }
+                    continuation.resume(returning: hits)
+                } catch {
+                    AppLogService.shared.write(
+                        "filtered vector search failed: \(error)",
+                        category: .vectorSearch,
+                        level: .error,
+                        metadata: [
+                            "allowedFiles": "\(allowedFileIDs.count)",
+                            "limit": "\(k)",
+                        ]
+                    )
+                    continuation.resume(returning: [])
+                }
+            }
+        }
+    }
+
     func neighboringChunks(fileId: Int64,
                            around chunkIndex: Int,
                            radius: Int) async -> [VectorSearchHit] {

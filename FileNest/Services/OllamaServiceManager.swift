@@ -665,7 +665,7 @@ final class OllamaServiceManager: ObservableObject {
             lastError = nil
             Self.log("Ollama stopped")
         } else {
-            let message = "The Ollama service could not stop (PIDs: \(remaining.sorted().map(String.init).joined(separator: ", "))）。"
+            let message = "The Ollama service could not stop (PIDs: \(remaining.sorted().map(String.init).joined(separator: ", ")))."
             lastError = message
             Self.log(message, level: .error)
         }

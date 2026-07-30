@@ -15,6 +15,16 @@ xcuserdata/
 # Local tooling
 .zcode/
 
+# Local deployment secrets and cache
+configs/deploy.env
+.deploy-cache/
+
+# Local release, QA, and scratch artifacts
+/deliverables/
+/tmp/
+/website/qa-*.png
+/designs/**/reference-source/
+
 # Root-level artifacts accidentally emitted by frontend and coverage tooling
 /*.js
 /default.profraw

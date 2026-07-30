@@ -79,6 +79,13 @@ extension OCRProvider {
 protocol LLMProvider {
     var name: String { get }
     func chat(_ messages: [ChatTurn], context: String?) async throws -> String
+    /// Collects a streamed request with a workflow-specific total deadline.
+    /// Providers that do not own a network transport retain their existing behavior.
+    func chat(
+        _ messages: [ChatTurn],
+        context: String?,
+        requestTimeout: TimeInterval?
+    ) async throws -> String
     func chatWithImage(
         prompt: String,
         imageData: Data,
@@ -92,9 +99,68 @@ protocol LLMProvider {
         context: String?
     ) -> AsyncThrowingStream<String, Error>
     func streamChat(_ messages: [ChatTurn], context: String?) -> AsyncThrowingStream<String, Error>
+    func streamChat(
+        _ messages: [ChatTurn],
+        context: String?,
+        responseFormat: LLMResponseFormat
+    ) -> AsyncThrowingStream<String, Error>
+}
+
+enum LLMResponseFormat: Sendable, Equatable {
+    case text
+    case jsonObject
+    case jsonSchema(String)
+}
+
+/// Shared transport policy for every LLM request. A provider may take time to
+/// begin generation, but once streaming starts it can keep the connection open
+/// while tokens arrive. The collector therefore distinguishes the initial
+/// response deadline from the end-to-end request deadline.
+enum LLMRequestTimeout {
+    static let firstResponse: TimeInterval = 5 * 60
+    static let total: TimeInterval = 30 * 60
+
+    static func collect(
+        _ stream: AsyncThrowingStream<String, Error>,
+        totalTimeout: TimeInterval = total,
+        onFragment: ((String) -> Void)? = nil
+    ) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                var result = ""
+                for try await fragment in stream {
+                    try Task.checkCancellation()
+                    result += fragment
+                    onFragment?(fragment)
+                }
+                guard !result.isEmpty else {
+                    throw URLError(.cannotParseResponse)
+                }
+                return result
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(max(1, totalTimeout) * 1_000_000_000))
+                throw URLError(.timedOut)
+            }
+
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw URLError(.unknown)
+            }
+            return result
+        }
+    }
 }
 
 extension LLMProvider {
+    func chat(
+        _ messages: [ChatTurn],
+        context: String?,
+        requestTimeout: TimeInterval?
+    ) async throws -> String {
+        try await chat(messages, context: context)
+    }
+
     func chatWithImage(
         prompt: String,
         imageData: Data,
@@ -144,6 +210,14 @@ extension LLMProvider {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    func streamChat(
+        _ messages: [ChatTurn],
+        context: String?,
+        responseFormat: LLMResponseFormat
+    ) -> AsyncThrowingStream<String, Error> {
+        streamChat(messages, context: context)
     }
 }
 
@@ -415,6 +489,7 @@ protocol VectorStore {
     func remove(fileId: Int64) async
     func search(_ query: [Float], k: Int) async -> [(fileId: Int64, score: Float)]
     func searchChunks(_ query: [Float], k: Int) async -> [VectorSearchHit]
+    func searchChunks(_ query: [Float], allowedFileIDs: Set<Int64>, k: Int) async -> [VectorSearchHit]
     func searchChunks(_ query: [Float], fileId: Int64, k: Int) async -> [VectorSearchHit]
     func neighboringChunks(fileId: Int64, around chunkIndex: Int, radius: Int) async -> [VectorSearchHit]
     func loadAll() async  // Load the in-memory index at startup.
@@ -442,6 +517,18 @@ extension VectorStore {
         guard k > 0 else { return [] }
         return Array(await searchChunks(query, k: max(k * 4, k))
             .filter { $0.fileId == fileId }
+            .prefix(k))
+    }
+
+    func searchChunks(
+        _ query: [Float],
+        allowedFileIDs: Set<Int64>,
+        k: Int
+    ) async -> [VectorSearchHit] {
+        guard k > 0, !allowedFileIDs.isEmpty else { return [] }
+        let overfetch = min(max(k * 8, k), 2_000)
+        return Array(await searchChunks(query, k: overfetch)
+            .filter { allowedFileIDs.contains($0.fileId) }
             .prefix(k))
     }
 

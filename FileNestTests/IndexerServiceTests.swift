@@ -850,6 +850,106 @@ final class IndexerServiceTests: XCTestCase {
         XCTAssertEqual(provider.callCount, 1)
     }
 
+    func testImageOCRFailureDoesNotDisableScannedPDFOCR() async throws {
+        let imageURL = temporaryDirectory.appendingPathComponent("failed-image.png")
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 4,
+            pixelsHigh: 4,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        let imageData = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        try imageData.write(to: imageURL)
+
+        let pdfURL = temporaryDirectory.appendingPathComponent("scanned.pdf")
+        var mediaBox = CGRect(x: 0, y: 0, width: 200, height: 200)
+        let context = try XCTUnwrap(CGContext(pdfURL as CFURL, mediaBox: &mediaBox, nil))
+        context.beginPDFPage(nil)
+        context.endPDFPage()
+        context.closePDF()
+
+        let provider = FailingOCRProvider()
+        _ = await OCRDocumentProcessor.recognizeIfNeeded(
+            url: imageURL,
+            ext: "png",
+            provider: provider,
+            forceImageOCR: true
+        )
+        _ = await OCRDocumentProcessor.recognizeIfNeeded(
+            url: pdfURL,
+            ext: "pdf",
+            provider: provider
+        )
+
+        XCTAssertEqual(provider.callCount, 2)
+    }
+
+    func testSuccessfulWhisperResponseWithoutSpeechHasNoIndexableTranscript() {
+        let payload = WhisperTranscriptionPayload(
+            text: " \n ",
+            language: nil,
+            segments: []
+        )
+
+        let result = MediaTranscriptionProcessor.indexableResult(
+            from: payload,
+            fileName: "silent-recording.mp3",
+            maxTokens: 600
+        )
+
+        XCTAssertNil(result)
+    }
+
+    func testWhisperSegmentsProduceTranscriptWhenTopLevelTextIsEmpty() throws {
+        let payload = WhisperTranscriptionPayload(
+            text: "",
+            language: "en",
+            segments: [
+                .init(start: 1, end: 4, text: "Quarterly revenue increased."),
+                .init(start: 4, end: 7, text: "Operating margin also improved."),
+            ]
+        )
+
+        let result = try XCTUnwrap(MediaTranscriptionProcessor.indexableResult(
+            from: payload,
+            fileName: "earnings-call.mp4",
+            maxTokens: 600
+        ))
+
+        XCTAssertEqual(
+            result.extracted.text,
+            "Quarterly revenue increased. Operating margin also improved."
+        )
+        XCTAssertEqual(result.chunks.count, 1)
+        XCTAssertEqual(result.chunks[0].kind, .transcript)
+        XCTAssertTrue(result.chunks[0].contextualText.contains("Time range: 00:01–00:07"))
+    }
+
+    func testWhisperTextWithoutSegmentsFallsBackToTranscriptChunk() throws {
+        let payload = WhisperTranscriptionPayload(
+            text: "A short voice memo without timestamped segments.",
+            language: "en",
+            segments: []
+        )
+
+        let result = try XCTUnwrap(MediaTranscriptionProcessor.indexableResult(
+            from: payload,
+            fileName: "memo.m4a",
+            maxTokens: 600
+        ))
+
+        XCTAssertEqual(result.chunks.count, 1)
+        XCTAssertEqual(result.chunks[0].kind, .transcript)
+        XCTAssertEqual(result.chunks[0].sectionPath, ["Transcript"])
+        XCTAssertTrue(result.chunks[0].contextualText.contains("Transcript: memo.m4a"))
+    }
+
     func testChunkReturnsNoSegmentsForBlankOrInvalidInput() {
         XCTAssertEqual(IndexerService.chunk(text: "", maxWords: 200, overlap: 30), [])
         XCTAssertEqual(IndexerService.chunk(text: "  \n\t", maxWords: 200, overlap: 30), [])
@@ -1202,6 +1302,28 @@ final class IndexerServiceTests: XCTestCase {
         await gate.stop()
         let didRunAfterStop = await gate.waitUntilRunnable()
         XCTAssertFalse(didRunAfterStop)
+    }
+
+    func testIndexingExecutionGateDrainsActiveWorkBeforePausing() async throws {
+        let gate = IndexingExecutionGate()
+        let activeToken = UUID()
+        let admittedActiveWork = await gate.beginWork(token: activeToken)
+        XCTAssertTrue(admittedActiveWork)
+
+        let draining = Task { await gate.pauseAndDrain() }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        let queuedToken = UUID()
+        let queued = Task { await gate.beginWork(token: queuedToken) }
+
+        await gate.finishWork(token: activeToken)
+        let didDrain = await draining.value
+        XCTAssertTrue(didDrain)
+        try await Task.sleep(nanoseconds: 80_000_000)
+        await gate.resume()
+
+        let admittedQueuedWork = await queued.value
+        XCTAssertTrue(admittedQueuedWork)
+        await gate.finishWork(token: queuedToken)
     }
 
     @MainActor

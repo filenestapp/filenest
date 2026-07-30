@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import GRDB
 import NaturalLanguage
@@ -152,25 +153,90 @@ private actor IndexBatchProgressReporter {
 actor IndexingExecutionGate {
     private enum State {
         case running
+        case draining
         case paused
         case stopped
     }
 
     private var state: State = .running
+    private var activeTokens = Set<UUID>()
 
-    func reset() { state = .running }
+    func reset() {
+        state = .running
+        activeTokens.removeAll()
+    }
 
     func pause() {
-        guard state == .running else { return }
+        guard state == .running || state == .draining else { return }
         state = .paused
     }
 
+    /// Stops admitting new files, lets every active file reach its atomic commit,
+    /// and returns only when database readers can run without competing index work.
+    func pauseAndDrain() async -> Bool {
+        guard state != .stopped else { return false }
+        if state == .paused { return true }
+        state = .draining
+        while !activeTokens.isEmpty {
+            guard !Task.isCancelled, state == .draining else {
+                return state == .paused
+            }
+            do {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            } catch {
+                return false
+            }
+        }
+        guard state == .draining else { return state == .paused }
+        state = .paused
+        return true
+    }
+
     func resume() {
-        guard state == .paused else { return }
+        guard state == .paused || state == .draining else { return }
         state = .running
     }
 
-    func stop() { state = .stopped }
+    func stop() {
+        state = .stopped
+        activeTokens.removeAll()
+    }
+
+    func beginWork(token: UUID) async -> Bool {
+        while state == .paused || state == .draining {
+            guard !Task.isCancelled else { return false }
+            do {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            } catch {
+                return false
+            }
+        }
+        guard state == .running else { return false }
+        activeTokens.insert(token)
+        return true
+    }
+
+    func checkpoint(token: UUID) async -> Bool {
+        guard !Task.isCancelled, state != .stopped else { return false }
+        // Work admitted before draining continues to the next file-level atomic
+        // commit. No new token is admitted until resume().
+        if state == .draining {
+            return activeTokens.contains(token)
+        }
+        while state == .paused {
+            guard !Task.isCancelled else { return false }
+            do {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            } catch {
+                return false
+            }
+        }
+        return state == .running && activeTokens.contains(token)
+    }
+
+    func finishWork(token: UUID) {
+        activeTokens.remove(token)
+    }
 
     func waitUntilRunnable() async -> Bool {
         while state == .paused {
@@ -219,7 +285,18 @@ struct MediaTranscriptionResult: Sendable {
     let chunks: [StructuredDocumentChunk]
 }
 
-private struct WhisperTranscriptionPayload: Decodable, Sendable {
+enum MediaTranscriptionOutcome: Sendable {
+    case transcribed(MediaTranscriptionResult)
+    case noSpeech(MediaNoSpeechReason)
+    case failed(String)
+}
+
+enum MediaNoSpeechReason: String, Sendable {
+    case noAudioTrack = "no audio track"
+    case noRecognizedSpeech = "no recognized speech"
+}
+
+struct WhisperTranscriptionPayload: Decodable, Sendable {
     struct Segment: Decodable, Sendable {
         let start: Double
         let end: Double
@@ -231,33 +308,35 @@ private struct WhisperTranscriptionPayload: Decodable, Sendable {
     let segments: [Segment]
 }
 
-private actor MediaTranscriptionProcessor {
-    func process(url: URL, model: String, maxTokens: Int) async -> MediaTranscriptionResult? {
+actor MediaTranscriptionProcessor {
+    func process(url: URL, model: String, maxTokens: Int) async -> MediaTranscriptionOutcome {
         let model = WhisperModelCatalog.normalizedModel(model)
         guard let ffmpeg = FFmpegServiceManager.resolveExecutable() else {
             Self.log("Media transcription skipped because FFmpeg is unavailable", url: url, model: model)
-            return nil
+            return .failed("FFmpeg is unavailable")
         }
         guard WhisperServiceManager.isRuntimeAndModelAvailable(model) else {
             Self.log("Media transcription skipped because the selected Whisper model is unavailable",
                      url: url, model: model)
-            return nil
+            return .failed("The selected Whisper model is unavailable")
+        }
+        if let hasAudioTrack = await Self.hasAudioTrack(url: url), !hasAudioTrack {
+            Self.log("Media contains no audio track; metadata-only indexing will be used",
+                     url: url, model: model)
+            return .noSpeech(.noAudioTrack)
         }
 
         do {
             let payload = try await Task.detached(priority: .userInitiated) {
                 try Self.transcribe(url: url, model: model, ffmpeg: ffmpeg)
             }.value
-            let chunks = Self.makeChunks(
-                from: payload.segments,
+            guard let result = Self.indexableResult(
+                from: payload,
                 fileName: url.lastPathComponent,
-                language: payload.language,
                 maxTokens: maxTokens
-            )
-            let transcript = payload.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !transcript.isEmpty, !chunks.isEmpty else {
+            ) else {
                 Self.log("Whisper completed without recognized speech", url: url, model: model)
-                return nil
+                return .noSpeech(.noRecognizedSpeech)
             }
             AppLogService.shared.write(
                 "Media transcription completed",
@@ -267,22 +346,80 @@ private actor MediaTranscriptionProcessor {
                     "model": model,
                     "language": payload.language ?? "unknown",
                     "segments": "\(payload.segments.count)",
-                    "chunks": "\(chunks.count)",
+                    "chunks": "\(result.chunks.count)",
                 ]
             )
-            return MediaTranscriptionResult(
-                extracted: ContentExtractor.Extracted(
-                    title: url.deletingPathExtension().lastPathComponent,
-                    text: String(transcript.prefix(ContentExtractor.maxChars))
-                ),
-                chunks: chunks
-            )
+            return .transcribed(result)
         } catch {
             AppLogService.shared.write(
                 "Media transcription failed: \(error.localizedDescription)",
                 category: .indexExtraction,
                 level: .error,
                 metadata: ["file": url.lastPathComponent, "model": model]
+            )
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    nonisolated static func indexableResult(
+        from payload: WhisperTranscriptionPayload,
+        fileName: String,
+        maxTokens: Int
+    ) -> MediaTranscriptionResult? {
+        let payloadText = payload.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let segmentText = payload.segments
+            .map(\.text)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        let transcript = payloadText.isEmpty ? segmentText : payloadText
+        guard !transcript.isEmpty else { return nil }
+
+        var chunks = makeChunks(
+            from: payload.segments,
+            fileName: fileName,
+            language: payload.language,
+            maxTokens: maxTokens
+        )
+        if chunks.isEmpty {
+            chunks = IndexerService.chunk(text: transcript, maxWords: maxTokens, overlap: 0).map {
+                StructuredDocumentChunk(
+                    text: $0,
+                    contextualText: [
+                        "Transcript: \(fileName)",
+                        payload.language.map { "Language: \($0)" },
+                        $0,
+                    ].compactMap { $0 }.joined(separator: "\n"),
+                    sectionPath: ["Transcript"],
+                    kind: .transcript
+                )
+            }
+        }
+        guard !chunks.isEmpty else { return nil }
+        return MediaTranscriptionResult(
+            extracted: ContentExtractor.Extracted(
+                title: URL(fileURLWithPath: fileName)
+                    .deletingPathExtension()
+                    .lastPathComponent,
+                text: String(transcript.prefix(ContentExtractor.maxChars))
+            ),
+            chunks: chunks
+        )
+    }
+
+    nonisolated private static func hasAudioTrack(url: URL) async -> Bool? {
+        do {
+            let tracks = try await AVURLAsset(url: url).loadTracks(withMediaType: .audio)
+            return !tracks.isEmpty
+        } catch {
+            AppLogService.shared.write(
+                "Unable to inspect media audio tracks; Whisper will attempt transcription",
+                category: .indexExtraction,
+                level: .warning,
+                metadata: [
+                    "file": url.lastPathComponent,
+                    "error": error.localizedDescription,
+                ]
             )
             return nil
         }
@@ -295,7 +432,15 @@ private actor MediaTranscriptionProcessor {
     ) throws -> WhisperTranscriptionPayload {
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("filenest-whisper-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: output) }
+        let errorOutput = FileManager.default.temporaryDirectory
+            .appendingPathComponent("filenest-whisper-\(UUID().uuidString).stderr")
+        FileManager.default.createFile(atPath: errorOutput.path, contents: nil)
+        let errorHandle = try FileHandle(forWritingTo: errorOutput)
+        defer {
+            try? errorHandle.close()
+            try? FileManager.default.removeItem(at: output)
+            try? FileManager.default.removeItem(at: errorOutput)
+        }
         let script = """
         import json, sys, whisper
         model = whisper.load_model(sys.argv[1], download_root=sys.argv[2])
@@ -320,10 +465,17 @@ private actor MediaTranscriptionProcessor {
         ]
         process.environment = environment
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        process.standardError = errorHandle
         try process.run()
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw MediaTranscriptionError.commandFailed }
+        try? errorHandle.close()
+        guard process.terminationStatus == 0 else {
+            let detail = (try? String(contentsOf: errorOutput, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw MediaTranscriptionError.commandFailed(
+                detail.map { String($0.suffix(1_000)) }
+            )
+        }
         return try JSONDecoder().decode(WhisperTranscriptionPayload.self, from: Data(contentsOf: output))
     }
 
@@ -393,9 +545,17 @@ private actor MediaTranscriptionProcessor {
 }
 
 private enum MediaTranscriptionError: LocalizedError {
-    case commandFailed
+    case commandFailed(String?)
 
-    var errorDescription: String? { "OpenAI Whisper transcription failed" }
+    var errorDescription: String? {
+        switch self {
+        case let .commandFailed(detail):
+            guard let detail, !detail.isEmpty else {
+                return "OpenAI Whisper transcription failed"
+            }
+            return "OpenAI Whisper transcription failed: \(detail)"
+        }
+    }
 }
 
 /// Indexing service: extracts one file, splits it into chunks, creates embeddings, and stores the result.
@@ -519,9 +679,9 @@ final class IndexerService {
     }
 
     func cancel(fileID: Int64) async {
-        generationLock.lock()
-        activeGenerations.removeValue(forKey: fileID)
-        generationLock.unlock()
+        generationLock.withLock {
+            _ = activeGenerations.removeValue(forKey: fileID)
+        }
         await taskCoordinator.cancel(fileID: fileID)
     }
 
@@ -646,22 +806,40 @@ final class IndexerService {
         if shouldTranscribeMedia {
             guard await canContinue(checkpoint) else { return false }
             await stageProgress?(.transcribing)
-            transcription = await mediaTranscriptionProcessor.process(
+            let outcome = await mediaTranscriptionProcessor.process(
                 url: url,
                 model: settings.whisperModel,
                 maxTokens: settings.chunkTokenLimit
             )
+            switch outcome {
+            case let .transcribed(result):
+                transcription = result
+            case let .noSpeech(reason):
+                transcription = nil
+                Self.log(
+                    "media has no searchable speech; continuing with metadata-only indexing",
+                    category: .indexExtraction,
+                    level: .notice,
+                    metadata: [
+                        "file": file.name,
+                        "reason": reason.rawValue,
+                    ]
+                )
+            case let .failed(message):
+                Self.log(
+                    "media indexing stopped because transcription failed",
+                    category: .indexExtraction,
+                    level: .error,
+                    metadata: [
+                        "file": file.name,
+                        "model": settings.whisperModel,
+                        "reason": message,
+                    ]
+                )
+                return false
+            }
         } else {
             transcription = nil
-        }
-        if shouldTranscribeMedia, transcription == nil {
-            Self.log(
-                "media indexing stopped because transcription did not produce searchable text",
-                category: .indexExtraction,
-                level: .error,
-                metadata: ["file": file.name, "model": settings.whisperModel]
-            )
-            return false
         }
         guard await canContinue(checkpoint) else { return false }
         await stageProgress?(.ocr)
@@ -684,6 +862,10 @@ final class IndexerService {
             )
             : nil
         // Docling handles structure parsing; pages that need OCR go to the configured primary OCR provider.
+        let requiresConfiguredOCR = OCRDocumentProcessor.requiresRecognition(
+            ext: file.ext,
+            pdfAnalysis: pdfAnalysis
+        )
         let shouldRunConfiguredOCR = !shouldTranscribeMedia && (
             docling == nil || OCRDocumentProcessor.requiresRecognition(
                 ext: file.ext,
@@ -703,9 +885,40 @@ final class IndexerService {
         var extracted = transcription?.extracted
             ?? docling?.extracted
             ?? ContentExtractor.extract(url: url, ext: file.ext)
+        let hasCorruptedDoclingText = docling.map {
+            DoclingDocumentProcessor.isLikelyCorruptedTextLayer($0.extracted.text)
+        } ?? false
+        let hasReadableOCR = ocrText.map(DoclingDocumentProcessor.isLikelyReadableText) ?? false
+        if requiresConfiguredOCR, hasCorruptedDoclingText, !hasReadableOCR {
+            Self.log(
+                "indexing stopped because OCR did not recover a corrupted PDF text layer",
+                category: .indexExtraction,
+                level: .error,
+                metadata: ["file": file.name]
+            )
+            return false
+        }
+
+        let effectiveDoclingChunks = docling.map { processed in
+            if hasCorruptedDoclingText, hasReadableOCR {
+                return [StructuredDocumentChunk]()
+            }
+            return DoclingDocumentProcessor.removingCorruptedTextLayerChunks(
+                from: processed.chunks,
+                readableRecovery: ocrText
+            )
+        }
         var appendedOCRText: String?
-        if let ocrText,
-           Self.shouldAppendOCRText(ocrText, to: extracted.text) {
+        if hasCorruptedDoclingText, hasReadableOCR, let ocrText {
+            let readableDoclingText = effectiveDoclingChunks?
+                .map(\.contextualText)
+                .joined(separator: "\n\n") ?? ""
+            extracted.text = [readableDoclingText, ocrText]
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+            appendedOCRText = ocrText
+        } else if let ocrText,
+                  Self.shouldAppendOCRText(ocrText, to: extracted.text) {
             extracted.text = [extracted.text, ocrText]
                 .filter { !$0.isEmpty }
                 .joined(separator: "\n\n")
@@ -803,7 +1016,7 @@ final class IndexerService {
         guard await canContinue(checkpoint) else { return false }
         await stageProgress?(.chunking)
         var chunks = transcription?.chunks ?? Self.contentChunks(
-            doclingChunks: docling?.chunks,
+            doclingChunks: effectiveDoclingChunks,
             extractedText: extracted.text,
             appendedOCRText: appendedOCRText,
             maxTokens: settings.chunkTokenLimit
@@ -1537,6 +1750,8 @@ final class IndexerService {
         totalOverride: Int? = nil,
         initialCompleted: Int = 0,
         resumeShadow: Bool = false,
+        expectedShadowFileCount: Int? = nil,
+        executionGate: IndexingExecutionGate? = nil,
         checkpoint: (@Sendable () async -> Bool)? = nil,
         fileCompletion: (@Sendable (Int64, Bool) async -> Void)? = nil,
         progress: (@MainActor (VectorIndexRebuildProgress) -> Void)? = nil
@@ -1580,6 +1795,7 @@ final class IndexerService {
                 totalOverride: total,
                 initialCompleted: initialCompleted,
                 resumeShadow: resumeShadow,
+                executionGate: executionGate,
                 checkpoint: checkpoint,
                 fileCompletion: fileCompletion,
                 progress: progress
@@ -1591,6 +1807,8 @@ final class IndexerService {
                 totalOverride: total,
                 initialCompleted: initialCompleted,
                 resumeShadow: resumeShadow,
+                expectedFileCount: expectedShadowFileCount,
+                executionGate: executionGate,
                 checkpoint: checkpoint,
                 fileCompletion: fileCompletion,
                 progress: progress
@@ -1603,6 +1821,7 @@ final class IndexerService {
             force: rebuildVectorSpace || forceReprocessing,
             totalOverride: total,
             initialCompleted: initialCompleted,
+            executionGate: executionGate,
             checkpoint: checkpoint,
             fileCompletion: fileCompletion,
             progress: progress
@@ -1634,6 +1853,8 @@ final class IndexerService {
         totalOverride: Int,
         initialCompleted: Int,
         resumeShadow: Bool,
+        expectedFileCount: Int?,
+        executionGate: IndexingExecutionGate?,
         checkpoint: (@Sendable () async -> Bool)?,
         fileCompletion: (@Sendable (Int64, Bool) async -> Void)?,
         progress: (@MainActor (VectorIndexRebuildProgress) -> Void)?
@@ -1651,7 +1872,7 @@ final class IndexerService {
             return !stagedFileIDs.contains(fileID)
         }
         let completedBeforeRun = max(initialCompleted, stagedFileIDs.count)
-        let expectedFileCount = stagedFileIDs.count + pendingFiles.count
+        let expectedFileCount = expectedFileCount ?? (stagedFileIDs.count + pendingFiles.count)
 
         let result = await indexFiles(
             pendingFiles,
@@ -1659,6 +1880,7 @@ final class IndexerService {
             writeTarget: .shadow,
             totalOverride: totalOverride,
             initialCompleted: completedBeforeRun,
+            executionGate: executionGate,
             checkpoint: checkpoint,
             fileCompletion: fileCompletion,
             progress: progress
@@ -1672,6 +1894,18 @@ final class IndexerService {
             ))
             return false
         }
+        let stagedCount = await vectorStore.shadowStagedFileIDs().count
+        guard stagedCount >= expectedFileCount else {
+            await progress?(VectorIndexRebuildProgress(
+                phase: .completed,
+                completed: result.completed,
+                total: totalOverride,
+                currentFileName: nil,
+                failed: 0,
+                stage: .saving
+            ))
+            return true
+        }
 
         await progress?(VectorIndexRebuildProgress(
             phase: .clearing,
@@ -1681,7 +1915,15 @@ final class IndexerService {
             failed: 0,
             stage: .saving
         ))
+        let commitToken = UUID()
+        if let executionGate,
+           !(await executionGate.beginWork(token: commitToken)) {
+            return false
+        }
         let committed = await vectorStore.commitShadowRebuild(expectedFileCount: expectedFileCount)
+        if let executionGate {
+            await executionGate.finishWork(token: commitToken)
+        }
         guard committed else {
             await progress?(VectorIndexRebuildProgress(
                 phase: .failed,
@@ -1711,6 +1953,7 @@ final class IndexerService {
         totalOverride: Int,
         initialCompleted: Int,
         resumeShadow: Bool,
+        executionGate: IndexingExecutionGate?,
         checkpoint: (@Sendable () async -> Bool)?,
         fileCompletion: (@Sendable (Int64, Bool) async -> Void)?,
         progress: (@MainActor (VectorIndexRebuildProgress) -> Void)?
@@ -1748,14 +1991,39 @@ final class IndexerService {
         let expectedStagedFileCount = stagedFileIDs.count + pendingFiles.count
 
         for file in pendingFiles {
-            guard await canContinue(checkpoint) else {
+            let workToken = UUID()
+            if let executionGate,
+               !(await executionGate.beginWork(token: workToken)) {
                 await progress?(VectorIndexRebuildProgress(
                     phase: .stopped, completed: completed, total: totalOverride,
                     currentFileName: file.name, failed: failed
                 ))
                 return false
             }
-            guard let fileID = file.id else { continue }
+            let effectiveCheckpoint: @Sendable () async -> Bool = {
+                guard !Task.isCancelled else { return false }
+                if let executionGate,
+                   !(await executionGate.checkpoint(token: workToken)) {
+                    return false
+                }
+                return await checkpoint?() ?? true
+            }
+            guard await effectiveCheckpoint() else {
+                if let executionGate {
+                    await executionGate.finishWork(token: workToken)
+                }
+                await progress?(VectorIndexRebuildProgress(
+                    phase: .stopped, completed: completed, total: totalOverride,
+                    currentFileName: file.name, failed: failed
+                ))
+                return false
+            }
+            guard let fileID = file.id else {
+                if let executionGate {
+                    await executionGate.finishWork(token: workToken)
+                }
+                continue
+            }
             let chunks = storedChunks[fileID] ?? []
             await progress?(VectorIndexRebuildProgress(
                 phase: .indexing, completed: completed, total: totalOverride,
@@ -1772,7 +2040,7 @@ final class IndexerService {
                 embeddings = await embed(
                     chunks: chunks,
                     using: embedder,
-                    checkpoint: checkpoint,
+                    checkpoint: effectiveCheckpoint,
                     stageProgress: { stage in
                         await progress?(VectorIndexRebuildProgress(
                             phase: .indexing, completed: completedBeforeFile, total: totalOverride,
@@ -1790,6 +2058,9 @@ final class IndexerService {
                 )
                 : false
             let succeeded = generatedEmbeddings && staged
+            if let executionGate {
+                await executionGate.finishWork(token: workToken)
+            }
             await fileCompletion?(fileID, succeeded)
             if !succeeded { failed += 1 }
             completed += 1
@@ -1807,13 +2078,22 @@ final class IndexerService {
             return false
         }
         if expectedStagedFileCount > 0 {
+            let commitToken = UUID()
+            if let executionGate,
+               !(await executionGate.beginWork(token: commitToken)) {
+                return false
+            }
             await progress?(VectorIndexRebuildProgress(
                 phase: .clearing, completed: completed, total: totalOverride,
                 currentFileName: nil, failed: 0, stage: .saving
             ))
-            guard await vectorStore.commitShadowEmbeddingRebuild(
+            let committed = await vectorStore.commitShadowEmbeddingRebuild(
                 expectedFileCount: expectedStagedFileCount
-            ) else {
+            )
+            if let executionGate {
+                await executionGate.finishWork(token: commitToken)
+            }
+            guard committed else {
                 await progress?(VectorIndexRebuildProgress(
                     phase: .failed, completed: completed, total: totalOverride,
                     currentFileName: nil, failed: pendingFiles.count
@@ -1827,6 +2107,7 @@ final class IndexerService {
                 newFiles,
                 totalOverride: totalOverride,
                 initialCompleted: completed,
+                executionGate: executionGate,
                 checkpoint: checkpoint,
                 fileCompletion: fileCompletion,
                 progress: { childProgress in
@@ -1866,6 +2147,7 @@ final class IndexerService {
         writeTarget: IndexWriteTarget = .active,
         totalOverride: Int? = nil,
         initialCompleted: Int = 0,
+        executionGate: IndexingExecutionGate? = nil,
         checkpoint: (@Sendable () async -> Bool)? = nil,
         fileCompletion: (@Sendable (Int64, Bool) async -> Void)? = nil,
         progress: (@MainActor (VectorIndexRebuildProgress) -> Void)? = nil
@@ -1882,8 +2164,26 @@ final class IndexerService {
         await withTaskGroup(of: (id: Int64?, name: String, succeeded: Bool, stopped: Bool).self) { group in
             func enqueue(_ file: FileRecord) {
                 group.addTask { [weak self] in
-                    guard let self, let id = file.id,
-                          await self.canContinue(checkpoint) else {
+                    guard let self, let id = file.id else {
+                        return (file.id, file.name, false, true)
+                    }
+                    let token = UUID()
+                    if let executionGate,
+                       !(await executionGate.beginWork(token: token)) {
+                        return (file.id, file.name, false, true)
+                    }
+                    let effectiveCheckpoint: @Sendable () async -> Bool = {
+                        guard !Task.isCancelled else { return false }
+                        if let executionGate,
+                           !(await executionGate.checkpoint(token: token)) {
+                            return false
+                        }
+                        return await checkpoint?() ?? true
+                    }
+                    guard await effectiveCheckpoint() else {
+                        if let executionGate {
+                            await executionGate.finishWork(token: token)
+                        }
                         return (file.id, file.name, false, true)
                     }
                     await reporter.report(fileName: file.name, stage: .hashing)
@@ -1891,12 +2191,15 @@ final class IndexerService {
                         id: id,
                         force: force,
                         writeTarget: writeTarget,
-                        checkpoint: checkpoint,
+                        checkpoint: effectiveCheckpoint,
                         stageProgress: { stage in
                             await reporter.report(fileName: file.name, stage: stage)
                         }
                     )
-                    let remainsRunnable = await self.canContinue(checkpoint)
+                    let remainsRunnable = await effectiveCheckpoint()
+                    if let executionGate {
+                        await executionGate.finishWork(token: token)
+                    }
                     let didStop = Task.isCancelled || !remainsRunnable
                     return (id, file.name, succeeded, didStop)
                 }

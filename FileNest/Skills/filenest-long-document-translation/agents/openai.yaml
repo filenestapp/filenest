@@ -1,0 +1,6 @@
+interface:
+  display_name: "FileNest Long Document Translation"
+  short_description: "Translate and summarize complete long documents"
+  default_prompt: "Use $filenest-long-document-translation to process this complete file without dropping sections."
+policy:
+  allow_implicit_invocation: true

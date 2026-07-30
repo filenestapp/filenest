@@ -165,7 +165,7 @@ final class RAGLearningService {
             if let providedProvider {
                 provider = providedProvider
             } else if settings.llmChoice == AppSettings.LLMChoice.ollama.rawValue {
-                provider = settings.makeLocalLLMProvider(thinkingEnabled: true)
+                provider = settings.makeLocalLLMProvider()
             } else {
                 provider = settings.makeLLMProvider()
             }
@@ -197,7 +197,10 @@ final class RAGLearningService {
                 )
                 if skill.action == .update,
                    let target = skill.target,
-                   skillService?.enabledSkills().contains(where: { $0.name == target }) == true {
+                   // A managed skill may have been manually paused.  Feedback still
+                   // evolves the FileNest-managed package and the new revision is
+                   // enabled by the managed-skill policy.
+                   skillService?.allSkills().contains(where: { $0.name == target }) == true {
                     _ = try skillService?.evolveSkill(
                         named: target,
                         description: skill.description,

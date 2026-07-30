@@ -4,6 +4,7 @@ import SwiftUI
 struct ReindexActivityView: View {
     @EnvironmentObject private var appState: AppState
     @State private var filter: ReindexFileFilter = .all
+    @State private var selectedFailedFileIDs = Set<Int64>()
 
     var body: some View {
         ScrollView {
@@ -28,6 +29,9 @@ struct ReindexActivityView: View {
         .background(FileNestTheme.surface)
         .task {
             appState.refreshReindexJobSummary()
+        }
+        .onChange(of: availableFailedFileIDs) { availableIDs in
+            selectedFailedFileIDs.formIntersection(availableIDs)
         }
     }
 
@@ -132,9 +136,14 @@ struct ReindexActivityView: View {
                 Button("Stopping…", systemImage: "stop.fill") {}
                     .buttonStyle(.bordered)
                     .disabled(true)
-            case .failed, .stopped, .idle:
+            case .completedWithErrors, .failed, .stopped, .idle:
                 if appState.reindexJobSummary != nil {
-                    Button("Resume Reindex", systemImage: "play.fill") {
+                    Button(
+                        appState.reindexJobSummary?.failed ?? 0 > 0
+                            ? "Retry Failed Files"
+                            : "Resume Reindex",
+                        systemImage: "play.fill"
+                    ) {
                         appState.resumeReindexJobFromSettings()
                     }
                     .buttonStyle(.borderedProminent)
@@ -148,37 +157,84 @@ struct ReindexActivityView: View {
 
     private func summaryCards(_ summary: ReindexJobSummary) -> some View {
         HStack(spacing: 10) {
-            metricCard("Pending", value: summary.pending + summary.processing, icon: "clock")
-            metricCard("Completed", value: summary.completed, icon: "checkmark.circle")
-            metricCard("Failed", value: summary.failed, icon: "exclamationmark.triangle")
-            metricCard("Total", value: summary.total, icon: "doc.on.doc")
+            metricCard(
+                "Pending",
+                value: summary.pending + summary.processing,
+                icon: "clock",
+                destination: .pending
+            )
+            metricCard(
+                "Completed",
+                value: summary.completed,
+                icon: "checkmark.circle",
+                destination: .completed
+            )
+            metricCard(
+                "Failed",
+                value: summary.failed,
+                icon: "exclamationmark.triangle",
+                destination: .failed
+            )
+            metricCard(
+                "Total",
+                value: summary.total,
+                icon: "doc.on.doc",
+                destination: .all
+            )
         }
     }
 
-    private func metricCard(_ title: String, value: Int, icon: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(FileNestTheme.accent)
-                .frame(width: 28, height: 28)
-                .background(FileNestTheme.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(value.formatted())
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                Text(LocalizedStringKey(title))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+    private func metricCard(
+        _ title: String,
+        value: Int,
+        icon: String,
+        destination: ReindexFileFilter
+    ) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.16)) {
+                filter = destination
             }
-            Spacer(minLength: 0)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(FileNestTheme.accent)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        FileNestTheme.accent.opacity(0.1),
+                        in: RoundedRectangle(cornerRadius: 7)
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(value.formatted())
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    Text(LocalizedStringKey(title))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
         }
-        .padding(12)
-        .frame(maxWidth: .infinity)
-        .background(FileNestTheme.elevatedSurface, in: RoundedRectangle(cornerRadius: 11))
+        .buttonStyle(.plain)
+        .background(
+            filter == destination
+                ? FileNestTheme.accent.opacity(0.08)
+                : FileNestTheme.elevatedSurface,
+            in: RoundedRectangle(cornerRadius: 11)
+        )
         .overlay {
             RoundedRectangle(cornerRadius: 11)
-                .stroke(FileNestTheme.border, lineWidth: 1)
+                .stroke(
+                    filter == destination
+                        ? FileNestTheme.accent.opacity(0.5)
+                        : FileNestTheme.border,
+                    lineWidth: 1
+                )
         }
+        .help(appState.settings.localizedFormat("Show %@ Files", appState.settings.localized(title)))
     }
 
     private func queueCard(_ summary: ReindexJobSummary) -> some View {
@@ -202,6 +258,11 @@ struct ReindexActivityView: View {
             }
             .padding(16)
 
+            if filter == .failed, summary.failed > 0 {
+                Divider()
+                failedSelectionToolbar(summary)
+            }
+
             Divider()
 
             LazyVStack(spacing: 0) {
@@ -216,7 +277,20 @@ struct ReindexActivityView: View {
                     ForEach(filteredFiles(summary)) { item in
                         ReindexFileRow(
                             item: item,
-                            isCurrent: isCurrentFile(item)
+                            isCurrent: isCurrentFile(item),
+                            isSelected: selectedFailedFileIDs.contains(item.fileID),
+                            isPreviewed: appState.previewedFile?.id == item.fileID,
+                            showsSelection: filter == .failed,
+                            canRetry: canRetryFailedFiles,
+                            onToggleSelection: {
+                                toggleFailedSelection(item.fileID)
+                            },
+                            onOpen: {
+                                appState.toggleFilePreview(fileID: item.fileID)
+                            },
+                            onRetry: {
+                                retryFailedFiles([item.fileID])
+                            }
                         )
                         if item.id != filteredFiles(summary).last?.id {
                             Divider().padding(.leading, 46)
@@ -232,8 +306,76 @@ struct ReindexActivityView: View {
         }
     }
 
+    private func failedSelectionToolbar(_ summary: ReindexJobSummary) -> some View {
+        let failedIDs = Set(
+            summary.files
+                .filter { $0.state == .failed }
+                .map(\.fileID)
+        )
+        let allSelected = !failedIDs.isEmpty && failedIDs.isSubset(of: selectedFailedFileIDs)
+        return HStack(spacing: 10) {
+            Button {
+                if allSelected {
+                    selectedFailedFileIDs.subtract(failedIDs)
+                } else {
+                    selectedFailedFileIDs.formUnion(failedIDs)
+                }
+            } label: {
+                Label(
+                    LocalizedStringKey(allSelected ? "Deselect All" : "Select All"),
+                    systemImage: allSelected ? "checkmark.square.fill" : "square"
+                )
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(FileNestTheme.accent)
+
+            Text(appState.settings.localizedFormat(
+                "%d Selected",
+                selectedFailedFileIDs.count
+            ))
+            .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Button("Retry Selected", systemImage: "arrow.clockwise") {
+                retryFailedFiles(selectedFailedFileIDs)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(selectedFailedFileIDs.isEmpty || !canRetryFailedFiles)
+            .help(LocalizedStringKey("Retry the selected failed files"))
+        }
+        .font(.system(size: 11, weight: .medium))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
     private func filteredFiles(_ summary: ReindexJobSummary) -> [ReindexJobFileItem] {
         summary.files.filter { filter.includes($0.state) }
+    }
+
+    private var availableFailedFileIDs: Set<Int64> {
+        Set(
+            appState.reindexJobSummary?.files
+                .filter { $0.state == .failed }
+                .map(\.fileID) ?? []
+        )
+    }
+
+    private var canRetryFailedFiles: Bool {
+        !appState.indexingState.isActive
+    }
+
+    private func toggleFailedSelection(_ fileID: Int64) {
+        if selectedFailedFileIDs.contains(fileID) {
+            selectedFailedFileIDs.remove(fileID)
+        } else {
+            selectedFailedFileIDs.insert(fileID)
+        }
+    }
+
+    private func retryFailedFiles(_ fileIDs: Set<Int64>) {
+        selectedFailedFileIDs.subtract(fileIDs)
+        appState.retryFailedReindexFiles(fileIDs)
     }
 
     private func emptyState(title: String, detail: String, icon: String) -> some View {
@@ -301,9 +443,11 @@ struct ReindexActivityView: View {
         case .stopping: return "Stopping Reindex"
         case .stopped: return "Reindex Stopped"
         case .completed: return "Reindex Complete"
+        case .completedWithErrors: return "Reindex Completed with Errors"
         case .failed: return "Reindex Failed"
         case .idle:
             switch appState.reindexJobSummary?.job.statusValue {
+            case .completedWithErrors: return "Reindex Completed with Errors"
             case .failed: return "Reindex Failed"
             case .interrupted: return "Reindex Interrupted"
             default: return "Reindex Ready to Resume"
@@ -318,6 +462,7 @@ struct ReindexActivityView: View {
         case .stopping: return "stop.circle"
         case .stopped, .idle: return "arrow.clockwise.circle"
         case .completed: return "checkmark.circle.fill"
+        case .completedWithErrors: return "exclamationmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
         }
     }
@@ -325,6 +470,7 @@ struct ReindexActivityView: View {
     private var statusColor: Color {
         switch appState.indexingState {
         case .completed: return FileNestTheme.success
+        case .completedWithErrors: return FileNestTheme.warning
         case .failed: return .red
         case .paused, .stopped, .idle: return FileNestTheme.warning
         default: return FileNestTheme.accent
@@ -360,44 +506,80 @@ private enum ReindexFileFilter: String, CaseIterable, Identifiable {
 }
 
 private struct ReindexFileRow: View {
-    @EnvironmentObject private var appState: AppState
     let item: ReindexJobFileItem
     let isCurrent: Bool
+    let isSelected: Bool
+    let isPreviewed: Bool
+    let showsSelection: Bool
+    let canRetry: Bool
+    let onToggleSelection: () -> Void
+    let onOpen: () -> Void
+    let onRetry: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: fileIcon)
-                .font(.system(size: 15))
-                .foregroundStyle(isCurrent ? FileNestTheme.accent : .secondary)
-                .frame(width: 28, height: 28)
-                .background(
-                    (isCurrent ? FileNestTheme.accent : Color.secondary).opacity(0.08),
-                    in: RoundedRectangle(cornerRadius: 7)
-                )
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(item.name)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(item.path)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+            if showsSelection, item.state == .failed {
+                Button(action: onToggleSelection) {
+                    Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(isSelected ? FileNestTheme.accent : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help(LocalizedStringKey(isSelected ? "Deselect File" : "Select File"))
             }
 
-            Spacer()
+            Button(action: onOpen) {
+                HStack(spacing: 12) {
+                    Image(systemName: fileIcon)
+                        .font(.system(size: 15))
+                        .foregroundStyle(isCurrent ? FileNestTheme.accent : .secondary)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            (isCurrent ? FileNestTheme.accent : Color.secondary).opacity(0.08),
+                            in: RoundedRectangle(cornerRadius: 7)
+                        )
 
-            Label(
-                LocalizedStringKey(stateTitle),
-                systemImage: stateIcon
-            )
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(stateColor)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.name)
+                            .font(.system(size: 12, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(item.path)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    Spacer()
+
+                    Label(
+                        LocalizedStringKey(stateTitle),
+                        systemImage: stateIcon
+                    )
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(stateColor)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(LocalizedStringKey("View File Details"))
+
+            if item.state == .failed {
+                Button(action: onRetry) {
+                    Image(systemName: "arrow.clockwise")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!canRetry)
+                .help(LocalizedStringKey("Retry"))
+            }
         }
         .padding(.horizontal, 16)
         .frame(minHeight: 52)
+        .background(
+            isPreviewed ? FileNestTheme.accent.opacity(0.08) : Color.clear
+        )
     }
 
     private var stateTitle: String {

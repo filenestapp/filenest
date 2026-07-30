@@ -8,6 +8,7 @@ import { hasStructuredSearchFilters, matchesSmartSearchPlan, resolveSmartSearchP
 import { extractEntityTerms } from './indexer'
 import { dynamicallyAcceptedSemanticHits, rerankDocuments, rerankerConfiguration, weightedReciprocalRankFusion } from './reranker'
 import { prompts } from './prompts'
+import { AgentSkillService } from './agent-skills'
 
 interface RetrievedFile {
   file: FileRecord
@@ -22,7 +23,8 @@ export class ChatService {
     private readonly database: FileNestDatabase,
     private readonly embeddings: EmbeddingService,
     private readonly llm: LlmService,
-    private readonly logger: AppLogger
+    private readonly logger: AppLogger,
+    private readonly agentSkills?: AgentSkillService
   ) {}
 
   cancel(requestId: string): void { this.controllers.get(requestId)?.abort() }
@@ -84,9 +86,10 @@ export class ChatService {
       let searchPlan: SmartSearchPlan | null = null
       if (!session.attachedFilePath) {
         emit({ requestId, type: 'progress', sessionId: session.id, stage: 'planning' })
+        const planningSkill = await this.agentSkills?.activate('search', question)
         searchPlan = await resolveSmartSearchPlan(question, settings, this.llm, signal, (searchIntent) => {
           emit({ requestId, type: 'progress', sessionId: session.id, stage: 'planning', searchIntent })
-        })
+        }, planningSkill?.context ?? '')
         if (signal.aborted) throw new DOMException('Generation stopped', 'AbortError')
       }
       emit({ requestId, type: 'progress', sessionId: session.id, stage: 'searching', searchIntent: searchPlan?.intent })
@@ -99,23 +102,47 @@ export class ChatService {
       if (signal.aborted) throw new DOMException('Generation stopped', 'AbortError')
 
       const history = this.historyForRequest(session.id, retryTarget?.message.id)
-      const turns = buildTurns(history, related, settings)
+      const capability = session.attachedFilePath ? 'attached-file-answer' : 'library-answer'
+      const skillActivation = await this.agentSkills?.activate(capability, question)
+      const turns = buildTurns(history, related, settings, skillActivation?.context)
       const provider = this.llm.provider(settings)
       const inputTokens = estimateTokens(turns)
       let content = ''
       let firstResponseAt: number | null = null
+      const fullDocument = session.attachedFilePath
+        && isWholeDocumentRequest(question)
+        && (skillActivation?.executionRoute == null || skillActivation.executionRoute !== 'retrieval')
 
       if (settings.llmChoice === 'none') {
-        content = retrievalOnlyAnswer(related.map((item) => item.file))
+        content = fullDocument && related[0]
+          ? documentFallback(this.database.listDocumentChunks(related[0].file.id))
+          : retrievalOnlyAnswer(related.map((item) => item.file))
       } else {
-        emit({ requestId, type: 'progress', sessionId: session.id, stage: 'generating', relatedFileIds })
+        emit({ requestId, type: 'progress', sessionId: session.id, stage: fullDocument ? 'preparing-document' : 'generating', relatedFileIds })
         try {
-          const image = session.attachedFilePath && related[0]?.file.category === 'images' ? related[0].file : null
-          const stream = image ? this.llm.streamWithImage(turns, image.path, settings, signal) : this.llm.stream(turns, settings, signal)
-          for await (const delta of stream) {
-            if (firstResponseAt == null) firstResponseAt = performance.now()
-            content += delta
-            emit({ requestId, type: 'delta', sessionId: session.id, delta })
+          if (fullDocument && related[0]) {
+            const document = await this.processWholeDocument(
+              related[0].file,
+              question,
+              settings,
+              signal,
+              skillActivation?.context ?? '',
+              (delta, completed, total) => {
+                if (firstResponseAt == null) firstResponseAt = performance.now()
+                content += delta
+                emit({ requestId, type: 'progress', sessionId: session.id, stage: 'processing-document', documentProgress: { completed, total }, relatedFileIds })
+                emit({ requestId, type: 'delta', sessionId: session.id, delta })
+              }
+            )
+            content = document
+          } else {
+            const image = session.attachedFilePath && related[0]?.file.category === 'images' ? related[0].file : null
+            const stream = image ? this.llm.streamWithImage(turns, image.path, settings, signal) : this.llm.stream(turns, settings, signal)
+            for await (const delta of stream) {
+              if (firstResponseAt == null) firstResponseAt = performance.now()
+              content += delta
+              emit({ requestId, type: 'delta', sessionId: session.id, delta })
+            }
           }
           if (!content.trim()) throw new Error('The model returned no content')
         } catch (error) {
@@ -125,7 +152,7 @@ export class ChatService {
         }
       }
 
-      if (settings.llmChoice !== 'none') {
+      if (settings.llmChoice !== 'none' && !fullDocument) {
         emit({ requestId, type: 'progress', sessionId: session.id, stage: 'verifying', relatedFileIds })
         content = validateCitations(content, related)
       }
@@ -152,6 +179,44 @@ export class ChatService {
         emit({ requestId, type: 'error', sessionId: activeSessionId, error: error instanceof Error ? error.message : String(error) })
       }
     }
+  }
+
+  private async processWholeDocument(
+    file: FileRecord,
+    request: string,
+    settings: Settings,
+    signal: AbortSignal,
+    skillContext: string,
+    onDelta: (delta: string, completed: number, total: number) => void
+  ): Promise<string> {
+    const sections = completeDocumentSections(this.database.listDocumentChunks(file.id))
+    if (!sections.length) throw new Error('The attached file has no indexed document content yet')
+    const batches = batchDocumentSections(sections, settings.llmChoice === 'ollama' ? 2_048 : Math.max(4_096, Math.floor(contextWindowForSettings(settings) * 0.4)))
+    const parts: string[] = []
+    for (let index = 0; index < batches.length; index += 1) {
+      if (signal.aborted) throw new DOMException('Generation stopped', 'AbortError')
+      const batch = batches[index]
+      const prefix = index ? '\n\n---\n\n' : ''
+      if (prefix) onDelta(prefix, index, batches.length)
+      const turns: LlmTurn[] = [
+        {
+          role: 'system',
+          content: `You are FileNest's complete-document processor. Work only from the supplied source sections. Preserve headings, tables, lists, dates, amounts, identifiers, and units. ${skillContext}`
+        },
+        {
+          role: 'user',
+          content: `Attached file: ${file.name}\nTask: ${request}\nThis is batch ${index + 1} of ${batches.length}. Translate or summarize every supplied section faithfully; do not claim coverage outside this batch.\n\n${batch.map((section) => `## ${section.location}\n${section.text}`).join('\n\n')}`
+        }
+      ]
+      let output = ''
+      for await (const delta of this.llm.stream(turns, settings, signal)) {
+        output += delta
+        onDelta(delta, index, batches.length)
+      }
+      if (!output.trim()) throw new Error(`The model returned no content for document batch ${index + 1}`)
+      parts.push(output.trim())
+    }
+    return `${parts.join('\n\n---\n\n')}\n\n> Coverage: processed ${sections.length} of ${sections.length} indexed source sections in ${batches.length} batch${batches.length === 1 ? '' : 'es'}.`
   }
 
   private findRetryTarget(sessionId: number, messageId?: number | null): { message: ChatMessage; question: string } | null {
@@ -305,7 +370,7 @@ function matchesPlan(file: FileRecord, plan: SmartSearchPlan | null): boolean {
   return matchesSmartSearchPlan(file, plan)
 }
 
-function buildTurns(history: ChatMessage[], related: RetrievedFile[], settings: Settings): LlmTurn[] {
+function buildTurns(history: ChatMessage[], related: RetrievedFile[], settings: Settings, skillContext = ''): LlmTurn[] {
   const maxTokens = contextWindowForSettings(settings)
   const contextBudget = Math.max(512, Math.floor(maxTokens * 0.55))
   const perFileBudget = Math.max(160, Math.floor(contextBudget / Math.max(1, related.length)))
@@ -321,7 +386,7 @@ function buildTurns(history: ChatMessage[], related: RetrievedFile[], settings: 
     return `FILE START\nSource ID: [F${index + 1}]\nName: ${file.name}\nTitle: ${file.title ?? ''}\nUser note: ${file.note ?? ''}\nMetadata: type=${file.ext || 'none'}; category=${file.category}; size=${file.size} bytes\nLocation: ${file.path}\n${evidence}\nFILE END`
   }).join('\n\n---\n\n')
   const instructions = related.length ? prompts.chat.libraryAnswer : `${prompts.chat.libraryAnswer}\n${prompts.chat.emptyLibrary}`
-  const system: LlmTurn = { role: 'system', content: `${instructions}\n\nRETRIEVED FILES START\n${context}\nRETRIEVED FILES END` }
+  const system: LlmTurn = { role: 'system', content: `${instructions}${skillContext ? `\n\n${skillContext}` : ''}\n\nRETRIEVED FILES START\n${context}\nRETRIEVED FILES END` }
   const responseReserve = Math.max(2_048, Math.floor(maxTokens * 0.15))
   const historyBudget = Math.max(512, maxTokens - estimateTokens([system]) - responseReserve)
   return [
@@ -332,12 +397,70 @@ function buildTurns(history: ChatMessage[], related: RetrievedFile[], settings: 
 
 export function contextWindowForSettings(settings: Settings): number {
   if (settings.llmChoice === 'ollama') return 32_000
+  const scopedOverride = settings.cloudContextWindowOverrides?.[cloudContextWindowOverrideKey(settings)]
+  if (scopedOverride > 0) return scopedOverride
   if (settings.cloudContextWindowTokens > 0) return settings.cloudContextWindowTokens
   const model = settings.cloudModel.toLowerCase()
   if (model.includes('claude')) return 200_000
   if (model.includes('gemini')) return 128_000
   if (model.includes('gpt-4') || model.includes('gpt-5')) return 128_000
   return 30_000
+}
+
+export function cloudContextWindowOverrideKey(settings: Pick<Settings, 'cloudApiFormat' | 'cloudBaseUrl' | 'cloudModel'> | Partial<Settings>): string {
+  const baseUrl = (settings.cloudBaseUrl ?? '').trim().replace(/\/+$/, '').toLowerCase()
+  return `${(settings.cloudApiFormat ?? 'openai').toLowerCase()}|${baseUrl}|${(settings.cloudModel ?? '').trim().toLowerCase()}`
+}
+
+export function isWholeDocumentRequest(request: string): boolean {
+  const normalized = request.toLowerCase()
+  const asksForDocumentWork = /translate|translation|summari[sz]e|summary|\u5168\u6587|\u6574\u4efd|\u6574\u4e2a\u6587\u6863|\u7ffb\u8bd1|\u603b\u7ed3/.test(normalized)
+  const wholeDocument = /entire|whole|full document|complete document|\u5168\u6587|\u6574\u4efd|\u6574\u4e2a\u6587\u6863/.test(normalized)
+  const narrowScope = /page\s*\d|chapter|section|paragraph|\u7b2c\s*\d+\s*\u9875|\u7ae0\u8282|\u6bb5\u843d/.test(normalized)
+  return asksForDocumentWork && wholeDocument && !narrowScope
+}
+
+export function completeDocumentSections(chunks: DocumentChunk[]): Array<{ id: string; location: string; text: string }> {
+  const seen = new Set<number>()
+  return chunks
+    .filter((chunk) => ['text', 'table', 'list', 'picture', 'transcript'].includes(chunk.kind))
+    .sort((left, right) => left.index - right.index)
+    .flatMap((chunk) => {
+      const parent = chunk.parentIndex ?? chunk.index
+      if (seen.has(parent)) return []
+      seen.add(parent)
+      const location = [chunk.sectionPath.join(' > '), chunk.pageStart == null ? '' : `p.${chunk.pageStart}${chunk.pageEnd && chunk.pageEnd !== chunk.pageStart ? `-${chunk.pageEnd}` : ''}`].filter(Boolean).join(' · ') || `Section ${parent + 1}`
+      const text = (chunk.parentText || chunk.contextualText || chunk.text).trim()
+      return text ? [{ id: String(parent), location, text }] : []
+    })
+}
+
+function batchDocumentSections(
+  sections: Array<{ id: string; location: string; text: string }>,
+  maximumTokens: number
+): Array<Array<{ id: string; location: string; text: string }>> {
+  const limit = Math.max(512, maximumTokens)
+  const batches: Array<Array<{ id: string; location: string; text: string }>> = []
+  let current: Array<{ id: string; location: string; text: string }> = []
+  let used = 0
+  for (const section of sections) {
+    const tokens = Math.max(1, estimateTokens([{ content: section.text }]))
+    if (current.length && used + tokens > limit) {
+      batches.push(current)
+      current = []
+      used = 0
+    }
+    current.push(section)
+    used += tokens
+  }
+  if (current.length) batches.push(current)
+  return batches
+}
+
+function documentFallback(chunks: DocumentChunk[]): string {
+  const sections = completeDocumentSections(chunks)
+  const preview = sections.slice(0, 8).map((section) => `## ${section.location}\n${section.text.slice(0, 700)}`).join('\n\n')
+  return `${preview}\n\n> Full-document processing requires an enabled generation model. ${sections.length} indexed source sections are available locally.`
 }
 
 export function planChatHistory(history: ChatMessage[], maxTokens: number): LlmTurn[] {

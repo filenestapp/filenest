@@ -69,21 +69,32 @@ struct AgentSkill: Identifiable, Codable, Equatable {
     var isManaged: Bool { origin == .managed }
 }
 
+/// A skill can declare a routing preference in its front matter. The preference is
+/// advisory: FileNest still applies document-size and context-window safety checks.
+enum AgentSkillExecutionRoutePreference: String, Codable, Equatable {
+    case retrieval = "retrieval"
+    case completeDocument = "complete-document"
+    case mapReduce = "map-reduce"
+}
+
 struct AgentSkillActivation: Equatable {
     let names: [String]
     let context: String
+    let executionRoutePreference: AgentSkillExecutionRoutePreference?
 }
 
 enum AgentSkillServiceError: LocalizedError {
     case invalidName
     case skillNotManaged
     case skillMissing
+    case skillAlreadyExists
 
     var errorDescription: String? {
         switch self {
         case .invalidName: return "The skill name does not follow the Agent Skills naming rules."
         case .skillNotManaged: return "Only FileNest-managed skills can be removed here."
         case .skillMissing: return "The skill package no longer exists."
+        case .skillAlreadyExists: return "A managed skill with this name already exists."
         }
     }
 }
@@ -104,6 +115,7 @@ final class AgentSkillService {
     }
 
     private static let disabledNamesSettingKey = "agent_skills.disabled_names.v1"
+    private static let enabledNamesSettingKey = "agent_skills.enabled_names.v1"
     private static let skillNamePattern = #"^[a-z0-9]+(?:-[a-z0-9]+)*$"#
     private static let maximumSkillFileBytes = 512_000
     private static let maximumResourceListingCount = 100
@@ -141,37 +153,57 @@ final class AgentSkillService {
     @discardableResult
     func refresh() -> [AgentSkill] {
         let disabledNames = disabledSkillNames()
+        let enabledNames = explicitlyEnabledSkillNames()
         let locations: [(URL?, AgentSkillOrigin)] = [
             (bundledDirectory, .bundled),
             (sharedUserDirectory, .sharedUser),
             (managedDirectory, .managed),
         ]
-        var skillsByName = [String: AgentSkill]()
+        // Keep every candidate until its enabled state is known.  A disabled managed
+        // override must not make an always-on bundled skill disappear: the bundled
+        // package becomes the active candidate again until the override is enabled.
+        var candidatesByName = [String: [AgentSkill]]()
         var issues = [AgentSkillDiagnostic]()
 
         for (root, origin) in locations {
             guard let root else { continue }
-            let discovered = discoverSkills(in: root, origin: origin, disabledNames: disabledNames)
+            let discovered = discoverSkills(
+                in: root,
+                origin: origin,
+                disabledNames: disabledNames,
+                enabledNames: enabledNames
+            )
             issues.append(contentsOf: discovered.diagnostics)
             for skill in discovered.skills {
-                if let existing = skillsByName[skill.name] {
-                    if skill.origin.precedence >= existing.origin.precedence {
-                        issues.append(AgentSkillDiagnostic(
-                            path: existing.skillFilePath,
-                            message: "A higher-precedence skill named \(skill.name) shadows this package.",
-                            severity: .warning
-                        ))
-                        skillsByName[skill.name] = skill
-                    } else {
-                        issues.append(AgentSkillDiagnostic(
-                            path: skill.skillFilePath,
-                            message: "This package is shadowed by a higher-precedence skill named \(skill.name).",
-                            severity: .warning
-                        ))
-                    }
+                candidatesByName[skill.name, default: []].append(skill)
+            }
+        }
+
+        var skillsByName = [String: AgentSkill]()
+        for (name, candidates) in candidatesByName {
+            let ordered = candidates.sorted { lhs, rhs in
+                lhs.origin.precedence > rhs.origin.precedence
+            }
+            // Prefer the highest-precedence enabled package.  If everything is
+            // disabled, retain the highest-precedence package in the catalog so it
+            // remains manageable from Settings.
+            let selected = ordered.first(where: \.enabled) ?? ordered.first!
+            skillsByName[name] = selected
+
+            for candidate in ordered where candidate.id != selected.id {
+                let message: String
+                if candidate.enabled {
+                    message = "A higher-precedence skill named \(name) shadows this package."
+                } else if selected.enabled {
+                    message = "This disabled higher-precedence package does not shadow the enabled \(selected.origin.rawValue) skill named \(name)."
                 } else {
-                    skillsByName[skill.name] = skill
+                    message = "This package is shadowed by a higher-precedence skill named \(name)."
                 }
+                issues.append(AgentSkillDiagnostic(
+                    path: candidate.skillFilePath,
+                    message: message,
+                    severity: .warning
+                ))
             }
         }
 
@@ -201,6 +233,36 @@ final class AgentSkillService {
 
     func enabledSkills() -> [AgentSkill] {
         allSkills().filter(\.enabled)
+    }
+
+    /// Stable planner-cache input that changes whenever the enabled skill catalog
+    /// or one of its instruction files changes. It deliberately excludes instruction
+    /// contents while still invalidating cached routing decisions after edits.
+    func plannerCacheSignature(
+        for capability: AgentSkillCapability,
+        task: String
+    ) -> String {
+        let explicitNames = Set(explicitSkillNames(in: task))
+        let defaultNames = Set(defaultSkillNames(for: capability))
+        let relevantNames = defaultNames
+            .union(explicitNames)
+            .union(dynamicSkillNames(for: capability, excluding: defaultNames.union(explicitNames)))
+        let rows = enabledSkills()
+            .filter { relevantNames.contains($0.name) }
+            .map { skill -> String in
+                let attributes = try? FileManager.default.attributesOfItem(atPath: skill.skillFilePath)
+                let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                let size = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+                return [
+                    skill.name,
+                    skill.description,
+                    skill.origin.rawValue,
+                    String(format: "%.3f", modified),
+                    String(size),
+                ].joined(separator: "|")
+            }
+            .sorted()
+        return rows.joined(separator: "\n")
     }
 
     func defaultSkillNames(for capability: AgentSkillCapability) -> [String] {
@@ -323,10 +385,32 @@ final class AgentSkillService {
             return skillsByName[name]
         }
         let contexts = selected.compactMap(activationContext(for:))
+        let preferences = selected.compactMap { skill -> (AgentSkillExecutionRoutePreference, Int)? in
+            guard let rawValue = skill.metadata["filenest-execution-route"],
+                  let preference = AgentSkillExecutionRoutePreference(rawValue: rawValue.lowercased()) else {
+                return nil
+            }
+            let priority = Int(skill.metadata["filenest-route-priority"] ?? "0") ?? 0
+            return (preference, priority)
+        }
+        let routePreference = preferences.sorted { lhs, rhs in
+            if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+            // A safer bounded route wins a tie over a large single request.
+            return Self.routeSafetyRank(lhs.0) > Self.routeSafetyRank(rhs.0)
+        }.first?.0
         return AgentSkillActivation(
             names: selected.map(\.name),
-            context: contexts.joined(separator: "\n\n")
+            context: contexts.joined(separator: "\n\n"),
+            executionRoutePreference: routePreference
         )
+    }
+
+    private static func routeSafetyRank(_ preference: AgentSkillExecutionRoutePreference) -> Int {
+        switch preference {
+        case .retrieval: return 3
+        case .mapReduce: return 2
+        case .completeDocument: return 1
+        }
     }
 
     func instructionBody(for name: String) -> String? {
@@ -339,13 +423,64 @@ final class AgentSkillService {
 
     func setEnabled(_ skill: AgentSkill, enabled: Bool) {
         var disabled = disabledSkillNames()
+        var explicitlyEnabled = explicitlyEnabledSkillNames()
+        // Bundled packages are the product's immutable baseline.  Their switch is
+        // intentionally not actionable; also clear stale preferences left by older
+        // versions so a bundled skill recovers automatically after an upgrade.
+        guard skill.origin != .bundled else {
+            disabled.remove(skill.name)
+            explicitlyEnabled.remove(skill.name)
+            persistDisabledSkillNames(disabled)
+            persistExplicitlyEnabledSkillNames(explicitlyEnabled)
+            _ = refresh()
+            return
+        }
         if enabled {
             disabled.remove(skill.name)
+            if skill.origin == .sharedUser {
+                explicitlyEnabled.insert(skill.name)
+            }
         } else {
             disabled.insert(skill.name)
+            explicitlyEnabled.remove(skill.name)
         }
         persistDisabledSkillNames(disabled)
+        persistExplicitlyEnabledSkillNames(explicitlyEnabled)
         _ = refresh()
+    }
+
+    /// Imports a standard package by copying the directory containing SKILL.md into
+    /// FileNest's managed-skill directory. Existing managed skills are never
+    /// overwritten implicitly.
+    @discardableResult
+    func importSkillPackage(from skillFileURL: URL) throws -> AgentSkill {
+        let sourceFile = skillFileURL.standardizedFileURL
+        guard sourceFile.lastPathComponent == "SKILL.md",
+              case let .success(parsed) = parseSkill(at: sourceFile),
+              validate(parsed, at: sourceFile).allSatisfy({ $0.severity != .error }) else {
+            throw AgentSkillServiceError.skillMissing
+        }
+        let sourceDirectory = sourceFile.deletingLastPathComponent()
+        let destination = managedDirectory.appendingPathComponent(parsed.name, isDirectory: true)
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw AgentSkillServiceError.skillAlreadyExists
+        }
+        try FileManager.default.createDirectory(at: managedDirectory, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: sourceDirectory, to: destination)
+        // Imported packages become FileNest-managed skills and therefore begin
+        // enabled.  Remove a same-named stale shared-skill preference as well.
+        var disabled = disabledSkillNames()
+        disabled.remove(parsed.name)
+        var explicitlyEnabled = explicitlyEnabledSkillNames()
+        explicitlyEnabled.remove(parsed.name)
+        persistDisabledSkillNames(disabled)
+        persistExplicitlyEnabledSkillNames(explicitlyEnabled)
+        guard let imported = refresh().first(where: {
+            $0.name == parsed.name && $0.origin == .managed
+        }) else {
+            throw AgentSkillServiceError.skillMissing
+        }
+        return imported
     }
 
     func removeManagedSkill(_ skill: AgentSkill) throws {
@@ -359,9 +494,9 @@ final class AgentSkillService {
             throw AgentSkillServiceError.skillMissing
         }
         try FileManager.default.removeItem(at: directory)
-        var disabled = disabledSkillNames()
-        disabled.remove(skill.name)
-        persistDisabledSkillNames(disabled)
+        var explicitlyEnabled = explicitlyEnabledSkillNames()
+        explicitlyEnabled.remove(skill.name)
+        persistExplicitlyEnabledSkillNames(explicitlyEnabled)
         _ = refresh()
     }
 
@@ -375,7 +510,10 @@ final class AgentSkillService {
         instruction: String,
         rationale: String?
     ) throws -> AgentSkill? {
-        guard let target = enabledSkills().first(where: { $0.name == targetName }) else {
+        // Feedback can evolve a bundled baseline even while a managed revision is
+        // currently disabled.  Feedback output belongs to FileNest-managed skills
+        // and is enabled by default, while still remaining user-toggleable later.
+        guard let target = allSkills().first(where: { $0.name == targetName }) else {
             throw AgentSkillServiceError.skillMissing
         }
         guard case let .success(parsed) = parseSkill(
@@ -510,7 +648,8 @@ final class AgentSkillService {
     private func discoverSkills(
         in root: URL,
         origin: AgentSkillOrigin,
-        disabledNames: Set<String>
+        disabledNames: Set<String>,
+        enabledNames: Set<String>
     ) -> (skills: [AgentSkill], diagnostics: [AgentSkillDiagnostic]) {
         guard let children = try? FileManager.default.contentsOfDirectory(
             at: root,
@@ -552,7 +691,12 @@ final class AgentSkillService {
                     origin: origin,
                     resources: resources,
                     diagnostics: skillDiagnostics,
-                    enabled: !disabledNames.contains(parsed.name)
+                    enabled: enabledState(
+                        name: parsed.name,
+                        origin: origin,
+                        disabledNames: disabledNames,
+                        explicitlyEnabledNames: enabledNames
+                    )
                 ))
                 diagnostics.append(contentsOf: skillDiagnostics)
             case let .failure(issue):
@@ -560,6 +704,24 @@ final class AgentSkillService {
             }
         }
         return (skills, diagnostics)
+    }
+
+    /// Enablement is source-specific. In particular, a disabled FileNest-managed
+    /// override must never turn off a same-named bundled baseline skill.
+    private func enabledState(
+        name: String,
+        origin: AgentSkillOrigin,
+        disabledNames: Set<String>,
+        explicitlyEnabledNames: Set<String>
+    ) -> Bool {
+        switch origin {
+        case .bundled:
+            return true
+        case .managed:
+            return !disabledNames.contains(name)
+        case .sharedUser:
+            return !disabledNames.contains(name) && explicitlyEnabledNames.contains(name)
+        }
     }
 
     @discardableResult
@@ -623,12 +785,16 @@ final class AgentSkillService {
             options: .atomic
         )
         var disabled = disabledSkillNames()
+        var explicitlyEnabled = explicitlyEnabledSkillNames()
         if enabled {
             disabled.remove(name)
+            explicitlyEnabled.insert(name)
         } else {
             disabled.insert(name)
+            explicitlyEnabled.remove(name)
         }
         persistDisabledSkillNames(disabled)
+        persistExplicitlyEnabledSkillNames(explicitlyEnabled)
         return refresh().first { $0.name == name }
     }
 
@@ -879,11 +1045,27 @@ final class AgentSkillService {
         return Set(names)
     }
 
+    private func explicitlyEnabledSkillNames() -> Set<String> {
+        guard let rawValue = store.getSetting(Self.enabledNamesSettingKey),
+              let data = rawValue.data(using: .utf8),
+              let names = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return Set(names)
+    }
+
     private func persistDisabledSkillNames(_ names: Set<String>) {
         let sorted = names.sorted()
         guard let data = try? JSONEncoder().encode(sorted),
               let value = String(data: data, encoding: .utf8) else { return }
         store.setSetting(Self.disabledNamesSettingKey, value)
+    }
+
+    private func persistExplicitlyEnabledSkillNames(_ names: Set<String>) {
+        let sorted = names.sorted()
+        guard let data = try? JSONEncoder().encode(sorted),
+              let value = String(data: data, encoding: .utf8) else { return }
+        store.setSetting(Self.enabledNamesSettingKey, value)
     }
 
     private static func isStrictlyValidName(_ name: String) -> Bool {
