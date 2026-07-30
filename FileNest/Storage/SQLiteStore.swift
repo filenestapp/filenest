@@ -1324,7 +1324,10 @@ final class SQLiteStore: @unchecked Sendable {
     func files(matching keyword: String) throws -> [FileRecord] {
         try dbPool.read { db in
             let quotedKeyword = "\"\(keyword.replacingOccurrences(of: "\"", with: "\"\""))\""
-            if keyword.unicodeScalars.count >= 3 {
+            let containsSearchToken = keyword.unicodeScalars.contains {
+                CharacterSet.alphanumerics.contains($0)
+            }
+            if containsSearchToken, keyword.unicodeScalars.count >= 3 {
                 if let records = try? FileRecord.fetchAll(
                     db,
                     sql: """
@@ -1342,7 +1345,7 @@ final class SQLiteStore: @unchecked Sendable {
                 }
             }
 
-            if let records = try? FileRecord.fetchAll(
+            if containsSearchToken, let records = try? FileRecord.fetchAll(
                 db,
                 sql: """
                     SELECT files.*
