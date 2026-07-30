@@ -4,14 +4,15 @@
     "description": "FileNest is a local-first intelligent file manager for macOS and Windows. Search, organize, and chat with your files without sending them away by default."
   },
   "a11y": { "skip": "Skip to content", "menu": "Open navigation" },
-  "nav": { "demo": "Live demo", "privacy": "Privacy", "platforms": "Platforms", "questions": "Questions", "cta": "Release status" },
+  "nav": { "video": "Product film", "demo": "Live demo", "privacy": "Privacy", "platforms": "Platforms", "questions": "Questions", "cta": "Download" },
   "hero": {
     "status": "Local AI · Built for macOS 13+ and Windows 11",
     "titleLine1": "Your files,",
     "titleLine2": "understood.",
     "lede": "Index, search, and chat with the files already on your computer using local AI. In local mode, content, indexes, notes, and conversations stay on this device.",
-    "primaryCta": "Explore local AI",
-    "secondaryCta": "How local-first works",
+    "primaryCta": "Download for macOS",
+    "secondaryCta": "Explore the live demo",
+    "downloadNote": "Version 0.2.0 · 13.7 MB · macOS 13 or later",
     "trust1": "Local by default",
     "trust2": "No account required",
     "trust3": "Cloud is your choice",
@@ -30,6 +31,17 @@
     "captureNote": "Actual UI · mock workspace"
   },
   "formats": { "label": "One library for the things scattered across your desktop" },
+  "video": {
+    "intro": "See it in motion",
+    "title": "A real workspace, moving at the speed of thought.",
+    "body": "A short product film with the current FileNest UI and a fictional, privacy-safe workspace.",
+    "meta": "32-second product film · silent",
+    "pause": "Pause motion",
+    "play": "Play motion",
+    "caption": "Actual FileNest UI · fictional files only · local-first workflows",
+    "ariaLabel": "FileNest product film",
+    "fallback": "Your browser does not support embedded video."
+  },
   "demo": {
     "intro": "Five workflows. One private workspace.",
     "title": "Watch FileNest turn scattered files into answers.",
@@ -132,7 +144,7 @@
     "body": "One product model, shaped for the conventions of each operating system.",
     "macTitle": "Native where it matters.",
     "macBody": "A SwiftUI app with menu bar presence, Finder integration, native previews, system appearance, and global quick search. macOS 13 and later.",
-    "macState": "Product behavior baseline",
+    "macState": "Available now for macOS",
     "windowsTitle": "Parity without impersonation.",
     "windowsBody": "A Windows 11 implementation with tray workflows, native shell actions, secure credential storage, and matching search, chat, indexing, and rules.",
     "windowsState": "Native release validation in progress"
@@ -150,10 +162,10 @@
     "a4": "Yes. You can run compatible local models with Ollama or configure OpenAI-compatible and Anthropic cloud providers separately for chat, embeddings, and OCR."
   },
   "availability": {
-    "intro": "FileNest is preparing for public release",
+    "intro": "Available now for macOS",
     "title": "Make room for the work. Not the file hunt.",
-    "body": "macOS is the current product baseline. Windows 11 is completing native release validation for x64 and ARM64.",
-    "cta": "View release status"
+    "body": "Download the notarized FileNest app for macOS 13 or later. Windows 11 is completing native release validation for x64 and ARM64.",
+    "cta": "Download for macOS"
   },
   "footer": {
     "tagline": "Local-first intelligent file management.",
@@ -162,7 +174,7 @@
     "demo": "Live demo",
     "privacy": "Privacy",
     "questions": "Questions",
-    "release": "Release status"
+    "release": "Download"
   },
   "images": {
     "hero": "FileNest finding the most relevant contract files from a natural-language request",
