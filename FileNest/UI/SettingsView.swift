@@ -13,7 +13,6 @@ struct SettingsView: View {
     @State private var modelPendingDeletion: OllamaModelInfo?
     @State private var isShowingDeleteRerankerConfirmation = false
     @State private var whisperModelPendingDeletion: String?
-    @State private var vectorExtensionsDraft = ""
     @State private var updateFeedDraft = ""
     @State private var isShowingClearLogsConfirmation = false
     @State private var logStatusMessage: String?
@@ -24,6 +23,7 @@ struct SettingsView: View {
     @State private var isShowingNewDirectoryChoice = false
     @State private var isShowingOrganizeExistingConfirmation = false
     @State private var existingWatchDirectoryInventories: [WatchDirectoryInventory] = []
+    @StateObject private var launchAtLogin = LaunchAtLoginService()
 
     init(onBack: (() -> Void)? = nil) {
         self.onBack = onBack
@@ -32,21 +32,19 @@ struct SettingsView: View {
     var body: some View {
         HStack(spacing: 0) {
             settingsSidebar
-                .frame(width: 250)
+                .frame(width: FileNestLayout.sidebarWidth)
 
             Rectangle()
                 .fill(FileNestTheme.border)
-                .frame(width: 1)
+                .frame(width: FileNestLayout.dividerWidth)
 
             settingsDetail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 960, idealWidth: 1040, minHeight: 700, idealHeight: 760)
-        .background(FileNestTheme.surface)
+        .frame(minWidth: 720, idealWidth: 1040, minHeight: 700, idealHeight: 760)
         .onAppear {
             appState.refreshReindexJobSummary()
             selectedSection = appState.selectedSettingsSection
-            vectorExtensionsDraft = appState.settings.vectorizeExtensions.joined(separator: ", ")
             updateFeedDraft = appState.updates.feedURLString
             if FileNestEnvironment.isStatisticsPreview {
                 selectedSection = .statistics
@@ -66,6 +64,9 @@ struct SettingsView: View {
         }
         .onChange(of: selectedSection) { section in
             appState.selectSettingsSection(section)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            launchAtLogin.refresh()
         }
         .task(id: selectedSection) {
             guard selectedSection == .aiModels else { return }
@@ -416,6 +417,57 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Startup") {
+                Toggle("Launch FileNest at Login", isOn: Binding(
+                    get: { launchAtLogin.isEnabled },
+                    set: { enabled in
+                        Task { await launchAtLogin.setEnabled(enabled) }
+                    }
+                ))
+                .disabled(
+                    launchAtLogin.isUpdating ||
+                    launchAtLogin.status == .requiresApproval ||
+                    launchAtLogin.status == .unavailable
+                )
+
+                if launchAtLogin.isUpdating {
+                    Label {
+                        Text("Updating login item…")
+                    } icon: {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                } else if launchAtLogin.status == .requiresApproval {
+                    HStack(spacing: 8) {
+                        Label(
+                            "Allow FileNest in System Settings to finish enabling this option.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.system(size: 10))
+                        .foregroundStyle(FileNestTheme.warning)
+
+                        Spacer()
+
+                        Button("Open Login Items Settings") {
+                            openLoginItemsSettings()
+                        }
+                        .controlSize(.small)
+                    }
+                } else {
+                    Text("Open FileNest automatically after you sign in to this Mac.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+
+                if let errorMessage = launchAtLogin.errorMessage {
+                    Label(LocalizedStringKey(errorMessage), systemImage: "exclamationmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.red)
+                }
+            }
+
             Section("Quick Search") {
                 LabeledContent("Quick Search Shortcut") {
                     HStack(spacing: 8) {
@@ -709,6 +761,13 @@ struct SettingsView: View {
         }
     }
 
+    private func openLoginItemsSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     private var formattedBuildDate: String {
         guard let date = appState.updates.buildInfo.buildDate else { return "—" }
         return formattedDate(date)
@@ -810,27 +869,18 @@ struct SettingsView: View {
             }
 
             Section("Watched File Types") {
-                HStack {
-                    Text("Enabled extensions, separated by commas")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    (Text("Total") + Text(" \(appState.settings.enabledExtensions.count) ") + Text("types"))
-                        .foregroundStyle(.secondary)
-                }
-                .font(.system(size: 11))
-
-                TextEditor(text: Binding(
-                    get: { appState.settings.enabledExtensions.joined(separator: ", ") },
-                    set: {
-                        appState.settings.setEnabledExtensions(
-                            $0.split(separator: ",").map {
-                                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                            }.filter { !$0.isEmpty }
-                        )
-                    }
-                ))
-                .font(.system(size: 11))
-                .frame(minHeight: 74, maxHeight: 100)
+                FileTypeCheckboxSelector(
+                    selectedExtensions: Binding(
+                        get: { appState.settings.enabledExtensions },
+                        set: { appState.settings.setEnabledExtensions($0) }
+                    ),
+                    customExtensions: Binding(
+                        get: { appState.settings.customFileExtensions },
+                        set: { appState.settings.setCustomFileExtensions($0) }
+                    ),
+                    availableExtensions: AppSettings.supportedExtensions,
+                    title: "File types to watch"
+                )
             }
 
             Section("Automatic Vectorization") {
@@ -840,30 +890,23 @@ struct SettingsView: View {
                 ))
 
                 if appState.settings.autoVectorize {
-                    LabeledContent("Extensions to vectorize") {
-                        TextField("pdf, docx, txt, md, png, jpg", text: $vectorExtensionsDraft)
-                            .frame(minWidth: 360)
-                    }
+                    FileTypeCheckboxSelector(
+                        selectedExtensions: Binding(
+                            get: { appState.settings.vectorizeExtensions },
+                            set: { appState.settings.setVectorizeExtensions($0) }
+                        ),
+                        customExtensions: Binding(
+                            get: { appState.settings.customFileExtensions },
+                            set: { appState.settings.setCustomFileExtensions($0) }
+                        ),
+                        availableExtensions: AppSettings.vectorizableExtensions,
+                        title: "File types to vectorize"
+                    )
 
                     HStack(spacing: 8) {
-                        Button("Documents") {
-                            vectorExtensionsDraft = AppSettings.documentVectorizeExtensions.joined(separator: ", ")
-                        }
-                        .buttonStyle(QuietButtonStyle(compact: true))
-
-                        Button("Documents + Images") {
-                            vectorExtensionsDraft = AppSettings.defaultVectorizeExtensions.joined(separator: ", ")
-                        }
-                        .buttonStyle(QuietButtonStyle(compact: true))
-
                         Spacer()
 
                         Button {
-                            let extensions = vectorExtensionsDraft
-                                .split(separator: ",")
-                                .map(String.init)
-                            appState.settings.setVectorizeExtensions(extensions)
-                            vectorExtensionsDraft = appState.settings.vectorizeExtensions.joined(separator: ", ")
                             appState.reindexAll()
                         } label: {
                             IndexingButtonLabel(defaultTitle: "Apply & Reindex", appState: appState)
@@ -1034,7 +1077,7 @@ struct SettingsView: View {
                         }
                     ))
                     if appState.settings.cloudContextWindowTokens == 0 {
-                        Text("Reads the current model context window automatically; unknown cloud-compatible models default to 612K tokens.")
+                        Text("Reads the selected model context window automatically; unknown cloud-compatible models default to 612K tokens.")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     } else {
@@ -1050,7 +1093,7 @@ struct SettingsView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        Text("The manual value overrides automatic detection for cloud models.")
+                        Text("This manual value applies only to the selected cloud model and endpoint.")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     }
@@ -2239,6 +2282,285 @@ struct SettingsView: View {
 
 /// Keeps inactive settings tabs cheap to construct. Native `TabView` can retain
 /// every child hierarchy even though only one page is visible.
+/// Reusable category selector for every setting that accepts a file-extension set.
+/// It avoids free-form comma lists, while preserving the underlying configuration
+/// as a normalized list of extensions.
+private struct FileTypeCheckboxSelector: View {
+    @EnvironmentObject private var appState: AppState
+    @Binding var selectedExtensions: [String]
+    @Binding var customExtensions: [String]
+    let availableExtensions: [String]
+    let title: String
+
+    @State private var expandedCategories = Set<String>()
+    @State private var isAddingExtension = false
+    @State private var extensionDraft = ""
+
+    private var available: Set<String> { Set(availableExtensions).union(customExtensions) }
+    private var selected: Set<String> { Set(selectedExtensions).intersection(available) }
+    private var allSelected: Bool { !available.isEmpty && selected == available }
+    private var categories: [(name: String, systemImage: String, extensions: [String])] {
+        let builtIn = AppSettings.supportedFileExtensionCategories.compactMap { category -> (String, String, [String])? in
+            let extensions = category.extensions.filter { available.contains($0) }
+            guard !extensions.isEmpty else { return nil }
+            return (category.name, categoryIcon(for: category.name), extensions)
+        }
+        let custom = customExtensions.filter { available.contains($0) }
+        if custom.isEmpty { return builtIn }
+        return builtIn + [("Custom", "plus.circle", custom)]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                Spacer()
+                Text(appState.settings.localizedFormat("%d types selected", selected.count))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Button {
+                    isAddingExtension.toggle()
+                    if !isAddingExtension { extensionDraft = "" }
+                } label: {
+                    Label(isAddingExtension ? "Cancel" : "Add Type", systemImage: isAddingExtension ? "xmark" : "plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if isAddingExtension {
+                HStack(spacing: 8) {
+                    TextField("Extension, e.g. log", text: $extensionDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(addCustomExtension)
+                    Button("Add", action: addCustomExtension)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(normalizedDraft == nil)
+                }
+            }
+
+            Toggle(appState.settings.localized("All file types"), isOn: Binding(
+                get: { allSelected },
+                set: { enabled in replaceSelection(with: enabled ? available : []) }
+            ))
+            .toggleStyle(.checkbox)
+            .font(.system(size: 11, weight: .medium))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(FileNestTheme.elevatedSurface, in: RoundedRectangle(cornerRadius: 8))
+
+            VStack(spacing: 5) {
+                ForEach(categories, id: \.name) { category in
+                    categoryRow(category)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func categoryRow(_ category: (name: String, systemImage: String, extensions: [String])) -> some View {
+        let categoryExtensions = Set(category.extensions)
+        let selectedCount = categoryExtensions.intersection(selected).count
+        let isExpanded = expandedCategories.contains(category.name)
+
+        return VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        if isExpanded { expandedCategories.remove(category.name) }
+                        else { expandedCategories.insert(category.name) }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: category.systemImage)
+                            .frame(width: 15)
+                            .foregroundStyle(FileNestTheme.accent)
+                        Text(appState.settings.localized(category.name))
+                            .font(.system(size: 11, weight: .medium))
+                        Text("\(selectedCount)/\(category.extensions.count)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Toggle("", isOn: Binding(
+                    get: { categoryExtensions.isSubset(of: selected) },
+                    set: { enabled in toggle(categoryExtensions, enabled: enabled) }
+                ))
+                .labelsHidden()
+                .toggleStyle(.checkbox)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(FileNestTheme.elevatedSurface.opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
+
+            if isExpanded {
+                FlowLayout(spacing: 6) {
+                    ForEach(category.extensions, id: \.self) { fileExtension in
+                        extensionChip(fileExtension)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 4)
+            }
+        }
+    }
+
+    private func extensionChip(_ fileExtension: String) -> some View {
+        let isSelected = selected.contains(fileExtension)
+        return Button {
+            toggle([fileExtension], enabled: !isSelected)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: isSelected ? "checkmark" : "plus")
+                    .font(.system(size: 8, weight: .bold))
+                Text(".\(fileExtension)")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(isSelected ? FileNestTheme.accent : .secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(
+                isSelected ? FileNestTheme.accent.opacity(0.13) : FileNestTheme.elevatedSurface,
+                in: Capsule()
+            )
+            .overlay {
+                Capsule().stroke(
+                    isSelected ? FileNestTheme.accent.opacity(0.28) : .secondary.opacity(0.16),
+                    lineWidth: 1
+                )
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var normalizedDraft: String? {
+        let value = extensionDraft
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        guard value.range(of: "^[a-z0-9][a-z0-9+_-]{0,31}$", options: .regularExpression) != nil else {
+            return nil
+        }
+        return value
+    }
+
+    private func addCustomExtension() {
+        guard let fileExtension = normalizedDraft else { return }
+        if !customExtensions.contains(fileExtension), !AppSettings.supportedExtensions.contains(fileExtension) {
+            customExtensions.append(fileExtension)
+            customExtensions.sort()
+        }
+        if !selectedExtensions.contains(fileExtension) {
+            selectedExtensions.append(fileExtension)
+            selectedExtensions.sort()
+        }
+        expandedCategories.insert("Custom")
+        extensionDraft = ""
+        isAddingExtension = false
+    }
+
+    private func categoryIcon(for name: String) -> String {
+        switch name {
+        case "Documents": return "doc.text"
+        case "Images": return "photo"
+        case "Videos": return "film"
+        case "Audio": return "waveform"
+        case "Code": return "chevron.left.forwardslash.chevron.right"
+        case "Archives": return "archivebox"
+        default: return "folder"
+        }
+    }
+
+    private func replaceSelection(with newSelection: Set<String>) {
+        let unrelated = Set(selectedExtensions).subtracting(available)
+        selectedExtensions = Array(unrelated.union(newSelection)).sorted()
+    }
+
+    private func toggle(_ extensions: Set<String>, enabled: Bool) {
+        var next = selected
+        if enabled { next.formUnion(extensions) } else { next.subtract(extensions) }
+        replaceSelection(with: next)
+    }
+}
+
+private struct FlowLayout: Layout {
+    let spacing: CGFloat
+
+    init(spacing: CGFloat = 8) {
+        self.spacing = spacing
+    }
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let width = proposal.width ?? .greatestFiniteMagnitude
+        let rows = arrangedRows(subviews: subviews, maximumWidth: width)
+        let height = rows.reduce(CGFloat.zero) { $0 + $1.height } + spacing * CGFloat(max(0, rows.count - 1))
+        return CGSize(width: proposal.width ?? rows.map(\.width).max() ?? 0, height: height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let rows = arrangedRows(subviews: subviews, maximumWidth: bounds.width)
+        var y = bounds.minY
+        for row in rows {
+            var x = bounds.minX
+            for item in row.items {
+                item.view.place(
+                    at: CGPoint(x: x, y: y),
+                    proposal: ProposedViewSize(width: item.size.width, height: item.size.height)
+                )
+                x += item.size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+
+    private func arrangedRows(subviews: Subviews, maximumWidth: CGFloat) -> [FlowRow] {
+        var rows = [FlowRow]()
+        var current = FlowRow()
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            let candidateWidth = current.items.isEmpty ? size.width : current.width + spacing + size.width
+            if !current.items.isEmpty, candidateWidth > maximumWidth {
+                rows.append(current)
+                current = FlowRow()
+            }
+            current.items.append(FlowItem(view: view, size: size))
+            current.width = current.items.count == 1 ? size.width : current.width + spacing + size.width
+            current.height = max(current.height, size.height)
+        }
+        if !current.items.isEmpty { rows.append(current) }
+        return rows
+    }
+
+    private struct FlowItem {
+        let view: LayoutSubview
+        let size: CGSize
+    }
+
+    private struct FlowRow {
+        var items = [FlowItem]()
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+}
+
 private struct DeferredSettingsPage<Content: View>: View {
     private let content: () -> Content
 

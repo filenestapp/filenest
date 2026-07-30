@@ -398,14 +398,31 @@ final class OrganizerService: @unchecked Sendable {
             storedBeforeReconciliation.map { (Self.canonicalPath($0.path), $0) },
             uniquingKeysWith: { first, _ in first }
         )
+        let identitiesByFileID = (try? store.managedFileIdentities()) ?? [:]
+        let missingStoredRecords = storedBeforeReconciliation.filter {
+            Self.isInside($0.path, rootPath: rootPath) && !fm.fileExists(atPath: $0.path)
+        }
+        let missingStoredByIdentity = Dictionary(
+            grouping: missingStoredRecords.compactMap { record -> (String, FileRecord)? in
+                guard let id = record.id,
+                      let identifier = identitiesByFileID[id] else {
+                    return nil
+                }
+                return (identifier, record)
+            },
+            by: \.0
+        ).mapValues { $0.map(\.1) }
+        let missingStoredBySize = Dictionary(grouping: missingStoredRecords, by: \.size)
         var diskPaths = Set<String>()
         var pendingUpserts: [FileRecord] = []
         var staleFileIDs = Set<Int64>()
+        var matchedStoredIDs = Set<Int64>()
+        var fileSystemIdentifiersByPath: [String: String] = [:]
         while let url = enumerator?.nextObject() as? URL {
             guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
             let path = url.standardizedFileURL.path
-            let existing = storedByCanonicalPath[Self.canonicalPath(path)]
             if values.isDirectory == true {
+                let existing = storedByCanonicalPath[Self.canonicalPath(path)]
                 if let existing, existing.isDirectory {
                     diskPaths.insert(existing.path)
                     enumerator?.skipDescendants()
@@ -413,10 +430,47 @@ final class OrganizerService: @unchecked Sendable {
                 continue
             }
             guard values.isRegularFile == true else { continue }
-            diskPaths.insert(existing?.path ?? path)
             let ext = url.pathExtension.lowercased()
             let size = Int64(values.fileSize ?? 0)
             let modificationDate = values.contentModificationDate ?? Date()
+            let fileSystemIdentifier = Self.persistentFileSystemIdentifier(at: url)
+            var existing = storedByCanonicalPath[Self.canonicalPath(path)]
+            if existing == nil, let fileSystemIdentifier {
+                let candidates = (missingStoredByIdentity[fileSystemIdentifier] ?? []).filter {
+                    guard let id = $0.id else { return false }
+                    return !matchedStoredIDs.contains(id)
+                }
+                if candidates.count == 1 {
+                    existing = candidates[0]
+                }
+            }
+            if existing == nil {
+                let candidates = (missingStoredBySize[size] ?? []).filter {
+                    guard let id = $0.id,
+                          !matchedStoredIDs.contains(id),
+                          $0.contentHash != nil else {
+                        return false
+                    }
+                    return true
+                }
+                if !candidates.isEmpty,
+                   let currentHash = try? FileContentHasher.sha256(of: url) {
+                    let matchingCandidates = candidates.filter { $0.contentHash == currentHash }
+                    if matchingCandidates.count == 1 {
+                        existing = matchingCandidates[0]
+                    }
+                }
+            }
+            if let id = existing?.id {
+                matchedStoredIDs.insert(id)
+            }
+            diskPaths.insert(path)
+            if let fileSystemIdentifier {
+                let storedIdentifier = existing?.id.flatMap { identitiesByFileID[$0] }
+                if storedIdentifier != fileSystemIdentifier {
+                    fileSystemIdentifiersByPath[path] = fileSystemIdentifier
+                }
+            }
             let metadataChanged = existing.map {
                 $0.size != size || abs($0.mtime.timeIntervalSince(modificationDate)) >= 0.001
             } ?? false
@@ -426,7 +480,7 @@ final class OrganizerService: @unchecked Sendable {
             let subfolder = relative.count >= 3 ? relative[1] : existing?.organizationSubfolder
             let record = FileRecord(
                 id: existing?.id,
-                path: existing?.path ?? path,
+                path: path,
                 name: url.lastPathComponent,
                 ext: ext,
                 size: size,
@@ -444,6 +498,7 @@ final class OrganizerService: @unchecked Sendable {
             )
             let recordChanged = existing == nil ||
                 metadataChanged ||
+                existing?.path != record.path ||
                 existing?.name != record.name ||
                 existing?.ext != record.ext ||
                 existing?.category != record.category ||
@@ -461,7 +516,8 @@ final class OrganizerService: @unchecked Sendable {
         do {
             try store.applyManagedFileChanges(
                 upserts: pendingUpserts,
-                staleFileIDs: staleFileIDs
+                staleFileIDs: staleFileIDs,
+                fileSystemIdentifiersByPath: fileSystemIdentifiersByPath
             )
         } catch {
             AppLogService.shared.write(
@@ -474,7 +530,10 @@ final class OrganizerService: @unchecked Sendable {
 
         let missingIDs = Set(storedBeforeReconciliation.compactMap { record -> Int64? in
             guard Self.isInside(record.path, rootPath: rootPath),
-                  !diskPaths.contains(record.path) else { return nil }
+                  !diskPaths.contains(record.path),
+                  record.id.map({ !matchedStoredIDs.contains($0) }) ?? true else {
+                return nil
+            }
             return record.id
         })
         if !missingIDs.isEmpty {
@@ -507,6 +566,18 @@ final class OrganizerService: @unchecked Sendable {
             )
         }
         return reconciledFiles
+    }
+
+    /// Device and inode identify the same file across renames and moves on one
+    /// filesystem. Content hashing remains the fallback when this identity was
+    /// not persisted by an older FileNest version.
+    private static func persistentFileSystemIdentifier(at url: URL) -> String? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let device = (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+              let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value else {
+            return nil
+        }
+        return "\(device):\(inode)"
     }
 
     /// A low-priority startup audit catches tools that overwrite content while preserving

@@ -122,4 +122,25 @@ final class DoclingDocumentProcessorTests: XCTestCase {
 
         XCTAssertEqual(result, [source])
     }
+
+    func testCorruptedTextLayerIsRemovedBeforeChunkingWhenExternalOCRRecoveredText() {
+        let corrupted = StructuredDocumentChunk(
+            text: "- $\" !//%1 2 %/$ % 3 & &4!2% %&  % % $# &4 .!/ $ 56 2 %. $"
+        )
+        let recovered = """
+        FORM 7
+        IMMIGRATION ACT 1959
+        RE-ENTRY PERMIT
+        This permit allows the holder to re-enter Singapore during its validity.
+        """
+
+        let result = DoclingDocumentProcessor.removingCorruptedTextLayerChunks(
+            from: [corrupted],
+            readableRecovery: recovered
+        )
+
+        XCTAssertTrue(result.isEmpty)
+        XCTAssertTrue(DoclingDocumentProcessor.isLikelyCorruptedTextLayer(corrupted.text))
+        XCTAssertTrue(DoclingDocumentProcessor.isLikelyReadableText(recovered))
+    }
 }

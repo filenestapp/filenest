@@ -2,6 +2,12 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum FileNestLayout {
+    static let sidebarWidth: CGFloat = 255
+    static let inspectorWidth: CGFloat = 334
+    static let dividerWidth: CGFloat = 1
+}
+
 enum FileNestTheme {
     /// Foreground accents are deliberately brighter in Dark Mode so links,
     /// icons, and focus indicators keep strong contrast on deep surfaces.
@@ -514,6 +520,7 @@ struct IndexingButtonLabel: View {
     private var displayTitle: String {
         if appState.reindexButtonsDisabled { return appState.indexingStatusTitle }
         if appState.indexingState == .stopped { return "Restart Indexing" }
+        if appState.indexingState == .completedWithErrors { return "Retry Failed Files" }
         return defaultTitle
     }
 
@@ -523,6 +530,7 @@ struct IndexingButtonLabel: View {
         case .stopping: return "stop.circle"
         case .stopped: return "stop.circle.fill"
         case .completed: return "checkmark.circle.fill"
+        case .completedWithErrors: return "exclamationmark.circle.fill"
         case .failed: return "exclamationmark.circle.fill"
         case .idle, .running: return "arrow.triangle.2.circlepath"
         }
@@ -584,6 +592,7 @@ struct IndexingStatusProgressView: View {
         case .stopping: return "stop.circle"
         case .stopped: return "stop.circle.fill"
         case .completed: return "checkmark.circle.fill"
+        case .completedWithErrors: return "exclamationmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
         case .idle: return appState.indexedCount > 0 ? "doc.text.magnifyingglass" : "magnifyingglass"
         case .running: return "arrow.triangle.2.circlepath"
@@ -593,6 +602,7 @@ struct IndexingStatusProgressView: View {
     private var statusColor: Color {
         switch appState.indexingState {
         case .failed: return FileNestTheme.warning
+        case .completedWithErrors: return FileNestTheme.warning
         case .completed: return FileNestTheme.success
         case .paused, .stopped: return .secondary
         default: return FileNestTheme.accentBlue
@@ -877,6 +887,8 @@ private struct IndexingTaskControls: View {
             case .stopping:
                 taskButton("Stopping…", icon: "stop.fill", action: {})
                     .disabled(true)
+            case .completedWithErrors:
+                taskButton("Retry Failed Files", icon: "arrow.clockwise", action: appState.restartIndexing)
             case .stopped, .failed, .completed:
                 taskButton("Restart Indexing", icon: "arrow.clockwise", action: appState.restartIndexing)
             case .idle:

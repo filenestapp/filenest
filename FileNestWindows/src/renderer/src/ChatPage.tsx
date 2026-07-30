@@ -64,6 +64,7 @@ export function ChatPage({
   const [requestId, setRequestId] = useState<string | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [progressStage, setProgressStage] = useState<ChatStreamEvent["stage"]>();
+  const [documentProgress, setDocumentProgress] = useState<{ completed: number; total: number } | null>(null);
   const [searchIntent, setSearchIntent] = useState("");
   const deltaBuffer = useRef("");
   const deltaTimer = useRef<number | null>(null);
@@ -98,6 +99,7 @@ export function ChatPage({
         }
         if (event.type === "progress") {
           setProgressStage(event.stage);
+          if (event.documentProgress) setDocumentProgress(event.documentProgress);
           if (event.searchIntent) setSearchIntent(event.searchIntent);
         }
         if (event.type === "session") {
@@ -111,6 +113,7 @@ export function ChatPage({
           setPendingQuestion(null);
           setRequestId(null);
           setProgressStage(undefined);
+          setDocumentProgress(null);
           setSearchIntent("");
           if (activeRef.current && event.sessionId != null) void window.fileNest.markChatSeen(event.sessionId);
           void onRefresh();
@@ -119,6 +122,7 @@ export function ChatPage({
           setStreaming(event.error ?? "Generation failed");
           setRequestId(null);
           setProgressStage(undefined);
+          setDocumentProgress(null);
           setSearchIntent("");
         }
       });
@@ -312,6 +316,12 @@ export function ChatPage({
                       <span />
                       <span /> {progressStage === "verifying"
                         ? t("Verifying answer citations…")
+                        : progressStage === "preparing-document"
+                          ? t("Preparing the complete document…")
+                          : progressStage === "processing-document"
+                            ? t(`Processing document sections${documentProgress ? ` ${documentProgress.completed + 1} of ${documentProgress.total}` : ""}…`)
+                            : progressStage === "reducing-document"
+                              ? t("Combining document sections…")
                         : progressStage === "reranking"
                           ? t("Reranking the strongest matches…")
                       : progressStage === "generating"

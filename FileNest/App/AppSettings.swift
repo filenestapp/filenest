@@ -64,6 +64,8 @@ final class AppSettings: ObservableObject {
     // MARK: - Configurable Properties
     @Published var watchDirs: [String] = []
     @Published var enabledExtensions: [String] = []
+    /// User-defined extensions shared by watching and vectorization selectors.
+    @Published var customFileExtensions: [String] = []
     @Published var excludeHidden: Bool = true
     @Published var classifyStrategy: String = "hybrid"
     @Published var llmChoice: String = LLMChoice.ollama.rawValue
@@ -76,6 +78,9 @@ final class AppSettings: ObservableObject {
     @Published var cloudModel: String = "gpt-4o-mini"
     /// Cloud models only: zero enables automatic detection, while a positive value is a user override.
     @Published var cloudContextWindowTokens: Int = 0
+    /// Manual cloud context windows are scoped to provider format, endpoint, and model.
+    /// The legacy scalar above mirrors the currently selected cloud model for SwiftUI bindings.
+    @Published private(set) var cloudContextWindowOverrides: [String: Int] = [:]
     @Published var autoOrganize: Bool = true
     @Published var autoOrganizeMode: String = AutoOrganizeMode.batched.rawValue
     @Published var autoOrganizeIntervalSeconds: Int = 30
@@ -238,6 +243,9 @@ final class AppSettings: ObservableObject {
         self.store = store
         watchDirs = loadStrArr(.watchDirs, sep: "\n") ?? Self.defaultWatchDirectories()
         enabledExtensions = loadStrArr(.enabledExts, sep: ",") ?? defaultExts
+        customFileExtensions = Self.normalizedExtensions(
+            loadStrArr(.customFileExtensions, sep: ",") ?? []
+        )
         excludeHidden = load(.excludeHidden) != "0"
         classifyStrategy = ClassificationStrategy(
             storedValue: load(.classifyStrategy) ?? ClassificationStrategy.hybrid.rawValue
@@ -258,6 +266,11 @@ final class AppSettings: ObservableObject {
         cloudContextWindowTokens = Self.normalizedChatContextWindow(
             load(.cloudContextWindowTokens) ?? load(.legacyChatContextWindowTokens)
         )
+        cloudContextWindowOverrides = Self.decodeContextWindowOverrides(
+            load(.cloudContextWindowOverrides)
+        )
+        migrateLegacyCloudContextWindowOverrideIfNeeded()
+        refreshSelectedCloudContextWindow()
         autoOrganize = load(.autoOrganize) != "0"
         autoOrganizeMode = AutoOrganizeMode(rawValue: load(.autoOrganizeMode) ?? "")?.rawValue
             ?? AutoOrganizeMode.batched.rawValue
@@ -363,7 +376,17 @@ final class AppSettings: ObservableObject {
 
     // MARK: - Explicit Persistent Setters
     func setWatchDirs(_ v: [String]) { watchDirs = v; save(.watchDirs, v.joined(separator: "\n")) }
-    func setEnabledExtensions(_ v: [String]) { enabledExtensions = v; save(.enabledExts, v.joined(separator: ",")) }
+    func setEnabledExtensions(_ v: [String]) {
+        let normalized = Self.normalizedExtensions(v)
+        enabledExtensions = normalized
+        save(.enabledExts, normalized.joined(separator: ","))
+    }
+    func setCustomFileExtensions(_ values: [String]) {
+        let builtIn = Set(Self.supportedExtensions)
+        let normalized = Self.normalizedExtensions(values).filter { !builtIn.contains($0) }
+        customFileExtensions = normalized
+        save(.customFileExtensions, normalized.joined(separator: ","))
+    }
     func setExcludeHidden(_ v: Bool) { excludeHidden = v; save(.excludeHidden, v ? "1" : "0") }
     func setClassifyStrategy(_ v: String) {
         let normalized = ClassificationStrategy(storedValue: v).rawValue
@@ -399,6 +422,7 @@ final class AppSettings: ObservableObject {
             }
             if cloudModel == "claude-sonnet-5" { setCloudModel("gpt-4o-mini") }
         }
+        refreshSelectedCloudContextWindow()
     }
     func setCloudKey(_ v: String) { cloudAPIKey = v; save(.cloudKey, v) }
     func setCloudBaseURL(_ v: String) {
@@ -406,12 +430,39 @@ final class AppSettings: ObservableObject {
         // normalized when a provider is created, so a root URL works immediately.
         cloudBaseURL = v.trimmingCharacters(in: .whitespacesAndNewlines)
         save(.cloudBaseURL, cloudBaseURL)
+        refreshSelectedCloudContextWindow()
     }
-    func setCloudModel(_ v: String) { cloudModel = v; save(.cloudModel, v) }
+    func setCloudModel(_ v: String) {
+        cloudModel = v
+        save(.cloudModel, v)
+        refreshSelectedCloudContextWindow()
+    }
     func setCloudContextWindowTokens(_ value: Int) {
         let normalized = Self.normalizedChatContextWindow(String(value))
         cloudContextWindowTokens = normalized
+        let key = cloudContextWindowOverrideKey(
+            format: cloudAPIFormat,
+            baseURL: cloudBaseURL,
+            model: cloudModel
+        )
+        if normalized > 0 {
+            cloudContextWindowOverrides[key] = normalized
+        } else {
+            cloudContextWindowOverrides.removeValue(forKey: key)
+        }
+        saveContextWindowOverrides()
+        // Keep the legacy setting synchronized for downgrade compatibility.
         save(.cloudContextWindowTokens, String(normalized))
+    }
+
+    func cloudContextWindowOverride(for model: String? = nil) -> Int? {
+        let key = cloudContextWindowOverrideKey(
+            format: cloudAPIFormat,
+            baseURL: cloudBaseURL,
+            model: model ?? cloudModel
+        )
+        guard let value = cloudContextWindowOverrides[key], value > 0 else { return nil }
+        return value
     }
     func setAutoOrganize(_ v: Bool) {
         autoOrganize = v
@@ -628,6 +679,7 @@ final class AppSettings: ObservableObject {
     private enum Key: String {
         case watchDirs = "watch_dirs"
         case enabledExts = "enabled_exts"
+        case customFileExtensions = "custom_file_extensions"
         case excludeHidden = "exclude_hidden"
         case classifyStrategy = "classify_strategy"
         case llmChoice = "llm_choice"
@@ -639,6 +691,7 @@ final class AppSettings: ObservableObject {
         case cloudBaseURL = "cloud_base_url"
         case cloudModel = "cloud_model"
         case cloudContextWindowTokens = "cloud_context_window_tokens"
+        case cloudContextWindowOverrides = "cloud_context_window_overrides_v1"
         case legacyChatContextWindowTokens = "chat_context_window_tokens"
         case autoOrganize = "auto_organize"
         case autoOrganizeMode = "auto_organize_mode"
@@ -686,6 +739,44 @@ final class AppSettings: ObservableObject {
     }
     private func load(_ k: Key) -> String? { store.getSetting(k.rawValue) }
     private func save(_ k: Key, _ v: String) { store.setSetting(k.rawValue, v) }
+    private func cloudContextWindowOverrideKey(format: String, baseURL: String, model: String) -> String {
+        let normalizedURL = Self.normalizedCloudBaseURL(baseURL).lowercased()
+        let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return "\(format.lowercased())|\(normalizedURL)|\(normalizedModel)"
+    }
+
+    private func refreshSelectedCloudContextWindow() {
+        cloudContextWindowTokens = cloudContextWindowOverride(for: cloudModel) ?? 0
+    }
+
+    private func migrateLegacyCloudContextWindowOverrideIfNeeded() {
+        guard cloudContextWindowOverrides.isEmpty, cloudContextWindowTokens > 0 else { return }
+        let key = cloudContextWindowOverrideKey(
+            format: cloudAPIFormat,
+            baseURL: cloudBaseURL,
+            model: cloudModel
+        )
+        cloudContextWindowOverrides[key] = cloudContextWindowTokens
+        saveContextWindowOverrides()
+    }
+
+    private func saveContextWindowOverrides() {
+        guard let data = try? JSONEncoder().encode(cloudContextWindowOverrides),
+              let serialized = String(data: data, encoding: .utf8) else { return }
+        save(.cloudContextWindowOverrides, serialized)
+    }
+
+    private static func decodeContextWindowOverrides(_ value: String?) -> [String: Int] {
+        guard let value,
+              let data = value.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String: Int].self, from: data) else {
+            return [:]
+        }
+        return decoded.reduce(into: [:]) { result, entry in
+            let normalized = normalizedChatContextWindow(String(entry.value))
+            if normalized > 0 { result[entry.key] = normalized }
+        }
+    }
     private static func normalizedInterval(_ raw: String?) -> Int {
         max(30, min(Int(raw ?? "") ?? 30, 3_600))
     }
@@ -739,12 +830,21 @@ final class AppSettings: ObservableObject {
         return arr.filter { !$0.isEmpty }
     }
 
-    private let defaultExts = ["pdf","doc","docx","docm","txt","md","rtf","xls","xlsx","xlsm","ppt","pptx","ppsx","csv","epub","odt","ods","odp","pages","numbers","key",
-                               "png","jpg","jpeg","gif","heic","tiff","svg","psd","sketch","webp",
-                               "mp4","mov","mkv","avi","m4v","webm","mpeg","mpg",
-                               "mp3","wav","aac","flac","m4a","ogg","opus","aiff","aif","wma",
-                               "swift","py","js","ts","tsx","jsx","java","kt","go","rs","c","cpp","h",
-                               "json","yaml","yml","html","css","sql","zip","rar","7z","tar","gz","dmg"]
+    static let supportedFileExtensionCategories: [(name: String, extensions: [String])] = [
+        ("Documents", ["pdf", "doc", "docx", "docm", "txt", "md", "markdown", "rtf", "xls", "xlsx", "xlsm", "ppt", "pptx", "ppsx", "csv", "epub", "odt", "ods", "odp", "pages", "numbers", "key", "keynote", "xml"]),
+        ("Images", ["png", "jpg", "jpeg", "gif", "heic", "tiff", "svg", "psd", "sketch", "webp"]),
+        ("Videos", ["mp4", "mov", "mkv", "avi", "m4v", "webm", "mpeg", "mpg"]),
+        ("Audio", ["mp3", "wav", "aac", "flac", "m4a", "ogg", "opus", "aiff", "aif", "wma"]),
+        ("Code", ["swift", "py", "js", "ts", "tsx", "jsx", "java", "kt", "go", "rs", "c", "cpp", "h", "json", "yaml", "yml", "html", "css", "sql"]),
+        ("Archives", ["zip", "rar", "7z", "tar", "gz", "dmg"]),
+    ]
+
+    static let supportedExtensions = supportedFileExtensionCategories.flatMap(\.extensions)
+    static let vectorizableExtensions = documentVectorizeExtensions + [
+        "png", "jpg", "jpeg", "gif", "heic", "tiff", "webp"
+    ]
+
+    private let defaultExts = AppSettings.supportedExtensions
 
     static let documentVectorizeExtensions = [
         "pdf", "doc", "docx", "docm", "xls", "xlsx", "xlsm", "ppt", "pptx", "ppsx",
@@ -752,9 +852,7 @@ final class AppSettings: ObservableObject {
         "txt", "md", "markdown", "rtf", "csv", "json", "yaml", "yml", "xml", "html"
     ]
 
-    static let defaultVectorizeExtensions = documentVectorizeExtensions + [
-        "png", "jpg", "jpeg", "heic", "tiff", "gif", "webp"
-    ]
+    static let defaultVectorizeExtensions = vectorizableExtensions
 
     static let audioTranscriptionExtensions: Set<String> = [
         "mp3", "wav", "aac", "flac", "m4a", "ogg", "opus", "aiff", "aif", "wma"
@@ -781,13 +879,17 @@ final class AppSettings: ObservableObject {
     }
 
     /// Active LLM provider selected by settings.
-    func makeLLMProvider(modelOverride: String? = nil) -> LLMProvider {
+    func makeLLMProvider(
+        modelOverride: String? = nil,
+        thinkingEnabled: Bool? = nil
+    ) -> LLMProvider {
+        let effectiveThinkingEnabled = thinkingEnabled ?? self.thinkingMode
         switch LLMChoice(rawValue: llmChoice) ?? .ollama {
         case .ollama:
             return OllamaLLMProvider(
                 host: ollamaHost,
                 model: modelOverride ?? ollamaModel,
-                thinkingEnabled: thinkingMode
+                thinkingEnabled: effectiveThinkingEnabled
             )
         case .cloud:
             switch CloudAPIFormat(rawValue: cloudAPIFormat) ?? .openAI {
@@ -796,14 +898,14 @@ final class AppSettings: ObservableObject {
                     baseURL: effectiveCloudBaseURL,
                     apiKey: cloudAPIKey,
                     model: modelOverride ?? cloudModel,
-                    thinkingEnabled: thinkingMode
+                    thinkingEnabled: effectiveThinkingEnabled
                 )
             case .anthropic:
                 return AnthropicLLMProvider(
                     baseURL: effectiveCloudBaseURL,
                     apiKey: cloudAPIKey,
                     model: modelOverride ?? cloudModel,
-                    thinkingEnabled: thinkingMode
+                    thinkingEnabled: effectiveThinkingEnabled
                 )
             }
         case .none:
@@ -821,7 +923,7 @@ final class AppSettings: ObservableObject {
         OllamaLLMProvider(
             host: ollamaHost,
             model: modelOverride ?? ollamaModel,
-            thinkingEnabled: thinkingEnabled ?? thinkingMode
+            thinkingEnabled: thinkingEnabled ?? self.thinkingMode
         )
     }
 
@@ -835,7 +937,7 @@ final class AppSettings: ObservableObject {
                 apiKey: rerankerAPIKey,
                 model: rerankerModel,
                 name: "local-reranker",
-                requestTimeout: 8
+                requestTimeout: 12
             )
         case .cloud:
             return CompatibleRerankingProvider(

@@ -91,6 +91,48 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
+    func testReindexFileDetailsToggleByStoredFileIDAndCloseWithSettings() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let store = SQLiteStore(path: temporaryDirectory.appendingPathComponent("test.sqlite").path)
+        let settings = AppSettings(store: store)
+        let state = AppState(
+            store: store,
+            settings: settings,
+            organizeRoot: temporaryDirectory.appendingPathComponent("organized"),
+            startAutomatically: false
+        )
+        let storedFileID = try store.upsertFile(FileRecord(
+            id: nil,
+            path: temporaryDirectory.appendingPathComponent("report.pdf").path,
+            name: "report.pdf",
+            ext: "pdf",
+            size: 128,
+            mtime: Date(),
+            category: FileCategory.documents.rawValue,
+            sourceDir: temporaryDirectory.path,
+            indexedAt: Date(),
+            contentHash: nil,
+            title: "Report",
+            contentText: nil
+        ))
+
+        state.presentSettings(.reindexActivity)
+        state.toggleFilePreview(fileID: storedFileID)
+        XCTAssertEqual(state.previewedFile?.id, storedFileID)
+
+        state.toggleFilePreview(fileID: storedFileID)
+        XCTAssertNil(state.previewedFile)
+
+        state.toggleFilePreview(fileID: storedFileID)
+        state.dismissSettings()
+        XCTAssertNil(state.previewedFile)
+    }
+
+    @MainActor
     func testChatActivityTracksRunningCompletionAndSeenStates() throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -190,6 +232,45 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertFalse(IndexingTaskState.stopped.isActive)
         XCTAssertFalse(IndexingTaskState.stopped.blocksReindexButtons)
+    }
+
+    func testIndexingCompletionOutcomeDistinguishesPartialAndTaskFailure() {
+        XCTAssertEqual(
+            IndexingCompletionOutcome(
+                stopped: false,
+                operationSucceeded: true,
+                successfulFiles: 10,
+                failedFiles: 0
+            ),
+            .completed
+        )
+        XCTAssertEqual(
+            IndexingCompletionOutcome(
+                stopped: false,
+                operationSucceeded: false,
+                successfulFiles: 9,
+                failedFiles: 1
+            ),
+            .completedWithErrors
+        )
+        XCTAssertEqual(
+            IndexingCompletionOutcome(
+                stopped: false,
+                operationSucceeded: false,
+                successfulFiles: 0,
+                failedFiles: 0
+            ),
+            .failed
+        )
+        XCTAssertEqual(
+            IndexingCompletionOutcome(
+                stopped: true,
+                operationSucceeded: false,
+                successfulFiles: 5,
+                failedFiles: 1
+            ),
+            .stopped
+        )
     }
 
     @MainActor
@@ -647,18 +728,28 @@ final class AppStateTests: XCTestCase {
         XCTAssertFalse(queueItem.isActive)
     }
 
-    func testLibraryFileQuerySortsByModifiedDateAndSizeInBothDirections() {
+    func testLibraryFileQuerySortsByAddedModifiedAndSizeInBothDirections() {
         let olderLarge = makeLibraryRecord(
             name: "older-large.pdf",
             size: 900,
-            modifiedAt: Date(timeIntervalSince1970: 100)
+            modifiedAt: Date(timeIntervalSince1970: 100),
+            discoveredAt: Date(timeIntervalSince1970: 300)
         )
         let newerSmall = makeLibraryRecord(
             name: "newer-small.pdf",
             size: 100,
-            modifiedAt: Date(timeIntervalSince1970: 200)
+            modifiedAt: Date(timeIntervalSince1970: 200),
+            discoveredAt: Date(timeIntervalSince1970: 250)
         )
 
+        XCTAssertEqual(
+            LibraryFileQuery.sorted(
+                [olderLarge, newerSmall],
+                field: .added,
+                direction: .descending
+            ).map(\.name),
+            ["older-large.pdf", "newer-small.pdf"]
+        )
         XCTAssertEqual(
             LibraryFileQuery.sorted(
                 [olderLarge, newerSmall],
@@ -871,7 +962,8 @@ final class AppStateTests: XCTestCase {
     private func makeLibraryRecord(
         name: String,
         size: Int64 = 100,
-        modifiedAt: Date
+        modifiedAt: Date,
+        discoveredAt: Date? = nil
     ) -> FileRecord {
         FileRecord(
             id: nil,
@@ -885,7 +977,8 @@ final class AppStateTests: XCTestCase {
             indexedAt: nil,
             contentHash: nil,
             title: nil,
-            contentText: nil
+            contentText: nil,
+            discoveredAt: discoveredAt
         )
     }
 

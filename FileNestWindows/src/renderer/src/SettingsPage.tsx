@@ -8,6 +8,7 @@ import {
   Database,
   Download,
   FileCog,
+  FolderOpen,
   FolderPlus,
   Gauge,
   HardDrive,
@@ -28,7 +29,7 @@ import type { AiConnectivityCheck, AppLanguage, AppSnapshot, ReindexMode, Rule, 
 import { formatBytes, IconButton } from "./components";
 import { translate } from "./i18n";
 
-type Section = "general" | "indexing" | "ai" | "statistics" | "rules";
+type Section = "general" | "indexing" | "ai" | "skills" | "statistics" | "rules";
 const SettingsLanguageContext = createContext<AppLanguage>("en");
 
 export function SettingsPage({
@@ -46,6 +47,7 @@ export function SettingsPage({
       { id: "general", label: "General", icon: <Settings2 size={17} /> },
       { id: "indexing", label: "Index & Organize", icon: <FileCog size={17} /> },
       { id: "ai", label: "AI Models", icon: <Bot size={17} /> },
+      { id: "skills", label: "Agent Skills", icon: <Sparkles size={17} /> },
       { id: "statistics", label: "Statistics", icon: <Activity size={17} /> },
       { id: "rules", label: "Organization Rules", icon: <ListChecks size={17} /> },
     ];
@@ -86,6 +88,9 @@ export function SettingsPage({
           {section === "ai" && (
             <AiSettings snapshot={snapshot} t={t} onRefresh={onRefresh} />
           )}
+          {section === "skills" && (
+            <AgentSkillsSettings snapshot={snapshot} t={t} onRefresh={onRefresh} />
+          )}
           {section === "statistics" && <Statistics snapshot={snapshot} t={t} />}
           {section === "rules" && (
             <RulesSettings snapshot={snapshot} t={t} onRefresh={onRefresh} />
@@ -102,6 +107,38 @@ type ChildProps = {
   t(value: string): string;
   onRefresh(): Promise<void>;
 };
+
+function AgentSkillsSettings({ snapshot, t, onRefresh }: ChildProps): React.JSX.Element {
+  const run = async (action: () => Promise<unknown>): Promise<void> => {
+    try { await action(); await onRefresh(); }
+    catch (error) { alert(error instanceof Error ? error.message : String(error)); }
+  };
+  const groups = [
+    { origin: "bundled", title: "Built-in", hint: "Always enabled product workflows" },
+    { origin: "managed", title: "FileNest Learning", hint: "Imported or feedback-created packages" },
+    { origin: "sharedUser", title: "Shared Skills", hint: "Packages found in your shared Agent Skills folder" },
+  ] as const;
+  return <div className="settings-sections">
+    <SettingsSection title="Agent Skills" subtitle="Reusable local AI instructions are discovered progressively and cannot execute arbitrary scripts">
+      <div className="button-row">
+        <button className="secondary-button" onClick={() => void run(() => window.fileNest.openAgentSkillsFolder())}><FolderOpen size={16} />Open Skills Folder</button>
+        <button className="secondary-button" onClick={() => void run(() => window.fileNest.importAgentSkill())}><Download size={16} />Import Skill…</button>
+        <button className="secondary-button" onClick={() => void run(() => window.fileNest.refreshAgentSkills())}><RotateCw size={16} />Refresh Skills</button>
+      </div>
+      {groups.map((group) => {
+        const skills = snapshot.agentSkills.filter((skill) => skill.origin === group.origin);
+        return <div className="skill-group" key={group.origin}>
+          <strong>{t(group.title)}</strong><small>{group.hint}</small>
+          {skills.length ? skills.map((skill) => <div className="skill-row" key={skill.skillFilePath}>
+            <div><b>{skill.name}</b><small>{skill.description}</small></div>
+            {skill.origin === "bundled" ? <span className="success-text">Always On</span> : <div className="skill-actions"><label className="switch"><input type="checkbox" checked={skill.enabled} onChange={(event) => void run(() => window.fileNest.setAgentSkillEnabled(skill.skillFilePath, event.target.checked))} /><span /></label>{skill.origin === "managed" && <IconButton label={`Delete ${skill.name}`} onClick={() => { if (confirm(`Delete ${skill.name}?`)) void run(() => window.fileNest.deleteAgentSkill(skill.skillFilePath)); }}><Trash2 size={15} /></IconButton>}</div>}
+          </div>) : <p className="empty-state">No {group.title.toLowerCase()} skills found.</p>}
+        </div>;
+      })}
+      {snapshot.agentSkillDiagnostics.length > 0 && <div className="connection-banner warning"><CircleAlert size={18} /><div>{snapshot.agentSkillDiagnostics.slice(0, 4).map((item) => <p key={`${item.path}:${item.message}`}>{item.message}</p>)}</div></div>}
+    </SettingsSection>
+  </div>;
+}
 
 function GeneralSettings({
   snapshot,
@@ -342,6 +379,7 @@ function IndexSettings({
   const s = snapshot.settings;
   const [reindexMode, setReindexMode] = useState<ReindexMode>("all");
   const [mediaBusy, setMediaBusy] = useState(false);
+  const [customExtensionDraft, setCustomExtensionDraft] = useState("");
   const update = async (patch: Partial<Settings>): Promise<void> => {
     await window.fileNest.updateSettings(patch);
     await onRefresh();
@@ -360,6 +398,18 @@ function IndexSettings({
     } finally {
       setMediaBusy(false);
     }
+  };
+  const addCustomExtension = async (): Promise<void> => {
+    const extension = customExtensionDraft.replace(/^\.+/, "").trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9+_-]{0,31}$/.test(extension)) {
+      alert("Enter a file extension using letters, numbers, +, _, or -.");
+      return;
+    }
+    await update({
+      customFileExtensions: [...new Set([...s.customFileExtensions, extension])],
+      enabledExtensions: [...new Set([...s.enabledExtensions, extension])],
+    });
+    setCustomExtensionDraft("");
   };
   return (
     <div className="settings-sections">
@@ -440,6 +490,17 @@ function IndexSettings({
             }
           />
         </SettingRow>
+        <SettingRow label="Custom File Type" hint="Add a type to the watcher; enable it for vector indexing separately if needed">
+          <div className="inline-field">
+            <input value={customExtensionDraft} placeholder="e.g. log" onChange={(event) => setCustomExtensionDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addCustomExtension(); }} />
+            <button className="secondary-button" onClick={() => void addCustomExtension()}>Add</button>
+          </div>
+        </SettingRow>
+        {s.customFileExtensions.length > 0 && <SettingRow label="Custom Types">
+          <div className="extension-chips">
+            {s.customFileExtensions.map((extension) => <button key={extension} className="extension-chip" onClick={() => void update({ customFileExtensions: s.customFileExtensions.filter((item) => item !== extension), enabledExtensions: s.enabledExtensions.filter((item) => item !== extension), vectorizeExtensions: s.vectorizeExtensions.filter((item) => item !== extension) })}>.{extension} ×</button>)}
+          </div>
+        </SettingRow>}
         <SettingRow label="Exclude Hidden Files">
           <label className="switch">
             <input

@@ -1,0 +1,17 @@
+{
+  "id": "macos-universal-stable-0.3.0-3",
+  "version": "0.3.0",
+  "build": 3,
+  "platform": "macos",
+  "architecture": "universal",
+  "channel": "stable",
+  "published_at": "2026-07-29T10:00:00Z",
+  "download_url": "https://updates.example.com/downloads/FileNest-0.3.0.zip",
+  "file_size": 12345678,
+  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sparkle_ed_signature": "replace-with-output-from-sparkle-sign_update",
+  "minimum_os_version": "13.0",
+  "release_notes_url": "https://updates.example.com/releases/0.3.0",
+  "release_notes": "Performance and reliability improvements.",
+  "critical": false
+}
