@@ -187,13 +187,23 @@ final class DoclingDocumentProcessor: @unchecked Sendable {
     /// normal documents and prevents symbol-heavy font-encoding artifacts from polluting
     /// the file body, lexical index, and embedding space.
     static func removingCorruptedTextLayerChunks(
-        from source: [StructuredDocumentChunk]
+        from source: [StructuredDocumentChunk],
+        readableRecovery: String? = nil
     ) -> [StructuredDocumentChunk] {
         let readableChunks = source.filter { isSubstantiallyReadable($0.text) }
-        guard !readableChunks.isEmpty else { return source }
+        let hasReadableRecovery = readableRecovery.map(isLikelyReadableText) ?? false
+        guard !readableChunks.isEmpty || hasReadableRecovery else { return source }
 
         let filtered = source.filter { !isLikelyCorruptedTextLayer($0.text) }
-        return filtered.isEmpty ? source : filtered
+        return filtered.isEmpty && !hasReadableRecovery ? source : filtered
+    }
+
+    static func isLikelyReadableText(_ text: String) -> Bool {
+        let metrics = textQualityMetrics(text)
+        let semanticRatio = metrics.letterRatio + metrics.digitRatio
+        return metrics.total >= 12
+            && metrics.letterRatio >= 0.10
+            && semanticRatio >= 0.35
     }
 
     private static func isSubstantiallyReadable(_ text: String) -> Bool {
@@ -201,7 +211,7 @@ final class DoclingDocumentProcessor: @unchecked Sendable {
         return metrics.total >= 80 && metrics.letterRatio >= 0.25
     }
 
-    private static func isLikelyCorruptedTextLayer(_ text: String) -> Bool {
+    static func isLikelyCorruptedTextLayer(_ text: String) -> Bool {
         let metrics = textQualityMetrics(text)
         guard metrics.total >= 24 else { return false }
         return metrics.letterRatio <= 0.01

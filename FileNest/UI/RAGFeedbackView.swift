@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RAGFeedbackDraft {
     var rating: RAGFeedbackRating
@@ -304,61 +305,107 @@ struct RAGFeedbackEditor: View {
 }
 
 struct AISkillsSettingsView: View {
+    private enum SkillTab: String, CaseIterable, Identifiable {
+        case builtIn
+        case fileNest
+        case shared
+
+        var id: Self { self }
+
+        var titleKey: String {
+            switch self {
+            case .builtIn: return "Built-in"
+            case .fileNest: return "FileNest Learning"
+            case .shared: return "Shared Skills"
+            }
+        }
+    }
+
     @EnvironmentObject private var appState: AppState
     @State private var pendingDeletion: AgentSkill?
+    @State private var isImportingSkill = false
+    @State private var importError: String?
+    @State private var selectedSkillTab: SkillTab = .builtIn
 
     var body: some View {
         Form {
             Section {
                 HStack {
-                    Button(appState.settings.localized("Open Skills Folder")) {
-                        appState.revealAgentSkillsFolder()
-                    }
-                    .buttonStyle(QuietButtonStyle(compact: true))
-                    Button(appState.settings.localized("Refresh Skills")) {
-                        appState.refreshRAGLearningState()
-                    }
-                    .buttonStyle(QuietButtonStyle(compact: true))
                     Spacer()
+                    Button {
+                        appState.revealAgentSkillsFolder()
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(QuietButtonStyle(compact: true))
+                    .help(appState.settings.localized("Open Skills Folder"))
+                    .accessibilityLabel(appState.settings.localized("Open Skills Folder"))
+                    Button {
+                        appState.refreshRAGLearningState()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(QuietButtonStyle(compact: true))
+                    .help(appState.settings.localized("Refresh Skills"))
+                    .accessibilityLabel(appState.settings.localized("Refresh Skills"))
+                    Button {
+                        isImportingSkill = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                    .buttonStyle(QuietButtonStyle(compact: true))
+                    .help(appState.settings.localized("Import Skill…"))
+                    .accessibilityLabel(appState.settings.localized("Import Skill…"))
+                }
+
+                Picker(appState.settings.localized("Skill Source"), selection: $selectedSkillTab) {
+                    ForEach(SkillTab.allCases) { tab in
+                        Text(appState.settings.localized(tab.titleKey)).tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                HStack {
                     Text(appState.settings.localizedFormat(
-                        "%d standard skills",
-                        appState.installedAgentSkills.count
+                        "%d skills",
+                        skillsForSelectedTab.count
                     ))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
+                    Spacer()
                 }
 
-                if appState.installedAgentSkills.isEmpty {
+                if skillsForSelectedTab.isEmpty {
                     VStack(spacing: 10) {
                         Image(systemName: "brain.head.profile")
                             .font(.system(size: 28, weight: .light))
                             .foregroundStyle(.secondary)
-                        Text(verbatim: appState.settings.localized("No Standard Skills Found"))
+                        Text(verbatim: appState.settings.localized(emptyTitleKey))
                             .font(.system(size: 14, weight: .semibold))
                         Text(verbatim: appState.settings.localized(
-                            "Add a SKILL.md package to the FileNest or shared Agent Skills folder."
+                            emptyDescriptionKey
                         ))
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, minHeight: 150)
                 } else {
-                    ForEach(appState.installedAgentSkills) { skill in
-                        AgentSkillRow(
-                            skill: skill,
-                            setEnabled: {
-                                appState.setAgentSkillEnabled(skill, enabled: $0)
-                            },
-                            delete: skill.isManaged ? { pendingDeletion = skill } : nil
-                        )
-                    }
+                    skillGroup(skillsForSelectedTab)
                 }
             } header: {
                 Text(verbatim: appState.settings.localized("Agent Skills"))
             } footer: {
                 Text(verbatim: appState.settings.localized(
-                    "FileNest discovers standard SKILL.md packages and loads their instructions only when a task activates them."
+                    "Built-in skills are always enabled. FileNest Learning skills can be enabled or disabled, while Shared Skills stay disabled until you enable them."
                 ))
+            }
+
+            if let importError {
+                Section {
+                    Label(importError, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(FileNestTheme.warning)
+                        .font(.system(size: 11))
+                }
             }
 
             if !appState.agentSkillDiagnostics.isEmpty {
@@ -394,6 +441,12 @@ struct AISkillsSettingsView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
+
+                Text(verbatim: appState.settings.localized(
+                    "Feedback analysis refines FileNest Learning skills; it does not change Built-in or Shared Skills."
+                ))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
 
                 if appState.ragFeedbackRecords.isEmpty {
                     Text(verbatim: appState.settings.localized(
@@ -435,6 +488,21 @@ struct AISkillsSettingsView: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .onAppear { appState.refreshRAGLearningState() }
+        .fileImporter(
+            isPresented: $isImportingSkill,
+            allowedContentTypes: [.plainText, .text],
+            allowsMultipleSelection: false
+        ) { result in
+            guard case let .success(urls) = result, let url = urls.first else { return }
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            do {
+                try appState.importAgentSkillPackage(from: url)
+                importError = nil
+            } catch {
+                importError = error.localizedDescription
+            }
+        }
         .confirmationDialog(
             appState.settings.localized("Delete AI Skill?"),
             isPresented: Binding(
@@ -476,6 +544,50 @@ struct AISkillsSettingsView: View {
         }
     }
 
+    private var skillsForSelectedTab: [AgentSkill] {
+        switch selectedSkillTab {
+        case .builtIn:
+            return appState.installedAgentSkills.filter { $0.origin == .bundled }
+        case .fileNest:
+            return appState.installedAgentSkills.filter { $0.origin == .managed }
+        case .shared:
+            return appState.installedAgentSkills.filter { $0.origin == .sharedUser }
+        }
+    }
+
+    private var emptyTitleKey: String {
+        switch selectedSkillTab {
+        case .builtIn: return "No Built-in Skills Found"
+        case .fileNest: return "No FileNest Learning Skills Found"
+        case .shared: return "No Shared Skills Found"
+        }
+    }
+
+    private var emptyDescriptionKey: String {
+        switch selectedSkillTab {
+        case .builtIn:
+            return "Built-in Skills are included with FileNest."
+        case .fileNest:
+            return "Import a SKILL.md package to add it to FileNest Learning."
+        case .shared:
+            return "Add standard SKILL.md packages to the shared Agent Skills folder."
+        }
+    }
+
+    private func skillGroup(_ skills: [AgentSkill]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(skills) { skill in
+                AgentSkillRow(
+                    skill: skill,
+                    setEnabled: skill.origin == .bundled
+                        ? nil
+                        : { appState.setAgentSkillEnabled(skill, enabled: $0) },
+                    delete: skill.isManaged ? { pendingDeletion = skill } : nil
+                )
+            }
+        }
+    }
+
     private func sourceTitle(_ feedback: RAGFeedbackRecord) -> String {
         switch RAGFeedbackSourceKind(rawValue: feedback.sourceKind) ?? .chat {
         case .chat:
@@ -514,7 +626,7 @@ struct AISkillsSettingsView: View {
 private struct AgentSkillRow: View {
     @EnvironmentObject private var appState: AppState
     let skill: AgentSkill
-    let setEnabled: (Bool) -> Void
+    let setEnabled: ((Bool) -> Void)?
     let delete: (() -> Void)?
 
     var body: some View {
@@ -532,13 +644,19 @@ private struct AgentSkillRow: View {
                     .frame(height: 19)
                     .background(FileNestTheme.elevatedSurface, in: Capsule())
                 Spacer()
-                Toggle(appState.settings.localized("Enabled"), isOn: Binding(
-                    get: { skill.enabled },
-                    set: setEnabled
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
+                if let setEnabled {
+                    Toggle(appState.settings.localized("Enabled"), isOn: Binding(
+                        get: { skill.enabled },
+                        set: setEnabled
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                } else {
+                    Label(appState.settings.localized("Always On"), systemImage: "lock.fill")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(FileNestTheme.success)
+                }
                 if let delete {
                     Button(role: .destructive, action: delete) {
                         Image(systemName: "trash")
@@ -577,7 +695,7 @@ private struct AgentSkillRow: View {
         switch skill.origin {
         case .bundled: return "Built In"
         case .sharedUser: return "Shared User"
-        case .managed: return "FileNest Managed"
+        case .managed: return "FileNest Learning"
         }
     }
 

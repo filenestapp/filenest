@@ -17,32 +17,18 @@ final class OllamaLLMProvider: LLMProvider {
     }
 
     func chat(_ messages: [ChatTurn], context: String?) async throws -> String {
-        guard let url = URL(string: "\(host)/api/chat") else { throw URLError(.badURL) }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 120
+        try await chat(messages, context: context, requestTimeout: nil)
+    }
 
-        var msgs: [[String: String]] = messages.map { ["role": $0.role.rawValue, "content": $0.content] }
-        // Prepend retrieval context as a system message when present.
-        if let context, !context.isEmpty {
-            msgs.insert(["role": "system", "content": context], at: 0)
-        }
-        var body: [String: Any] = ["model": model, "messages": msgs, "stream": false]
-        // Some Ollama models enable reasoning by default unless false is explicit.
-        body["think"] = thinkingEnabled
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, resp) = try await session.data(for: req)
-        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
-        }
-        if let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let m = obj["message"] as? [String: Any],
-           let content = m["content"] as? String {
-            return content
-        }
-        throw URLError(.cannotParseResponse)
+    func chat(
+        _ messages: [ChatTurn],
+        context: String?,
+        requestTimeout: TimeInterval?
+    ) async throws -> String {
+        try await LLMRequestTimeout.collect(
+            streamChat(messages, context: context),
+            totalTimeout: requestTimeout ?? LLMRequestTimeout.total
+        )
     }
 
     func chatWithImage(
@@ -51,33 +37,14 @@ final class OllamaLLMProvider: LLMProvider {
         mimeType: String,
         context: String?
     ) async throws -> String {
-        guard let url = URL(string: "\(host)/api/chat") else { throw URLError(.badURL) }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 120
-
-        var messages = [[String: Any]]()
-        if let context, !context.isEmpty {
-            messages.append(["role": "system", "content": context])
-        }
-        messages.append([
-            "role": "user",
-            "content": prompt,
-            "images": [imageData.base64EncodedString()],
-        ])
-        var body: [String: Any] = ["model": model, "messages": messages, "stream": false]
-        body["think"] = thinkingEnabled
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await session.data(for: request)
-        try validateLLMResponse(response)
-        if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let message = object["message"] as? [String: Any],
-           let content = message["content"] as? String {
-            return content
-        }
-        throw URLError(.cannotParseResponse)
+        try await LLMRequestTimeout.collect(
+            streamChatWithImage(
+                prompt: prompt,
+                imageData: imageData,
+                mimeType: mimeType,
+                context: context
+            )
+        )
     }
 
     func streamChatWithImage(
@@ -93,7 +60,7 @@ final class OllamaLLMProvider: LLMProvider {
                     var request = URLRequest(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    request.timeoutInterval = 120
+                    request.timeoutInterval = LLMRequestTimeout.firstResponse
 
                     var messages = [[String: Any]]()
                     if let context, !context.isEmpty {
@@ -108,6 +75,9 @@ final class OllamaLLMProvider: LLMProvider {
                         "model": model,
                         "messages": messages,
                         "stream": true,
+                        // Keep the runner warm across map/reduce calls. This preserves model state
+                        // and lets Ollama reuse any implementation-level prefix cache when available.
+                        "keep_alive": "10m",
                     ]
                     body["think"] = self.thinkingEnabled
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -139,6 +109,14 @@ final class OllamaLLMProvider: LLMProvider {
     }
 
     func streamChat(_ messages: [ChatTurn], context: String?) -> AsyncThrowingStream<String, Error> {
+        streamChat(messages, context: context, responseFormat: .text)
+    }
+
+    func streamChat(
+        _ messages: [ChatTurn],
+        context: String?,
+        responseFormat: LLMResponseFormat
+    ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -146,7 +124,7 @@ final class OllamaLLMProvider: LLMProvider {
                     var request = URLRequest(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    request.timeoutInterval = 120
+                    request.timeoutInterval = LLMRequestTimeout.firstResponse
 
                     var payload = messages.map { ["role": $0.role.rawValue, "content": $0.content] }
                     if let context, !context.isEmpty {
@@ -156,8 +134,22 @@ final class OllamaLLMProvider: LLMProvider {
                         "model": model,
                         "messages": payload,
                         "stream": true,
+                        "keep_alive": "10m",
                     ]
                     body["think"] = self.thinkingEnabled
+                    switch responseFormat {
+                    case .text:
+                        break
+                    case .jsonObject:
+                        body["format"] = "json"
+                    case let .jsonSchema(schema):
+                        if let data = schema.data(using: .utf8),
+                           let object = try? JSONSerialization.jsonObject(with: data) {
+                            body["format"] = object
+                        } else {
+                            body["format"] = "json"
+                        }
+                    }
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                     let (bytes, response) = try await session.bytes(for: request)
@@ -205,36 +197,18 @@ final class OpenAICompatibleLLMProvider: LLMProvider {
     }
 
     func chat(_ messages: [ChatTurn], context: String?) async throws -> String {
-        guard !apiKey.isEmpty else { throw NSError(domain: "filenest", code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Cloud API key is not configured"]) }
-        guard let url = providerEndpoint(baseURL: baseURL, path: "chat/completions") else {
-            throw URLError(.badURL)
-        }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        req.timeoutInterval = 60
+        try await chat(messages, context: context, requestTimeout: nil)
+    }
 
-        var msgs: [[String: Any]] = messages.map { ["role": $0.role.rawValue, "content": $0.content] }
-        if let context, !context.isEmpty {
-            msgs.insert(["role": "system", "content": context], at: 0)
-        }
-        var body: [String: Any] = ["model": model, "messages": msgs, "stream": false]
-        if thinkingEnabled { body["reasoning_effort"] = "medium" }
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, resp) = try await session.data(for: req)
-        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
-        }
-        if let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let choices = obj["choices"] as? [[String: Any]],
-           let msg = choices.first?["message"] as? [String: Any],
-           let content = msg["content"] as? String {
-            return content
-        }
-        throw URLError(.cannotParseResponse)
+    func chat(
+        _ messages: [ChatTurn],
+        context: String?,
+        requestTimeout: TimeInterval?
+    ) async throws -> String {
+        try await LLMRequestTimeout.collect(
+            streamChat(messages, context: context),
+            totalTimeout: requestTimeout ?? LLMRequestTimeout.total
+        )
     }
 
     func chatWithImage(
@@ -243,41 +217,14 @@ final class OpenAICompatibleLLMProvider: LLMProvider {
         mimeType: String,
         context: String?
     ) async throws -> String {
-        guard !apiKey.isEmpty else { throw providerError("Cloud API key is not configured") }
-        guard let url = providerEndpoint(baseURL: baseURL, path: "chat/completions") else {
-            throw URLError(.badURL)
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 120
-
-        let dataURL = "data:\(mimeType);base64,\(imageData.base64EncodedString())"
-        var messages = [[String: Any]]()
-        if let context, !context.isEmpty {
-            messages.append(["role": "system", "content": context])
-        }
-        messages.append([
-            "role": "user",
-            "content": [
-                ["type": "text", "text": prompt],
-                ["type": "image_url", "image_url": ["url": dataURL]],
-            ],
-        ])
-        var body: [String: Any] = ["model": model, "messages": messages, "stream": false]
-        if thinkingEnabled { body["reasoning_effort"] = "medium" }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await session.data(for: request)
-        try validateLLMResponse(response)
-        if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let choices = object["choices"] as? [[String: Any]],
-           let message = choices.first?["message"] as? [String: Any],
-           let content = message["content"] as? String {
-            return content
-        }
-        throw URLError(.cannotParseResponse)
+        try await LLMRequestTimeout.collect(
+            streamChatWithImage(
+                prompt: prompt,
+                imageData: imageData,
+                mimeType: mimeType,
+                context: context
+            )
+        )
     }
 
     func streamChatWithImage(
@@ -297,7 +244,7 @@ final class OpenAICompatibleLLMProvider: LLMProvider {
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                    request.timeoutInterval = 120
+                    request.timeoutInterval = LLMRequestTimeout.firstResponse
 
                     let dataURL = "data:\(mimeType);base64,\(imageData.base64EncodedString())"
                     var messages = [[String: Any]]()
@@ -344,6 +291,14 @@ final class OpenAICompatibleLLMProvider: LLMProvider {
     }
 
     func streamChat(_ messages: [ChatTurn], context: String?) -> AsyncThrowingStream<String, Error> {
+        streamChat(messages, context: context, responseFormat: .text)
+    }
+
+    func streamChat(
+        _ messages: [ChatTurn],
+        context: String?,
+        responseFormat: LLMResponseFormat
+    ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -355,7 +310,7 @@ final class OpenAICompatibleLLMProvider: LLMProvider {
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                    request.timeoutInterval = 120
+                    request.timeoutInterval = LLMRequestTimeout.firstResponse
 
                     var payload = messages.map { ["role": $0.role.rawValue, "content": $0.content] }
                     if let context, !context.isEmpty {
@@ -366,6 +321,22 @@ final class OpenAICompatibleLLMProvider: LLMProvider {
                         "messages": payload,
                         "stream": true,
                     ]
+                    switch responseFormat {
+                    case .text:
+                        break
+                    case .jsonObject:
+                        body["response_format"] = ["type": "json_object"]
+                    case let .jsonSchema(schema):
+                        if let data = schema.data(using: .utf8),
+                           let object = try? JSONSerialization.jsonObject(with: data) {
+                            body["response_format"] = [
+                                "type": "json_schema",
+                                "json_schema": ["name": "filenest_long_document", "strict": true, "schema": object],
+                            ]
+                        } else {
+                            body["response_format"] = ["type": "json_object"]
+                        }
+                    }
                     if self.thinkingEnabled { body["reasoning_effort"] = "medium" }
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -413,59 +384,18 @@ final class AnthropicLLMProvider: LLMProvider {
     }
 
     func chat(_ messages: [ChatTurn], context: String?) async throws -> String {
-        guard !apiKey.isEmpty else {
-            throw NSError(
-                domain: "filenest",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Cloud API key is not configured"]
-            )
-        }
-        guard let url = providerEndpoint(baseURL: baseURL, path: "messages") else {
-            throw URLError(.badURL)
-        }
+        try await chat(messages, context: context, requestTimeout: nil)
+    }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.timeoutInterval = 60
-
-        let systemParts = ([context].compactMap { value in
-            guard let value, !value.isEmpty else { return nil }
-            return value
-        } + messages.filter { $0.role == .system }.map(\.content))
-        let messagePayload: [[String: String]] = messages.compactMap { turn in
-            guard turn.role != .system else { return nil }
-            return ["role": turn.role.rawValue, "content": turn.content]
-        }
-
-        var body: [String: Any] = [
-            "model": model,
-            "max_tokens": 4_096,
-            "messages": messagePayload,
-        ]
-        if !systemParts.isEmpty {
-            body["system"] = systemParts.joined(separator: "\n\n")
-        }
-        if thinkingEnabled {
-            body["thinking"] = ["type": "enabled", "budget_tokens": 1_024]
-        }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
-        }
-        if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let blocks = object["content"] as? [[String: Any]] {
-            let text = blocks.compactMap { block -> String? in
-                guard block["type"] as? String == "text" else { return nil }
-                return block["text"] as? String
-            }.joined()
-            if !text.isEmpty { return text }
-        }
-        throw URLError(.cannotParseResponse)
+    func chat(
+        _ messages: [ChatTurn],
+        context: String?,
+        requestTimeout: TimeInterval?
+    ) async throws -> String {
+        try await LLMRequestTimeout.collect(
+            streamChat(messages, context: context),
+            totalTimeout: requestTimeout ?? LLMRequestTimeout.total
+        )
     }
 
     func chatWithImage(
@@ -474,48 +404,14 @@ final class AnthropicLLMProvider: LLMProvider {
         mimeType: String,
         context: String?
     ) async throws -> String {
-        guard !apiKey.isEmpty else { throw providerError("Cloud API key is not configured") }
-        guard let url = providerEndpoint(baseURL: baseURL, path: "messages") else {
-            throw URLError(.badURL)
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.timeoutInterval = 120
-
-        var body: [String: Any] = [
-            "model": model,
-            "max_tokens": 1_024,
-            "messages": [[
-                "role": "user",
-                "content": [
-                    ["type": "image", "source": [
-                        "type": "base64",
-                        "media_type": mimeType,
-                        "data": imageData.base64EncodedString(),
-                    ]],
-                    ["type": "text", "text": prompt],
-                ],
-            ]],
-        ]
-        if let context, !context.isEmpty { body["system"] = context }
-        if thinkingEnabled {
-            body["thinking"] = ["type": "enabled", "budget_tokens": 1_024]
-        }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await session.data(for: request)
-        try validateLLMResponse(response)
-        if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let blocks = object["content"] as? [[String: Any]] {
-            let text = blocks.compactMap { block -> String? in
-                block["type"] as? String == "text" ? block["text"] as? String : nil
-            }.joined()
-            if !text.isEmpty { return text }
-        }
-        throw URLError(.cannotParseResponse)
+        try await LLMRequestTimeout.collect(
+            streamChatWithImage(
+                prompt: prompt,
+                imageData: imageData,
+                mimeType: mimeType,
+                context: context
+            )
+        )
     }
 
     func streamChatWithImage(
@@ -536,7 +432,7 @@ final class AnthropicLLMProvider: LLMProvider {
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
                     request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-                    request.timeoutInterval = 120
+                    request.timeoutInterval = LLMRequestTimeout.firstResponse
 
                     var body: [String: Any] = [
                         "model": model,
@@ -605,7 +501,7 @@ final class AnthropicLLMProvider: LLMProvider {
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
                     request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-                    request.timeoutInterval = 120
+                    request.timeoutInterval = LLMRequestTimeout.firstResponse
 
                     let systemParts = ([context].compactMap { value in
                         guard let value, !value.isEmpty else { return nil }
@@ -797,6 +693,7 @@ final class CompatibleRerankingProvider: RerankingProvider, @unchecked Sendable 
             "documents": documents,
             "top_n": min(max(1, topN), documents.count),
         ])
+        let startedAt = Date()
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode) else {
@@ -808,6 +705,27 @@ final class CompatibleRerankingProvider: RerankingProvider, @unchecked Sendable 
               let rawResults = (object["results"] ?? object["data"]) as? [[String: Any]] else {
             throw RerankingError.invalidResponse
         }
+        var timingMetadata = [
+            "documents": "\(documents.count)",
+            "provider": name,
+            "requestMs": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))",
+        ]
+        if let serviceMetadata = object["_meta"] as? [String: Any] {
+            for key in [
+                "device", "document_count", "inference_ms", "queue_ms",
+                "tokenize_ms", "total_ms",
+            ] {
+                if let value = serviceMetadata[key] {
+                    timingMetadata["service_\(key)"] = "\(value)"
+                }
+            }
+        }
+        AppLogService.shared.write(
+            "reranker request completed",
+            category: .vectorSearch,
+            level: .debug,
+            metadata: timingMetadata
+        )
         return rawResults.compactMap { value in
             guard let index = value["index"] as? Int else { return nil }
             let score = (value["relevance_score"] as? NSNumber)?.doubleValue

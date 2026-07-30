@@ -44,7 +44,7 @@ struct MainView: View {
     var body: some View {
         Group {
             if appState.isSettingsPresented {
-                SettingsView(onBack: appState.dismissSettings)
+                settingsWorkspace
                     .transition(.opacity)
             } else {
                 mainWorkspace
@@ -96,6 +96,28 @@ struct MainView: View {
         }
     }
 
+    private var settingsWorkspace: some View {
+        HStack(spacing: 0) {
+            SettingsView(onBack: appState.dismissSettings)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if let previewedFile = appState.previewedFile {
+                Rectangle()
+                    .fill(FileNestTheme.border)
+                    .frame(width: FileNestLayout.dividerWidth)
+
+                FilePreviewView(
+                    file: previewedFile,
+                    startDocumentChat: startDocumentChat
+                )
+                .id(previewedFile.id.map(String.init) ?? previewedFile.path)
+                .frame(width: FileNestLayout.inspectorWidth)
+                .frame(maxHeight: .infinity)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+    }
+
     private var mainWorkspace: some View {
         HStack(spacing: 0) {
             if !isSidebarCollapsed {
@@ -106,12 +128,12 @@ struct MainView: View {
                     ),
                     openSettings: openSettings
                 )
-                .frame(width: 255)
+                .frame(width: FileNestLayout.sidebarWidth)
                 .transition(.move(edge: .leading).combined(with: .opacity))
 
                 Rectangle()
                     .fill(FileNestTheme.border)
-                    .frame(width: 1)
+                    .frame(width: FileNestLayout.dividerWidth)
                     .transition(.opacity)
             }
 
@@ -145,7 +167,7 @@ struct MainView: View {
                     startDocumentChat: startDocumentChat
                 )
                 .id(previewedFile.id.map(String.init) ?? previewedFile.path)
-                .frame(width: 334)
+                .frame(width: FileNestLayout.inspectorWidth)
                 .frame(maxHeight: .infinity)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
@@ -218,6 +240,9 @@ struct MainView: View {
     private func startDocumentChat(_ file: FileRecord) {
         guard !FileNestEnvironment.isUIPreview else { return }
         appState.startFileChat(attachedFilePath: file.path, returnDestination: .library)
+        if appState.isSettingsPresented {
+            appState.dismissSettings()
+        }
         setMainSelection(.chat)
     }
 
@@ -552,6 +577,7 @@ private struct SidebarStatusBar: View {
         case .stopping: return "stop.circle"
         case .stopped: return "stop.circle.fill"
         case .completed: return "checkmark.circle.fill"
+        case .completedWithErrors: return "exclamationmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
         case .idle: return appState.indexedCount > 0 ? "checkmark.seal.fill" : "magnifyingglass"
         }
@@ -567,6 +593,7 @@ private struct SidebarStatusBar: View {
         case .running, .stopping: return FileNestTheme.accentBlue
         case .paused, .stopped: return .secondary
         case .failed: return FileNestTheme.warning
+        case .completedWithErrors: return FileNestTheme.warning
         case .completed: return FileNestTheme.success
         case .idle: return appState.indexedCount > 0 ? FileNestTheme.success : .secondary
         }

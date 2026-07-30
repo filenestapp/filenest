@@ -108,6 +108,7 @@ enum IndexingTaskState: Equatable, Sendable {
     case stopping
     case stopped
     case completed
+    case completedWithErrors
     case failed
 
     var isActive: Bool {
@@ -119,6 +120,30 @@ enum IndexingTaskState: Equatable, Sendable {
     }
 
     var blocksReindexButtons: Bool { isActive }
+}
+
+enum IndexingCompletionOutcome: Equatable, Sendable {
+    case completed
+    case completedWithErrors
+    case failed
+    case stopped
+
+    init(
+        stopped: Bool,
+        operationSucceeded: Bool,
+        successfulFiles: Int,
+        failedFiles: Int
+    ) {
+        if stopped {
+            self = .stopped
+        } else if operationSucceeded {
+            self = .completed
+        } else if failedFiles > 0, successfulFiles > 0 {
+            self = .completedWithErrors
+        } else {
+            self = .failed
+        }
+    }
 }
 
 enum OrganizationTaskState: Equatable, Sendable {
@@ -571,7 +596,8 @@ final class AppState: ObservableObject {
         case .stopping: return "Stopping Indexing"
         case .stopped: return "Indexing Stopped"
         case .completed: return "Indexing Complete"
-        case .failed: return "Indexing Finished with Errors"
+        case .completedWithErrors: return "Indexing Completed with Errors"
+        case .failed: return "Indexing Failed"
         }
     }
 
@@ -1131,12 +1157,11 @@ final class AppState: ObservableObject {
             let records = ids.compactMap { try? self.store.file(id: $0) }
             let result = await self.indexer.indexFiles(
                 records,
-                checkpoint: { [indexingGate = self.indexingGate] in
-                    await indexingGate.waitUntilRunnable()
-                }
-            ) { [weak self] progress in
+                executionGate: self.indexingGate,
+                progress: { [weak self] progress in
                 self?.vectorIndexRebuildProgress = progress
-            }
+                }
+            )
             let wasStopped = result.stopped || self.indexingState == .stopping || Task.isCancelled
             ids.forEach { self.managedSyncIndexIDs.remove($0) }
             self.managedSyncIndexTask = nil
@@ -1322,6 +1347,11 @@ final class AppState: ObservableObject {
         } else {
             presentFilePreview(file)
         }
+    }
+
+    func toggleFilePreview(fileID: Int64) {
+        guard let file = try? store.file(id: fileID) else { return }
+        toggleFilePreview(file)
     }
 
     func presentAttachedFilePreview(path: String) {
@@ -1741,9 +1771,12 @@ final class AppState: ObservableObject {
                 return
             }
 
-            self.prioritizeLibrarySearchOverIndexing()
+            let indexingPauseTask = self.prioritizeLibrarySearchOverIndexing()
             switch mode {
             case .standard:
+                if let indexingPauseTask {
+                    _ = await indexingPauseTask.value
+                }
                 let quickResults = await self.managedQuickSearchResults(
                     matching: query,
                     categories: categories,
@@ -1799,6 +1832,11 @@ final class AppState: ObservableObject {
                     onStage: { [weak self] stage in
                         Task { @MainActor [weak self] in
                             self?.transitionLibrarySearch(id: activity.id, to: stage)
+                        }
+                    },
+                    beforeRetrieval: {
+                        if let indexingPauseTask {
+                            _ = await indexingPauseTask.value
                         }
                     }
                 )
@@ -1939,9 +1977,9 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func prioritizeLibrarySearchOverIndexing() {
+    private func prioritizeLibrarySearchOverIndexing() -> Task<Bool, Never>? {
         guard !librarySearchTemporarilyPausedIndexing,
-              indexingState == .running else { return }
+              indexingState == .running else { return nil }
         librarySearchTemporarilyPausedIndexing = true
         indexingState = .paused
         statusText = "Indexing Paused for Search"
@@ -1951,7 +1989,7 @@ final class AppState: ObservableObject {
             category: .searchLifecycle,
             metadata: ["kind": indexingKind.logName]
         )
-        Task { await indexingGate.pause() }
+        return Task { await indexingGate.pauseAndDrain() }
     }
 
     private func restoreIndexingAfterLibrarySearch() {
@@ -2221,6 +2259,13 @@ final class AppState: ObservableObject {
 
     func setAgentSkillEnabled(_ skill: AgentSkill, enabled: Bool) {
         agentSkills.setEnabled(skill, enabled: enabled)
+        // Bundled skills are a fixed product baseline.  Do not let an attempted UI
+        // toggle disable the legacy mirror either, otherwise a later migration can
+        // produce an inconsistent managed state.
+        guard skill.origin != .bundled else {
+            refreshRAGLearningState()
+            return
+        }
         if let legacy = aiSystemSkills.first(where: { $0.key == skill.name }),
            let id = legacy.id {
             try? store.setAISystemSkillEnabled(id: id, enabled: enabled)
@@ -2254,6 +2299,11 @@ final class AppState: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([agentSkills.managedDirectory])
     }
 
+    func importAgentSkillPackage(from skillFileURL: URL) throws {
+        _ = try agentSkills.importSkillPackage(from: skillFileURL)
+        refreshRAGLearningState()
+    }
+
     private func scheduleRAGFeedbackAnalysis(_ id: Int64?) {
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -2266,7 +2316,8 @@ final class AppState: ObservableObject {
         matching query: String,
         categories: Set<FileCategory> = [],
         onIntentUpdate: ((String) -> Void)? = nil,
-        onStage: ((LibrarySearchProgressStage) -> Void)? = nil
+        onStage: ((LibrarySearchProgressStage) -> Void)? = nil,
+        beforeRetrieval: (() async -> Void)? = nil
     ) async -> SmartLibrarySearchResponse {
         let startedAt = Date()
         let response = await chat.smartSearchLibrary(
@@ -2274,7 +2325,8 @@ final class AppState: ObservableObject {
             managedRootPath: organizer.organizeRoot.standardizedFileURL.path,
             allowedCategories: categories,
             onIntentUpdate: onIntentUpdate,
-            onStage: onStage
+            onStage: onStage,
+            beforeRetrieval: beforeRetrieval
         )
         logLibrarySearchPerformance(
             mode: "smart",
@@ -2844,6 +2896,7 @@ final class AppState: ObservableObject {
     }
 
     func dismissSettings() {
+        closeFilePreview()
         isSettingsPresented = false
     }
 
@@ -3448,6 +3501,7 @@ final class AppState: ObservableObject {
             && !forcesSourceReprocessing
             && !rebuildEmbedding
         let restartsReranker = stages.contains(.rerankerRuntime)
+        let explicitlyRequestsFullPipeline = isFullPipelineReindexSelected
         guard !stages.isEmpty || includeUnindexedFiles else { return }
         reindexConfirmationStep = nil
         selectedAdvancedReindexCategories = []
@@ -3468,6 +3522,11 @@ final class AppState: ObservableObject {
             guard forcesSourceReprocessing || rebuildEmbedding || retrievalIndexOnly || includeUnindexedFiles else {
                 return
             }
+            if !explicitlyRequestsFullPipeline,
+               self.reindexJobSummary?.failed ?? 0 > 0,
+               self.resumePendingReindexIfNeeded() {
+                return
+            }
             _ = self.startReindex(
                 kind: forcesSourceReprocessing
                     ? .fullReindex
@@ -3485,6 +3544,10 @@ final class AppState: ObservableObject {
     }
 
     func rebuildVectorIndex() {
+        if reindexJobSummary?.failed ?? 0 > 0,
+           resumePendingReindexIfNeeded() {
+            return
+        }
         startReindex(kind: .vectorRebuild, rebuildVectorSpace: true)
     }
 
@@ -3499,7 +3562,7 @@ final class AppState: ObservableObject {
         indexingState = .paused
         statusText = "Indexing Paused"
         updateProgressPhase(.paused)
-        Task { await indexingGate.pause() }
+        Task { await indexingGate.pauseAndDrain() }
     }
 
     func resumeIndexing() {
@@ -3536,7 +3599,12 @@ final class AppState: ObservableObject {
     }
 
     func restartIndexing() {
-        guard indexingState == .stopped || indexingState == .failed || indexingState == .completed else { return }
+        guard indexingState == .stopped
+                || indexingState == .failed
+                || indexingState == .completed
+                || indexingState == .completedWithErrors else {
+            return
+        }
         if lastIndexingKind == .automatic {
             indexingState = .idle
             vectorIndexRebuildProgress = nil
@@ -3564,6 +3632,194 @@ final class AppState: ObservableObject {
             _ = resumePendingReindexIfNeeded()
         } else {
             restartIndexing()
+        }
+    }
+
+    func retryFailedReindexFiles(_ fileIDs: Set<Int64>) {
+        guard !fileIDs.isEmpty,
+              reindexTask == nil,
+              managedSyncIndexTask == nil,
+              !indexingState.isActive,
+              let summary = reindexJobSummary,
+              let jobID = summary.job.id else {
+            return
+        }
+        let visibleFailedIDs = Set(
+            summary.files
+                .filter { $0.state == .failed }
+                .map(\.fileID)
+        )
+        let requestedIDs = fileIDs.intersection(visibleFailedIDs)
+        guard !requestedIDs.isEmpty else { return }
+        let targetFiles = requestedIDs.compactMap { try? store.file(id: $0) }
+        let targetIDs = Set(targetFiles.compactMap(\.id))
+        guard !targetFiles.isEmpty, !targetIDs.isEmpty else { return }
+        if summary.job.rebuildVectorSpace, !summary.job.forceSourceReprocessing {
+            AppLogService.shared.write(
+                "embedding-space retries must run together to preserve atomic vector replacement",
+                category: .indexPipeline,
+                level: .notice,
+                metadata: ["jobID": "\(jobID)"]
+            )
+            resumeReindexJobFromSettings()
+            return
+        }
+
+        do {
+            let preparedCount = try store.prepareFailedReindexFilesForRetry(
+                jobID: jobID,
+                fileIDs: targetIDs
+            )
+            guard preparedCount > 0 else { return }
+        } catch {
+            AppLogService.shared.write(
+                "failed to prepare reindex files for retry: \(error)",
+                category: .indexPipeline,
+                level: .error,
+                metadata: ["jobID": "\(jobID)"]
+            )
+            return
+        }
+
+        let kind: IndexingTaskKind = summary.job.kind == IndexingTaskKind.vectorRebuild.logName
+            ? .vectorRebuild
+            : .fullReindex
+        activeReindexJobID = jobID
+        store.setReindexJobStatus(jobID: jobID, status: .running)
+        refreshReindexJobSummary()
+        let usesShadowRetry = summary.job.rebuildVectorSpace
+            && summary.job.forceSourceReprocessing
+        let retryTotal = usesShadowRetry ? summary.total : targetFiles.count
+        let retryInitialCompleted = usesShadowRetry ? summary.completed : 0
+        beginIndexing(
+            kind: kind,
+            total: retryTotal,
+            initialCompleted: retryInitialCompleted
+        )
+
+        reindexTask = Task { [weak self] in
+            guard let self else { return }
+            await self.indexingGate.reset()
+            let progressHandler: @MainActor (VectorIndexRebuildProgress) -> Void = { [weak self] progress in
+                guard let self else { return }
+                self.vectorIndexRebuildProgress = progress
+                if self.indexingState != .paused && self.indexingState != .stopping {
+                    self.statusText = self.indexingStatusTitle
+                }
+            }
+            let completionHandler: @Sendable (Int64, Bool) async -> Void = {
+                [store = self.store] fileID, succeeded in
+                store.markReindexJobFile(
+                    jobID: jobID,
+                    fileID: fileID,
+                    state: succeeded ? .completed : .failed
+                )
+            }
+            let result: IndexBatchResult
+            if usesShadowRetry {
+                let fileCategories = Set(
+                    summary.job.fileCategoryRawValues.compactMap(FileCategory.init(rawValue:))
+                )
+                let succeeded = await self.indexer.rebuildAll(
+                    rebuildVectorSpace: true,
+                    forceReprocessing: true,
+                    onlyUnindexedFiles: summary.job.onlyUnindexedFiles,
+                    includeUnindexedFiles: summary.job.includeUnindexedFiles,
+                    onlyMediaFiles: summary.job.onlyMediaFiles,
+                    fileCategories: fileCategories,
+                    fileIDs: targetIDs,
+                    totalOverride: retryTotal,
+                    initialCompleted: retryInitialCompleted,
+                    resumeShadow: true,
+                    expectedShadowFileCount: summary.total,
+                    executionGate: self.indexingGate,
+                    fileCompletion: completionHandler,
+                    progress: progressHandler
+                )
+                let progress = self.vectorIndexRebuildProgress
+                let stopped = progress?.phase == .stopped || Task.isCancelled
+                let failed = progress?.failed ?? 0
+                if !succeeded, !stopped, failed == 0 {
+                    for fileID in targetIDs {
+                        self.store.markReindexJobFile(
+                            jobID: jobID,
+                            fileID: fileID,
+                            state: .failed
+                        )
+                    }
+                }
+                result = IndexBatchResult(
+                    completed: progress?.completed ?? retryInitialCompleted,
+                    failed: succeeded ? 0 : (failed > 0 ? failed : targetFiles.count),
+                    stopped: stopped
+                )
+            } else {
+                result = await self.indexer.indexFiles(
+                    targetFiles,
+                    force: true,
+                    executionGate: self.indexingGate,
+                    fileCompletion: completionHandler,
+                    progress: progressHandler
+                )
+            }
+            let stopped = result.stopped
+                || self.indexingState == .stopping
+                || Task.isCancelled
+            self.reindexTask = nil
+            self.activeReindexJobID = nil
+
+            let latestProgress = try? self.store.reindexJobProgress(jobID: jobID)
+            let remainingCount = latestProgress.map {
+                max($0.totalFiles - $0.completed, 0)
+            } ?? 0
+            let persistedFailed = latestProgress?.failed ?? result.failed
+            let persistedCompleted = latestProgress?.completed
+                ?? max(result.completed - result.failed, 0)
+            if !stopped, result.failed == 0, remainingCount == 0 {
+                if usesShadowRetry {
+                    try? self.store.migrateIndexedFileSignatures(
+                        to: summary.job.targetEmbeddingSignature
+                    )
+                    self.store.setSetting(
+                        Self.appliedEmbeddingSignatureKey,
+                        summary.job.targetEmbeddingSignature
+                    )
+                    self.acknowledgeContentCategories(
+                        Set(
+                            summary.job.contentCategoryRawValues.compactMap(
+                                IndexContentChangeCategory.init(rawValue:)
+                            )
+                        )
+                    )
+                }
+                self.store.deleteReindexJob(jobID: jobID)
+            } else {
+                let status: ReindexJobStatus
+                if stopped {
+                    status = .interrupted
+                } else if persistedFailed > 0, persistedCompleted > 0 {
+                    status = .completedWithErrors
+                } else if result.failed > 0 {
+                    status = .failed
+                } else {
+                    status = .interrupted
+                }
+                self.store.setReindexJobStatus(
+                    jobID: jobID,
+                    status: status
+                )
+            }
+
+            self.finishIndexing(
+                stopped: stopped,
+                succeeded: !stopped && result.failed == 0 && remainingCount == 0,
+                completed: result.completed,
+                total: retryTotal,
+                failed: persistedFailed,
+                successfulFiles: persistedCompleted
+            )
+            self.refreshReindexJobSummary()
+            self.refresh(allowManagedIndexing: result.failed == 0)
         }
     }
 
@@ -3757,6 +4013,7 @@ final class AppState: ObservableObject {
                 "forceSourceReprocessing": "\(forceSourceReprocessing)",
                 "resuming": "\(isResuming)",
                 "completedBeforeStart": "\(initialCompleted)",
+                "filesScheduled": "\(remainingFileIDs.count)",
                 "total": "\(total)",
             ]
         )
@@ -3797,9 +4054,7 @@ final class AppState: ObservableObject {
                         fileIDs: remainingFileIDs,
                         totalOverride: total,
                         initialCompleted: initialCompleted,
-                        checkpoint: { [indexingGate = self.indexingGate] in
-                            await indexingGate.waitUntilRunnable()
-                        },
+                        executionGate: self.indexingGate,
                         fileCompletion: completionHandler,
                         progress: progressHandler
                     )
@@ -3818,9 +4073,7 @@ final class AppState: ObservableObject {
                     totalOverride: total,
                     initialCompleted: initialCompleted,
                     resumeShadow: isResuming,
-                    checkpoint: { [indexingGate = self.indexingGate] in
-                        await indexingGate.waitUntilRunnable()
-                    },
+                    executionGate: self.indexingGate,
                     fileCompletion: completionHandler,
                     progress: progressHandler
                 )
@@ -3831,6 +4084,10 @@ final class AppState: ObservableObject {
                 || Task.isCancelled
             let progress = self.vectorIndexRebuildProgress
             self.reindexTask = nil
+            let persistedProgress = try? self.store.reindexJobProgress(jobID: jobID)
+            let persistedFailed = persistedProgress?.failed ?? progress?.failed ?? 0
+            let persistedCompleted = persistedProgress?.completed
+                ?? max((progress?.completed ?? 0) - persistedFailed, 0)
             if succeeded {
                 if rebuildVectorSpace {
                     try? self.store.migrateIndexedFileSignatures(to: targetEmbeddingSignature)
@@ -3844,7 +4101,11 @@ final class AppState: ObservableObject {
             } else {
                 self.store.setReindexJobStatus(
                     jobID: jobID,
-                    status: stopped ? .interrupted : .failed
+                    status: stopped
+                        ? .interrupted
+                        : (persistedFailed > 0 && persistedCompleted > 0
+                            ? .completedWithErrors
+                            : .failed)
                 )
             }
             self.activeReindexJobID = nil
@@ -3854,7 +4115,8 @@ final class AppState: ObservableObject {
                 succeeded: succeeded,
                 completed: progress?.completed ?? 0,
                 total: progress?.total ?? total,
-                failed: progress?.failed ?? 0
+                failed: persistedFailed,
+                successfulFiles: persistedCompleted
             )
             self.refreshReindexJobSummary()
             if succeeded {
@@ -3894,21 +4156,45 @@ final class AppState: ObservableObject {
         succeeded: Bool,
         completed: Int,
         total: Int,
-        failed: Int
+        failed: Int,
+        successfulFiles: Int? = nil
     ) {
+        let outcome = IndexingCompletionOutcome(
+            stopped: stopped,
+            operationSucceeded: succeeded,
+            successfulFiles: successfulFiles ?? max(completed - failed, 0),
+            failedFiles: failed
+        )
+        let resultName: String
+        let logLevel: AppLogLevel
+        switch outcome {
+        case .completed:
+            resultName = "succeeded"
+            logLevel = .notice
+        case .completedWithErrors:
+            resultName = "completed-with-errors"
+            logLevel = .warning
+        case .failed:
+            resultName = "failed"
+            logLevel = .error
+        case .stopped:
+            resultName = "stopped"
+            logLevel = .warning
+        }
         AppLogService.shared.write(
             "indexing task finished",
             category: .indexPipeline,
-            level: stopped ? .warning : (succeeded ? .notice : .error),
+            level: logLevel,
             metadata: [
                 "completed": "\(completed)",
                 "failed": "\(failed)",
                 "kind": indexingKind.logName,
-                "result": stopped ? "stopped" : (succeeded ? "succeeded" : "failed"),
+                "result": resultName,
                 "total": "\(total)",
             ]
         )
-        if stopped {
+        switch outcome {
+        case .stopped:
             indexingState = .stopped
             vectorIndexRebuildProgress = VectorIndexRebuildProgress(
                 phase: .stopped,
@@ -3917,10 +4203,28 @@ final class AppState: ObservableObject {
                 currentFileName: nil,
                 failed: failed
             )
-        } else {
-            indexingState = succeeded ? .completed : .failed
+        case .completed:
+            indexingState = .completed
             vectorIndexRebuildProgress = VectorIndexRebuildProgress(
-                phase: succeeded ? .completed : .failed,
+                phase: .completed,
+                completed: completed,
+                total: total,
+                currentFileName: nil,
+                failed: failed
+            )
+        case .completedWithErrors:
+            indexingState = .completedWithErrors
+            vectorIndexRebuildProgress = VectorIndexRebuildProgress(
+                phase: .completed,
+                completed: completed,
+                total: total,
+                currentFileName: nil,
+                failed: failed
+            )
+        case .failed:
+            indexingState = .failed
+            vectorIndexRebuildProgress = VectorIndexRebuildProgress(
+                phase: .failed,
                 completed: completed,
                 total: total,
                 currentFileName: nil,

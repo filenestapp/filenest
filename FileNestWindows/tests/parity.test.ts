@@ -19,7 +19,7 @@ vi.mock('electron', () => ({
 
 import type { ChatStreamEvent, FileRecord, Settings } from '../src/shared/types'
 import { normalizeSettingsPatch } from '../src/main/settings-normalization'
-import { ChatService, contextWindowForSettings, planChatHistory, validateCitations } from '../src/main/chat'
+import { ChatService, cloudContextWindowOverrideKey, completeDocumentSections, contextWindowForSettings, isWholeDocumentRequest, planChatHistory, validateCitations } from '../src/main/chat'
 import { FileNestDatabase } from '../src/main/database'
 import { EmbeddingService } from '../src/main/embedding'
 import { buildDocumentChunks, extractEntityTerms, IndexerService, recommendedFileConcurrency } from '../src/main/indexer'
@@ -36,6 +36,7 @@ import { rerankerEndpoint, weightedReciprocalRankFusion } from '../src/main/rera
 import { isLocalOllamaHost, requiresOllamaService } from '../src/main/ollama'
 import { buildTranscriptChunks, normalizeWhisperModel } from '../src/main/media-transcription'
 import { duplicateGroups } from '../src/main/duplicate-files'
+import { AgentSkillService } from '../src/main/agent-skills'
 
 beforeAll(async () => {
   await mkdir(join(testRoot, 'Downloads'), { recursive: true })
@@ -45,6 +46,48 @@ beforeAll(async () => {
 afterAll(async () => rm(testRoot, { recursive: true, force: true }))
 
 describe('settings and bounded chat context', () => {
+  it('uses cloud context-window overrides scoped to the active provider, endpoint, and model', () => {
+    const base = { ...createDefaultSettings(), llmChoice: 'cloud' as const, cloudApiFormat: 'openai' as const, cloudBaseUrl: 'https://api.example.test/v1/', cloudModel: 'model-a', cloudContextWindowTokens: 0 }
+    const key = cloudContextWindowOverrideKey(base)
+    expect(contextWindowForSettings({ ...base, cloudContextWindowOverrides: { [key]: 65_536 } })).toBe(65_536)
+    expect(contextWindowForSettings({ ...base, cloudModel: 'model-b', cloudContextWindowOverrides: { [key]: 65_536 } })).toBe(30_000)
+  })
+
+  it('recognizes explicit whole-document requests without rerouting focused questions', () => {
+    expect(isWholeDocumentRequest('Translate the entire document into Chinese')).toBe(true)
+    expect(isWholeDocumentRequest('请翻译整份文档')).toBe(true)
+    expect(isWholeDocumentRequest('Summarize page 3 of the document')).toBe(false)
+    const sections = completeDocumentSections([
+      { index: 0, text: 'child', contextualText: 'child', sectionPath: ['Overview'], pageStart: 1, pageEnd: 1, kind: 'text', parentIndex: 0, parentText: 'Complete overview', entityTerms: [] },
+      { index: 1, text: 'duplicate child', contextualText: 'duplicate child', sectionPath: ['Overview'], pageStart: 1, pageEnd: 1, kind: 'text', parentIndex: 0, parentText: 'Complete overview', entityTerms: [] },
+      { index: 2, text: 'next', contextualText: 'next', sectionPath: ['Terms'], pageStart: 2, pageEnd: 2, kind: 'table', parentIndex: 2, parentText: 'Complete terms table', entityTerms: [] }
+    ])
+    expect(sections).toEqual(expect.arrayContaining([{ id: '0', location: 'Overview · p.1', text: 'Complete overview' }, { id: '2', location: 'Terms · p.2', text: 'Complete terms table' }]))
+    expect(sections).toHaveLength(2)
+  })
+
+  it('discovers bundled skills and activates imported managed instructions', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const service = new AgentSkillService(database)
+    await service.refresh()
+    expect(service.all().some((skill) => skill.name === 'filenest-grounded-answer' && skill.origin === 'bundled' && skill.enabled)).toBe(true)
+    const sourceDirectory = join(testRoot, 'ImportedSkill')
+    await mkdir(sourceDirectory, { recursive: true })
+    const source = join(sourceDirectory, 'SKILL.md')
+    await writeFile(source, '---\nname: test-managed-skill\ndescription: Test a managed Agent Skill.\nmetadata:\n  filenest-auto-activate: "library-answer"\n---\n\n# Test instruction\n\nUse a controlled local workflow.', 'utf8')
+    const imported = await service.importPackage(source)
+    expect(imported).toMatchObject({ name: 'test-managed-skill', origin: 'managed', enabled: true })
+    const activation = await service.activate('library-answer', 'Answer this request with $test-managed-skill')
+    expect(activation.names).toContain('test-managed-skill')
+    expect(activation.context).toContain('Use a controlled local workflow.')
+    const longDocument = await service.activate('attached-file-answer', 'Translate the entire document into Chinese')
+    expect(longDocument.names).toContain('filenest-long-document-translation')
+    expect(longDocument.executionRoute).toBe('map-reduce')
+    await service.deleteManagedPackage(imported.skillFilePath)
+    expect(service.all().some((skill) => skill.name === 'test-managed-skill')).toBe(false)
+  })
+
   it('uses the shared multilingual token accounting profile', () => {
     expect(estimateCanonicalTokens('hello world').count).toBe(3)
     expect(estimateCanonicalTokens('中文测试').count).toBe(3)
@@ -128,6 +171,21 @@ describe('settings and bounded chat context', () => {
 })
 
 describe('structured indexing and atomic persistence', () => {
+  it('reports restart-safe reindex retry identifiers for files that could not be processed', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const missing = await database.upsertFile({
+      path: join(testRoot, 'Downloads', 'missing-reindex.txt'), name: 'missing-reindex.txt', ext: 'txt', size: 1,
+      mtime: new Date().toISOString(), category: 'documents', sourceDir: join(testRoot, 'Downloads'), indexedAt: null,
+      contentHash: null, title: null, contentText: null, discoveredAt: new Date().toISOString(), organizedAt: null,
+      note: null, organizationSubfolder: null, isDirectory: false, indexSignature: null
+    })
+    const settings = { ...database.getSettings(), embeddingSource: 'local' as const, doclingEnabled: false, ocrSource: 'disabled' as const }
+    const indexer = new IndexerService(database, new ContentExtractor(), new EmbeddingService(database), new AppLogger())
+    const result = await indexer.reindexAll(settings, 'all', [], [missing.id])
+    expect(result).toMatchObject({ completed: true, total: 1, failedFileIds: [missing.id], pendingFileIds: [] })
+  })
+
   it('links byte-identical files to the indexed original without duplicate vectors', async () => {
     const database = new FileNestDatabase()
     await database.initialize()

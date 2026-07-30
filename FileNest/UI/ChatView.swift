@@ -1429,12 +1429,20 @@ private struct ChatProgressSteps: View {
     let progress: ChatProgress
     let preview: (FileRecord) -> Void
     let startDocumentChat: (FileRecord) -> Void
+    @State private var isShowingDocumentBatchOutput = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if progress.scope == .attachedFile {
+                let preparationLabel = if progress.usesExistingIndex {
+                    "Searching the current file index"
+                } else if progress.usesPreparedFileCache {
+                    "Reusing prepared file content"
+                } else {
+                    "Reading and parsing the current file"
+                }
                 progressRow(
-                    progress.usesExistingIndex ? "Searching the current file index" : "Reading and parsing the current file",
+                    preparationLabel,
                     completed: progress.phase != .readingFile
                 )
                 if progress.phase != .readingFile {
@@ -1497,6 +1505,95 @@ private struct ChatProgressSteps: View {
                 progressRow("Thinking Mode: performing deeper analysis", completed: false)
             } else if progress.phase == .verifying {
                 progressRow("Verifying answer citations", completed: false)
+            } else if progress.phase == .preparingDocument {
+                progressRow("Preparing the complete document manifest", completed: false)
+            } else if case let .documentPlan(totalUnits, totalBatches, estimatedTokens) = progress.phase {
+                progressRow(
+                    appState.settings.localizedFormat(
+                        "Prepared %d sections in %d batches · about %d tokens",
+                        totalUnits,
+                        totalBatches,
+                        estimatedTokens
+                    ),
+                    completed: true
+                )
+            } else if case let .reusingDocument(batch, total, sourceUnits) = progress.phase {
+                progressRow(
+                    appState.settings.localizedFormat(
+                        "Reusing cached document batch %d of %d · %d sections",
+                        batch,
+                        total,
+                        sourceUnits
+                    ),
+                    completed: true
+                )
+            } else if case let .processingDocument(completed, total) = progress.phase {
+                progressRow(
+                    appState.settings.localizedFormat(
+                        "Processing document batch %d of %d",
+                        completed,
+                        total
+                    ),
+                    completed: completed >= total
+                )
+            } else if case let .requestingDocument(batch, total, attempt, sourceUnits) = progress.phase {
+                progressRow(
+                    appState.settings.localizedFormat(
+                        "Starting document batch %d of %d · attempt %d · %d sections",
+                        batch,
+                        total,
+                        attempt,
+                        sourceUnits
+                    ),
+                    completed: false
+                )
+            } else if case let .receivingDocument(batch, total, attempt, outputTokens, _) = progress.phase {
+                progressRow(
+                    appState.settings.localizedFormat(
+                        "Receiving document batch %d of %d · attempt %d · %d tokens",
+                        batch,
+                        total,
+                        attempt,
+                        outputTokens
+                    ),
+                    completed: false
+                )
+                if !progress.documentBatchOutput.isEmpty {
+                    documentBatchOutputDisclosure
+                }
+            } else if case let .validatingDocument(batch, total) = progress.phase {
+                progressRow(
+                    appState.settings.localizedFormat("Validating document batch %d of %d", batch, total),
+                    completed: false
+                )
+            } else if case let .repairingDocument(batch, total, missingUnits) = progress.phase {
+                progressRow(
+                    appState.settings.localizedFormat(
+                        "Repairing document batch %d of %d · %d sections remaining",
+                        batch,
+                        total,
+                        missingUnits
+                    ),
+                    completed: false
+                )
+            } else if case let .splittingDocument(batch, total, sourceUnits) = progress.phase {
+                progressRow(
+                    appState.settings.localizedFormat(
+                        "Splitting document batch %d of %d into smaller groups (%d sections)",
+                        batch,
+                        total,
+                        sourceUnits
+                    ),
+                    completed: false
+                )
+            } else if progress.phase == .reducingDocument {
+                progressRow("Combining section summaries", completed: false)
+            } else if progress.phase == .verifyingDocument {
+                progressRow("Verifying complete document coverage", completed: false)
+            }
+
+            if !progress.documentBatchOutput.isEmpty, !isReceivingDocument {
+                documentBatchOutputDisclosure
             }
         }
         .font(.system(size: 12))
@@ -1515,6 +1612,37 @@ private struct ChatProgressSteps: View {
             Text(LocalizedStringKey(title))
         }
     }
+
+    private var isReceivingDocument: Bool {
+        if case .receivingDocument = progress.phase { return true }
+        return false
+    }
+
+    private var documentBatchOutputDisclosure: some View {
+        DisclosureGroup(isExpanded: $isShowingDocumentBatchOutput) {
+            ScrollView {
+                Text(progress.documentBatchOutput)
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundStyle(.primary.opacity(0.88))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(10)
+            }
+            .frame(maxHeight: 220)
+            .background(FileNestTheme.elevatedSurface, in: RoundedRectangle(cornerRadius: 8))
+            .padding(.leading, 24)
+        } label: {
+            Label(
+                isShowingDocumentBatchOutput ? "Hide batch output" : "Show batch output",
+                systemImage: "chevron.right.circle"
+            )
+            .font(.system(size: 12, weight: .medium))
+        }
+        .padding(.leading, 24)
+        .accessibilityHint(appState.settings.localized(
+            "Shows the unvalidated structured output for the active document batch"
+        ))
+    }
 }
 
 private struct ChatResponseMetricsView: View {
@@ -1531,6 +1659,9 @@ private struct ChatResponseMetricsView: View {
             }
             if let output = message.outputTokens {
                 metric("≈↓ \(formatTokens(output))")
+            }
+            if let speed = message.generationTokensPerSecond {
+                metric(appState.settings.localizedFormat("Speed %.1f tokens/s", speed))
             }
             if let first = message.firstResponseDuration {
                 metric(appState.settings.localizedFormat("First response %.2fs", first))

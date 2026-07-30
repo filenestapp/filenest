@@ -28,6 +28,12 @@ struct FileCreationDateCandidate: Sendable {
     let fallback: Date
 }
 
+struct SmartSearchPlanCacheRecord: Sendable {
+    let intent: String
+    let payload: Data
+    let createdAt: Date
+}
+
 /// SQLite storage for metadata in files, rules, and chat plus vectors in embeddings.
 final class SQLiteStore: @unchecked Sendable {
     static let shared = SQLiteStore()
@@ -265,6 +271,23 @@ final class SQLiteStore: @unchecked Sendable {
                 t.column("created_at", .datetime).notNull()
             }
 
+            // File paths are mutable user-facing metadata. Persist the underlying
+            // filesystem identity separately so renames and moves inside the managed
+            // library can update the existing row without replacing its RAG data.
+            try db.create(table: "managed_file_identities", ifNotExists: true) { t in
+                t.column("file_id", .integer)
+                    .primaryKey()
+                    .references("files", onDelete: .cascade)
+                t.column("file_system_identifier", .text).notNull()
+                t.column("updated_at", .datetime).notNull()
+            }
+            try db.create(
+                index: "idx_managed_file_identities_identifier",
+                on: "managed_file_identities",
+                columns: ["file_system_identifier"],
+                ifNotExists: true
+            )
+
             try db.create(table: "library_revision", ifNotExists: true) { t in
                 t.primaryKey("id", .integer)
                 t.column("revision", .integer).notNull().defaults(to: 0)
@@ -348,6 +371,21 @@ final class SQLiteStore: @unchecked Sendable {
                 index: "idx_library_search_history_updated",
                 on: "library_search_history",
                 columns: ["updated_at"],
+                ifNotExists: true
+            )
+
+            try db.create(table: "smart_search_plan_cache", ifNotExists: true) { t in
+                t.column("normalized_query", .text).notNull()
+                t.column("planner_signature", .text).notNull()
+                t.column("intent", .text).notNull()
+                t.column("payload", .blob).notNull()
+                t.column("created_at", .datetime).notNull()
+                t.primaryKey(["normalized_query", "planner_signature"])
+            }
+            try db.create(
+                index: "idx_smart_search_plan_cache_created",
+                on: "smart_search_plan_cache",
+                columns: ["created_at"],
                 ifNotExists: true
             )
 
@@ -812,9 +850,12 @@ final class SQLiteStore: @unchecked Sendable {
     /// intentionally omitted by the caller, so large scans do not rewrite every row.
     func applyManagedFileChanges(
         upserts: [FileRecord],
-        staleFileIDs: Set<Int64>
+        staleFileIDs: Set<Int64>,
+        fileSystemIdentifiersByPath: [String: String] = [:]
     ) throws {
-        guard !upserts.isEmpty || !staleFileIDs.isEmpty else { return }
+        guard !upserts.isEmpty || !staleFileIDs.isEmpty || !fileSystemIdentifiersByPath.isEmpty else {
+            return
+        }
         try dbPool.write { db in
             for record in upserts {
                 _ = try Self.upsertFile(record, in: db)
@@ -825,6 +866,47 @@ final class SQLiteStore: @unchecked Sendable {
                     arguments: [id]
                 )
             }
+            for (path, identifier) in fileSystemIdentifiersByPath {
+                guard let fileID = try Int64.fetchOne(
+                    db,
+                    sql: "SELECT id FROM files WHERE path = ?",
+                    arguments: [path]
+                ) else {
+                    continue
+                }
+                try db.execute(
+                    sql: """
+                        INSERT INTO managed_file_identities(
+                            file_id, file_system_identifier, updated_at
+                        )
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(file_id) DO UPDATE SET
+                            file_system_identifier = excluded.file_system_identifier,
+                            updated_at = excluded.updated_at
+                        WHERE managed_file_identities.file_system_identifier
+                              != excluded.file_system_identifier
+                        """,
+                    arguments: [fileID, identifier, Date()]
+                )
+            }
+        }
+    }
+
+    func managedFileIdentities() throws -> [Int64: String] {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT file_id, file_system_identifier FROM managed_file_identities"
+            )
+            return Dictionary(
+                uniqueKeysWithValues: rows.compactMap { row -> (Int64, String)? in
+                    guard let fileID: Int64 = row["file_id"],
+                          let identifier: String = row["file_system_identifier"] else {
+                        return nil
+                    }
+                    return (fileID, identifier)
+                }
+            )
         }
     }
 
@@ -843,6 +925,24 @@ final class SQLiteStore: @unchecked Sendable {
             updated.duplicateOfFileID = updated.duplicateOfFileID ?? existing.duplicateOfFileID
             updated.duplicateDetectedAt = updated.duplicateDetectedAt ?? existing.duplicateDetectedAt
             try updated.update(db)
+            if existing.path != updated.path {
+                let previousDefaultTitle = URL(fileURLWithPath: existing.path).lastPathComponent
+                let updatedDefaultTitle = URL(fileURLWithPath: updated.path).lastPathComponent
+                try db.execute(
+                    sql: """
+                        UPDATE chat_sessions
+                        SET attached_file_path = ?,
+                            title = CASE WHEN title = ? THEN ? ELSE title END
+                        WHERE attached_file_path = ?
+                        """,
+                    arguments: [
+                        updated.path,
+                        previousDefaultTitle,
+                        updatedDefaultTitle,
+                        existing.path,
+                    ]
+                )
+            }
             return id
         }
 
@@ -1002,64 +1102,8 @@ final class SQLiteStore: @unchecked Sendable {
     func libraryFiles(matching filter: LibraryFileMetadataFilter, limit: Int = 1_000) throws -> [FileRecord] {
         let safeLimit = max(1, min(limit, 2_000))
         return try dbPool.read { db in
-            var clauses = [String]()
-            var arguments = StatementArguments()
-
-            if let exactName = filter.exactName, !exactName.isEmpty {
-                clauses.append("name = ? COLLATE NOCASE")
-                arguments += [exactName]
-            }
-            if !filter.fileExtensions.isEmpty {
-                let values = filter.fileExtensions.map { $0.lowercased() }.sorted()
-                clauses.append("ext IN (\(Array(repeating: "?", count: values.count).joined(separator: ", ")))")
-                arguments += StatementArguments(values)
-            }
-            if !filter.categories.isEmpty {
-                let values = filter.categories.sorted()
-                clauses.append("category IN (\(Array(repeating: "?", count: values.count).joined(separator: ", ")))")
-                arguments += StatementArguments(values)
-            }
-            for term in filter.folderTerms where !term.isEmpty {
-                let escaped = term
-                    .lowercased()
-                    .replacingOccurrences(of: "\\", with: "\\\\")
-                    .replacingOccurrences(of: "%", with: "\\%")
-                    .replacingOccurrences(of: "_", with: "\\_")
-                clauses.append("LOWER(source_dir || char(10) || path || char(10) || COALESCE(organization_subfolder, '')) LIKE ? ESCAPE '\\'")
-                arguments += ["%\(escaped)%"]
-            }
-            if let isDirectory = filter.isDirectory {
-                clauses.append("is_directory = ?")
-                arguments += [isDirectory]
-            }
-            if let interval = filter.dateInterval {
-                let dateColumn: String
-                switch filter.dateField {
-                case .modified: dateColumn = "mtime"
-                case .added: dateColumn = "COALESCE(discovered_at, organized_at, indexed_at, mtime)"
-                case .organized: dateColumn = "organized_at"
-                }
-                clauses.append("\(dateColumn) >= ? AND \(dateColumn) < ?")
-                arguments += [interval.start, interval.end]
-            }
-            if let minimum = filter.minimumSizeBytes {
-                clauses.append("size >= ?")
-                arguments += [minimum]
-            }
-            if let maximum = filter.maximumSizeBytes {
-                clauses.append("size <= ?")
-                arguments += [maximum]
-            }
-            if let hasNote = filter.hasNote {
-                clauses.append(hasNote
-                    ? "TRIM(COALESCE(note, '')) <> ''"
-                    : "TRIM(COALESCE(note, '')) = ''")
-            }
-            if let isIndexed = filter.isIndexed {
-                clauses.append(isIndexed ? "indexed_at IS NOT NULL" : "indexed_at IS NULL")
-            }
-
-            let predicate = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
+            let filtered = Self.metadataFilterPredicate(filter)
+            let predicate = filtered.sql.isEmpty ? "" : "WHERE \(filtered.sql)"
             return try FileRecord.fetchAll(
                 db,
                 sql: """
@@ -1073,7 +1117,7 @@ final class SQLiteStore: @unchecked Sendable {
                              name COLLATE NOCASE ASC
                     LIMIT ?
                     """,
-                arguments: arguments + [safeLimit]
+                arguments: filtered.arguments + [safeLimit]
             )
         }
     }
@@ -1250,7 +1294,7 @@ final class SQLiteStore: @unchecked Sendable {
         }
     }
 
-    func files(ids: Set<Int64>) throws -> [Int64: FileRecord] {
+    func files(ids: Set<Int64>, includeContent: Bool = true) throws -> [Int64: FileRecord] {
         guard !ids.isEmpty else { return [:] }
         return try dbPool.read { db in
             var recordsByID = [Int64: FileRecord]()
@@ -1260,7 +1304,13 @@ final class SQLiteStore: @unchecked Sendable {
                 let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
                 let records = try FileRecord.fetchAll(
                     db,
-                    sql: "SELECT * FROM files WHERE id IN (\(placeholders))",
+                    sql: """
+                        SELECT \(Self.searchCandidateColumns(
+                            contentExpression: includeContent ? "files.content_text" : "NULL"
+                        ))
+                        FROM files
+                        WHERE files.id IN (\(placeholders))
+                        """,
                     arguments: StatementArguments(chunk)
                 )
                 for record in records {
@@ -1323,9 +1373,15 @@ final class SQLiteStore: @unchecked Sendable {
         }
     }
 
-    /// Fetches lexical candidates once for the complete query instead of decoding
-    /// up to 200 full file records independently for every derived search term.
-    func files(matchingAny keywords: [String], limit: Int = 400) throws -> [FileRecord] {
+    /// Fetches bounded lexical candidates once for the complete query. FTS snippets
+    /// replace full extracted bodies at this stage; callers hydrate only the strongest
+    /// candidates that need complete-body confidence scoring.
+    func files(
+        matchingAny keywords: [String],
+        filter: LibraryFileMetadataFilter? = nil,
+        includeContent: Bool = true,
+        limit: Int = 400
+    ) throws -> [FileRecord] {
         let normalizedKeywords = Array(Set(keywords.map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }.filter { !$0.isEmpty })).sorted()
@@ -1338,6 +1394,9 @@ final class SQLiteStore: @unchecked Sendable {
             var matchedIDs = Set<Int64>()
             var matchedPaths = Set<String>()
             var didMatchLiteralIndex = false
+            let filtered = filter.map { Self.metadataFilterPredicate($0) }
+                ?? ("", StatementArguments())
+            let filterClause = filtered.0.isEmpty ? "" : "AND \(filtered.0)"
 
             func appendUnique(_ candidates: [FileRecord]) {
                 for candidate in candidates where records.count < safeLimit {
@@ -1359,18 +1418,29 @@ final class SQLiteStore: @unchecked Sendable {
                 // without returning to one full-record query per search term.
                 let literalReserve = literalKeywords.isEmpty ? 0 : max(25, safeLimit / 4)
                 let indexedLimit = max(1, safeLimit - literalReserve)
+                let scopedExpression = includeContent
+                    ? expression
+                    : "{name title note path} : (\(expression))"
+                var arguments = StatementArguments([scopedExpression])
+                arguments += filtered.1
+                arguments += [indexedLimit]
                 if let indexedRecords = try? FileRecord.fetchAll(
                     db,
                     sql: """
-                        SELECT files.*
+                        SELECT \(Self.searchCandidateColumns(
+                            contentExpression: includeContent
+                                ? "snippet(files_fts, 2, '', '', ' … ', 96)"
+                                : "NULL"
+                        ))
                         FROM files_fts
                         JOIN files ON files.id = files_fts.rowid
                         WHERE files_fts MATCH ?
+                        \(filterClause)
                         ORDER BY bm25(files_fts, 5.0, 1.0, 3.0, 3.0, 2.0),
                                  COALESCE(files.discovered_at, files.organized_at, files.indexed_at, files.mtime) DESC
                         LIMIT ?
                         """,
-                    arguments: [expression, indexedLimit]
+                    arguments: arguments
                 ) {
                     appendUnique(indexedRecords)
                 }
@@ -1381,18 +1451,29 @@ final class SQLiteStore: @unchecked Sendable {
                 let expression = literalKeywords.map { keyword in
                     "\"\(keyword.replacingOccurrences(of: "\"", with: "\"\""))\""
                 }.joined(separator: " OR ")
+                let scopedExpression = includeContent
+                    ? expression
+                    : "{name title note path} : (\(expression))"
+                var arguments = StatementArguments([scopedExpression])
+                arguments += filtered.1
+                arguments += [safeLimit - records.count]
                 if let tokenRecords = try? FileRecord.fetchAll(
                     db,
                     sql: """
-                        SELECT files.*
+                        SELECT \(Self.searchCandidateColumns(
+                            contentExpression: includeContent
+                                ? "snippet(files_token_fts, 2, '', '', ' … ', 96)"
+                                : "NULL"
+                        ))
                         FROM files_token_fts
                         JOIN files ON files.id = files_token_fts.rowid
                         WHERE files_token_fts MATCH ?
+                        \(filterClause)
                         ORDER BY bm25(files_token_fts, 5.0, 1.0, 3.0, 3.0, 2.0),
                                  COALESCE(files.discovered_at, files.organized_at, files.indexed_at, files.mtime) DESC
                         LIMIT ?
                         """,
-                    arguments: [expression, safeLimit - records.count]
+                    arguments: arguments
                 ) {
                     didMatchLiteralIndex = !tokenRecords.isEmpty
                     appendUnique(tokenRecords)
@@ -1420,12 +1501,16 @@ final class SQLiteStore: @unchecked Sendable {
                 clauses.append("(name LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')")
                 arguments += [pattern, pattern, pattern, pattern]
             }
+            arguments += filtered.1
             arguments += [safeLimit - records.count]
+            let fallbackFilterClause = filtered.0.isEmpty ? "" : "AND \(filtered.0)"
             let fallbackRecords = try FileRecord.fetchAll(
                 db,
                 sql: """
-                    SELECT * FROM files
-                    WHERE \(clauses.joined(separator: " OR "))
+                    SELECT \(Self.searchCandidateColumns(contentExpression: "NULL"))
+                    FROM files
+                    WHERE (\(clauses.joined(separator: " OR ")))
+                    \(fallbackFilterClause)
                     ORDER BY COALESCE(discovered_at, organized_at, indexed_at, mtime) DESC,
                              name COLLATE NOCASE ASC
                     LIMIT ?
@@ -1435,6 +1520,17 @@ final class SQLiteStore: @unchecked Sendable {
             appendUnique(fallbackRecords)
             return records
         }
+    }
+
+    private static func searchCandidateColumns(contentExpression: String) -> String {
+        """
+        files.id, files.path, files.name, files.ext, files.size, files.mtime,
+        files.category, files.source_dir, files.indexed_at, files.content_hash,
+        files.title, \(contentExpression) AS content_text,
+        files.discovered_at, files.organized_at, files.note,
+        files.organization_subfolder, files.is_directory, files.index_signature,
+        files.duplicate_of_file_id, files.duplicate_detected_at
+        """
     }
 
     func documentChunks(
@@ -1584,11 +1680,16 @@ final class SQLiteStore: @unchecked Sendable {
 
     /// Returns high-precision chunk matches for identifiers extracted during indexing.
     /// This lane complements semantic similarity for invoice numbers, emails, dates, and IDs.
-    func entityChunkMatches(terms: [String], limit: Int) throws -> [VectorSearchHit] {
+    func entityChunkMatches(
+        terms: [String],
+        fileIDs: Set<Int64>? = nil,
+        limit: Int
+    ) throws -> [VectorSearchHit] {
         let normalizedTerms = Array(Array(Set(terms.map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         }.filter { $0.count >= 3 })).sorted().prefix(12))
         guard !normalizedTerms.isEmpty, limit > 0 else { return [] }
+        if let fileIDs, fileIDs.isEmpty { return [] }
         let scoreExpression = normalizedTerms.map { _ in
             "CASE WHEN instr(lower(c.entity_terms), ?) > 0 THEN 1 ELSE 0 END"
         }.joined(separator: " + ")
@@ -1597,6 +1698,10 @@ final class SQLiteStore: @unchecked Sendable {
                 && normalizedTerms.allSatisfy { $0.unicodeScalars.count >= 3 }
             let sql: String
             var arguments = StatementArguments()
+            let sortedFileIDs = fileIDs?.sorted() ?? []
+            let fileConstraint = sortedFileIDs.isEmpty
+                ? ""
+                : "AND c.file_id IN (\(Array(repeating: "?", count: sortedFileIDs.count).joined(separator: ",")))"
             if usesFTS {
                 let expression = normalizedTerms.map { term in
                     "\"\(term.replacingOccurrences(of: "\"", with: "\"\""))\""
@@ -1617,6 +1722,7 @@ final class SQLiteStore: @unchecked Sendable {
                         JOIN document_chunks c ON c.id = f.rowid
                         LEFT JOIN document_parents p
                           ON p.file_id = c.file_id AND p.parent_idx = c.parent_idx
+                        WHERE 1 = 1 \(fileConstraint)
                     )
                     SELECT * FROM ranked
                     WHERE entity_score > 0
@@ -1625,6 +1731,7 @@ final class SQLiteStore: @unchecked Sendable {
                     """
                 arguments += [expression, candidateLimit]
                 arguments += StatementArguments(normalizedTerms)
+                arguments += StatementArguments(sortedFileIDs)
                 arguments += [limit]
             } else {
                 sql = """
@@ -1636,13 +1743,15 @@ final class SQLiteStore: @unchecked Sendable {
                         FROM document_chunks c
                         LEFT JOIN document_parents p
                           ON p.file_id = c.file_id AND p.parent_idx = c.parent_idx
+                        WHERE 1 = 1 \(fileConstraint)
                     )
                     SELECT * FROM ranked
                     WHERE entity_score > 0
                     ORDER BY entity_score DESC, file_id, chunk_idx
                     LIMIT ?
-                    """
+                """
                 arguments += StatementArguments(normalizedTerms)
+                arguments += StatementArguments(sortedFileIDs)
                 arguments += [limit]
             }
             let rows = try Row.fetchAll(
@@ -2007,6 +2116,142 @@ final class SQLiteStore: @unchecked Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
+    }
+
+    func cachedSmartSearchPlan(
+        query: String,
+        plannerSignature: String,
+        maximumAge: TimeInterval = 24 * 60 * 60
+    ) throws -> SmartSearchPlanCacheRecord? {
+        let normalizedQuery = Self.normalizedSearchQuery(query)
+        let cutoff = Date().addingTimeInterval(-max(60, maximumAge))
+        return try dbPool.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT intent, payload, created_at
+                    FROM smart_search_plan_cache
+                    WHERE normalized_query = ?
+                      AND planner_signature = ?
+                      AND created_at >= ?
+                    """,
+                arguments: [normalizedQuery, plannerSignature, cutoff]
+            ) else { return nil }
+            return SmartSearchPlanCacheRecord(
+                intent: row["intent"],
+                payload: row["payload"],
+                createdAt: row["created_at"]
+            )
+        }
+    }
+
+    func saveSmartSearchPlan(
+        query: String,
+        plannerSignature: String,
+        intent: String,
+        payload: Data
+    ) throws {
+        let normalizedQuery = Self.normalizedSearchQuery(query)
+        try dbPool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO smart_search_plan_cache(
+                        normalized_query, planner_signature, intent, payload, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(normalized_query, planner_signature) DO UPDATE SET
+                        intent = excluded.intent,
+                        payload = excluded.payload,
+                        created_at = excluded.created_at
+                    """,
+                arguments: [normalizedQuery, plannerSignature, intent, payload, Date()]
+            )
+            try db.execute(sql: """
+                DELETE FROM smart_search_plan_cache
+                WHERE rowid NOT IN (
+                    SELECT rowid
+                    FROM smart_search_plan_cache
+                    ORDER BY created_at DESC
+                    LIMIT 200
+                )
+                """)
+        }
+    }
+
+    private static func metadataFilterPredicate(
+        _ filter: LibraryFileMetadataFilter,
+        table: String = "files"
+    ) -> (sql: String, arguments: StatementArguments) {
+        var clauses = [String]()
+        var arguments = StatementArguments()
+        let prefix = table.isEmpty ? "" : "\(table)."
+
+        if let exactName = filter.exactName, !exactName.isEmpty {
+            clauses.append("\(prefix)name = ? COLLATE NOCASE")
+            arguments += [exactName]
+        }
+        if !filter.fileExtensions.isEmpty {
+            let values = filter.fileExtensions.map { $0.lowercased() }.sorted()
+            clauses.append(
+                "\(prefix)ext IN (\(Array(repeating: "?", count: values.count).joined(separator: ", ")))"
+            )
+            arguments += StatementArguments(values)
+        }
+        if !filter.categories.isEmpty {
+            let values = filter.categories.sorted()
+            clauses.append(
+                "\(prefix)category IN (\(Array(repeating: "?", count: values.count).joined(separator: ", ")))"
+            )
+            arguments += StatementArguments(values)
+        }
+        for term in filter.folderTerms where !term.isEmpty {
+            let escaped = term
+                .lowercased()
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "%", with: "\\%")
+                .replacingOccurrences(of: "_", with: "\\_")
+            clauses.append(
+                "LOWER(\(prefix)source_dir || char(10) || \(prefix)path || char(10) || " +
+                "COALESCE(\(prefix)organization_subfolder, '')) LIKE ? ESCAPE '\\'"
+            )
+            arguments += ["%\(escaped)%"]
+        }
+        if let isDirectory = filter.isDirectory {
+            clauses.append("\(prefix)is_directory = ?")
+            arguments += [isDirectory]
+        }
+        if let interval = filter.dateInterval {
+            let dateColumn: String
+            switch filter.dateField {
+            case .modified:
+                dateColumn = "\(prefix)mtime"
+            case .added:
+                dateColumn = "COALESCE(\(prefix)discovered_at, \(prefix)organized_at, " +
+                    "\(prefix)indexed_at, \(prefix)mtime)"
+            case .organized:
+                dateColumn = "\(prefix)organized_at"
+            }
+            clauses.append("\(dateColumn) >= ? AND \(dateColumn) < ?")
+            arguments += [interval.start, interval.end]
+        }
+        if let minimum = filter.minimumSizeBytes {
+            clauses.append("\(prefix)size >= ?")
+            arguments += [minimum]
+        }
+        if let maximum = filter.maximumSizeBytes {
+            clauses.append("\(prefix)size <= ?")
+            arguments += [maximum]
+        }
+        if let hasNote = filter.hasNote {
+            clauses.append(hasNote
+                ? "TRIM(COALESCE(\(prefix)note, '')) <> ''"
+                : "TRIM(COALESCE(\(prefix)note, '')) = ''")
+        }
+        if let isIndexed = filter.isIndexed {
+            clauses.append(isIndexed
+                ? "\(prefix)indexed_at IS NOT NULL"
+                : "\(prefix)indexed_at IS NULL")
+        }
+        return (clauses.joined(separator: " AND "), arguments)
     }
 
     // MARK: - statistics
@@ -2819,13 +3064,14 @@ final class SQLiteStore: @unchecked Sendable {
                 sql: """
                     UPDATE reindex_job_files
                     SET state = ?, updated_at = ?
-                    WHERE job_id = ? AND state = ?
+                    WHERE job_id = ? AND state IN (?, ?)
                     """,
                 arguments: [
                     ReindexJobFileState.pending.rawValue,
                     Date(),
                     jobID,
                     ReindexJobFileState.processing.rawValue,
+                    ReindexJobFileState.failed.rawValue,
                 ]
             )
             job.status = ReindexJobStatus.interrupted.rawValue
@@ -2983,6 +3229,45 @@ final class SQLiteStore: @unchecked Sendable {
                 sql: "UPDATE reindex_jobs SET updated_at = ? WHERE id = ?",
                 arguments: [Date(), jobID]
             )
+        }
+    }
+
+    /// Moves only the requested failed files back to the pending queue.
+    /// Other failed, pending, and completed records remain unchanged.
+    @discardableResult
+    func prepareFailedReindexFilesForRetry(
+        jobID: Int64,
+        fileIDs: Set<Int64>
+    ) throws -> Int {
+        guard !fileIDs.isEmpty else { return 0 }
+        return try dbPool.write { db in
+            let placeholders = Array(repeating: "?", count: fileIDs.count).joined(separator: ",")
+            let now = Date()
+            var arguments: StatementArguments = [
+                ReindexJobFileState.pending.rawValue,
+                now,
+                jobID,
+                ReindexJobFileState.failed.rawValue,
+            ]
+            arguments += StatementArguments(fileIDs.sorted())
+            try db.execute(
+                sql: """
+                    UPDATE reindex_job_files
+                    SET state = ?, updated_at = ?
+                    WHERE job_id = ?
+                      AND state = ?
+                      AND file_id IN (\(placeholders))
+                    """,
+                arguments: arguments
+            )
+            let updatedCount = db.changesCount
+            if updatedCount > 0 {
+                try db.execute(
+                    sql: "UPDATE reindex_jobs SET status = ?, updated_at = ? WHERE id = ?",
+                    arguments: [ReindexJobStatus.interrupted.rawValue, now, jobID]
+                )
+            }
+            return updatedCount
         }
     }
 

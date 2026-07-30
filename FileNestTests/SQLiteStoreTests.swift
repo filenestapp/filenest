@@ -115,6 +115,98 @@ final class SQLiteStoreTests: XCTestCase {
         )
     }
 
+    func testPreparingFailedReindexFilesRetriesOnlySelectedRecords() throws {
+        let completedID = try store.upsertFile(makeFile(path: filePath("completed.pdf"), title: "Completed"))
+        let firstFailedID = try store.upsertFile(makeFile(path: filePath("first-failed.pdf"), title: "First failed"))
+        let secondFailedID = try store.upsertFile(makeFile(path: filePath("second-failed.pdf"), title: "Second failed"))
+        let now = Date()
+        let job = try store.createReindexJob(
+            ReindexJobRecord(
+                id: nil,
+                kind: "full-reindex",
+                rebuildVectorSpace: false,
+                contentCategoriesJSON: "[]",
+                onlyUnindexedFiles: false,
+                includeUnindexedFiles: false,
+                retrievalIndexOnly: false,
+                forceSourceReprocessing: true,
+                onlyMediaFiles: false,
+                fileCategoriesJSON: "[]",
+                targetEmbeddingSignature: "embedding-v1",
+                status: ReindexJobStatus.failed.rawValue,
+                total: 3,
+                createdAt: now,
+                updatedAt: now
+            ),
+            fileIDs: [completedID, firstFailedID, secondFailedID]
+        )
+        let jobID = try XCTUnwrap(job.id)
+        store.markReindexJobFile(jobID: jobID, fileID: completedID, state: .completed)
+        store.markReindexJobFile(jobID: jobID, fileID: firstFailedID, state: .failed)
+        store.markReindexJobFile(jobID: jobID, fileID: secondFailedID, state: .failed)
+
+        let updated = try store.prepareFailedReindexFilesForRetry(
+            jobID: jobID,
+            fileIDs: [firstFailedID]
+        )
+        let summary = try XCTUnwrap(store.latestReindexJobSummary())
+
+        XCTAssertEqual(updated, 1)
+        XCTAssertEqual(summary.job.statusValue, .interrupted)
+        XCTAssertEqual(summary.pending, 1)
+        XCTAssertEqual(summary.completed, 1)
+        XCTAssertEqual(summary.failed, 1)
+        XCTAssertEqual(
+            summary.files.first(where: { $0.fileID == firstFailedID })?.state,
+            .pending
+        )
+        XCTAssertEqual(
+            summary.files.first(where: { $0.fileID == secondFailedID })?.state,
+            .failed
+        )
+    }
+
+    func testResumingPartialReindexQueuesOnlyIncompleteFiles() throws {
+        let completedID = try store.upsertFile(makeFile(path: filePath("completed.pdf"), title: "Completed"))
+        let failedID = try store.upsertFile(makeFile(path: filePath("failed.mp4"), title: "Failed"))
+        let now = Date()
+        let job = try store.createReindexJob(
+            ReindexJobRecord(
+                id: nil,
+                kind: "full-reindex",
+                rebuildVectorSpace: true,
+                contentCategoriesJSON: "[]",
+                onlyUnindexedFiles: false,
+                includeUnindexedFiles: false,
+                retrievalIndexOnly: false,
+                forceSourceReprocessing: true,
+                onlyMediaFiles: false,
+                fileCategoriesJSON: "[]",
+                targetEmbeddingSignature: "embedding-v1",
+                status: ReindexJobStatus.completedWithErrors.rawValue,
+                total: 2,
+                createdAt: now,
+                updatedAt: now
+            ),
+            fileIDs: [completedID, failedID]
+        )
+        let jobID = try XCTUnwrap(job.id)
+        store.markReindexJobFile(jobID: jobID, fileID: completedID, state: .completed)
+        store.markReindexJobFile(jobID: jobID, fileID: failedID, state: .failed)
+
+        let resumed = try XCTUnwrap(store.resumableReindexJob())
+        let summary = try XCTUnwrap(store.latestReindexJobSummary())
+
+        XCTAssertEqual(resumed.id, jobID)
+        XCTAssertEqual(summary.completed, 1)
+        XCTAssertEqual(summary.pending, 1)
+        XCTAssertEqual(summary.failed, 0)
+        XCTAssertEqual(
+            try store.reindexJobFileIDs(jobID: jobID, includeCompleted: false),
+            [failedID]
+        )
+    }
+
     func testDuplicateGroupsRetainOldestFileAndCountReclaimableBytes() {
         var retained = makeFile(path: filePath("original.pdf"), title: "Original")
         retained.id = 1
@@ -361,6 +453,61 @@ final class SQLiteStoreTests: XCTestCase {
         try store.updateFileNote(id: fileID, note: "Updated note")
 
         XCTAssertFalse(try XCTUnwrap(store.librarySearchHistory().first).hasValidCache)
+    }
+
+    func testSmartSearchPlanCacheIsIndependentFromLibraryRevision() throws {
+        let fileID = try store.upsertFile(makeFile(path: filePath("invoice.pdf"), title: "Invoice"))
+        let payload = Data("{\"plan\":\"cached\"}".utf8)
+
+        try store.saveSmartSearchPlan(
+            query: "Last month's PDF invoices",
+            plannerSignature: "planner-v1",
+            intent: "Find PDF invoices from last month",
+            payload: payload
+        )
+        let revisionBeforeMutation = try store.libraryRevision()
+        try store.updateFileNote(id: fileID, note: "Revision-changing note")
+
+        XCTAssertGreaterThan(try store.libraryRevision(), revisionBeforeMutation)
+        let cached = try XCTUnwrap(store.cachedSmartSearchPlan(
+            query: "LAST MONTH'S PDF INVOICES",
+            plannerSignature: "planner-v1"
+        ))
+        XCTAssertEqual(cached.intent, "Find PDF invoices from last month")
+        XCTAssertEqual(cached.payload, payload)
+    }
+
+    func testLexicalCandidatesApplyStructuredFilterAndAvoidFullBodyHydration() throws {
+        let longBody = "invoice marker " + String(repeating: "extended body ", count: 2_000)
+        _ = try store.upsertFile(makeFile(
+            path: filePath("matching.pdf"),
+            title: "Matching",
+            contentText: longBody
+        ))
+        _ = try store.upsertFile(makeFile(
+            path: filePath("excluded.txt"),
+            title: "Excluded",
+            contentText: longBody
+        ))
+        let filter = LibraryFileMetadataFilter(fileExtensions: ["pdf"])
+
+        let candidates = try store.files(
+            matchingAny: ["invoice marker"],
+            filter: filter,
+            includeContent: true,
+            limit: 20
+        )
+
+        XCTAssertEqual(candidates.map(\.ext), ["pdf"])
+        let snippet = try XCTUnwrap(candidates.first?.contentText)
+        XCTAssertTrue(snippet.localizedCaseInsensitiveContains("invoice marker"))
+        XCTAssertLessThan(snippet.count, longBody.count)
+        XCTAssertTrue(try store.files(
+            matchingAny: ["invoice marker"],
+            filter: filter,
+            includeContent: false,
+            limit: 20
+        ).isEmpty)
     }
 
     func testAutomaticSearchCacheIsHiddenUntilExplicitlySearched() throws {
@@ -997,7 +1144,11 @@ final class SQLiteStoreTests: XCTestCase {
         }
     }
 
-    private func makeFile(path: String, title: String) -> FileRecord {
+    private func makeFile(
+        path: String,
+        title: String,
+        contentText: String? = nil
+    ) -> FileRecord {
         FileRecord(
             id: nil,
             path: path,
@@ -1010,7 +1161,7 @@ final class SQLiteStoreTests: XCTestCase {
             indexedAt: nil,
             contentHash: nil,
             title: title,
-            contentText: title
+            contentText: contentText ?? title
         )
     }
 }

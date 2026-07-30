@@ -17,7 +17,13 @@ export function normalizeSettingsPatch(patch: Partial<Settings>, current: Settin
   if (result.ragResultLimit != null) result.ragResultLimit = Math.min(30, Math.max(1, Math.round(result.ragResultLimit)))
   if (result.cloudContextWindowTokens != null) result.cloudContextWindowTokens = result.cloudContextWindowTokens === 0 ? 0 : Math.min(2_000_000, Math.max(4_096, Math.round(result.cloudContextWindowTokens)))
   if (result.enabledExtensions) result.enabledExtensions = [...new Set(result.enabledExtensions.map((value) => value.replace(/^\./, '').trim().toLowerCase()).filter(Boolean))]
+  if (result.customFileExtensions) result.customFileExtensions = [...new Set(result.customFileExtensions.map((value) => value.replace(/^\./, '').trim().toLowerCase()).filter(Boolean))]
   if (result.vectorizeExtensions) result.vectorizeExtensions = [...new Set(result.vectorizeExtensions.map((value) => value.replace(/^\./, '').trim().toLowerCase()).filter(Boolean))]
+  if (result.cloudContextWindowOverrides) {
+    result.cloudContextWindowOverrides = Object.fromEntries(Object.entries(result.cloudContextWindowOverrides)
+      .map(([key, value]) => [key, value === 0 ? 0 : Math.min(2_000_000, Math.max(4_096, Math.round(Number(value) || 0)))])
+      .filter(([, value]) => Number(value) > 0))
+  }
   if (result.mediaTranscriptionEnabled) {
     result.enabledExtensions = [...new Set([...(result.enabledExtensions ?? current.enabledExtensions), ...MEDIA_TRANSCRIPTION_EXTENSIONS])]
   }

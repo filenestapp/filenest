@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import Carbon
+import ServiceManagement
 @testable import FileNest
 
 final class AppSettingsTests: XCTestCase {
@@ -38,12 +39,55 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(scrollView.verticalScroller?.alphaValue ?? -1, 0.30, accuracy: 0.001)
     }
 
+    @MainActor
+    func testLaunchAtLoginServiceRegistersAndUnregistersTheMainApp() async {
+        var systemStatus = SMAppService.Status.notRegistered
+        var registerCount = 0
+        var unregisterCount = 0
+        let service = LaunchAtLoginService(
+            statusProvider: { systemStatus },
+            registerAction: {
+                registerCount += 1
+                systemStatus = .enabled
+            },
+            unregisterAction: {
+                unregisterCount += 1
+                systemStatus = .notRegistered
+            }
+        )
+
+        XCTAssertEqual(service.status, .disabled)
+
+        await service.setEnabled(true)
+
+        XCTAssertEqual(registerCount, 1)
+        XCTAssertEqual(service.status, .enabled)
+
+        await service.setEnabled(false)
+
+        XCTAssertEqual(unregisterCount, 1)
+        XCTAssertEqual(service.status, .disabled)
+    }
+
+    @MainActor
+    func testLaunchAtLoginServiceSurfacesSystemApprovalState() {
+        let service = LaunchAtLoginService(
+            statusProvider: { .requiresApproval },
+            registerAction: {},
+            unregisterAction: {}
+        )
+
+        XCTAssertEqual(service.status, .requiresApproval)
+        XCTAssertFalse(service.isEnabled)
+    }
+
     func testSettingsPersistAcrossInstances() {
         let settings = AppSettings(store: store)
         settings.setMediaTranscriptionEnabled(true)
         settings.setWhisperModel("small")
         settings.setWatchDirs(["/tmp/Downloads", "/tmp/Desktop"])
         settings.setEnabledExtensions(["pdf", "md"])
+        settings.setCustomFileExtensions(["LOG", ".trace", "pdf", "log"])
         settings.setExcludeHidden(false)
         settings.setClassifyStrategy(ClassificationStrategy.rule.rawValue)
         settings.setLLMChoice(AppSettings.LLMChoice.cloud.rawValue)
@@ -96,6 +140,7 @@ final class AppSettingsTests: XCTestCase {
 
         XCTAssertEqual(reloaded.watchDirs, ["/tmp/Downloads", "/tmp/Desktop"])
         XCTAssertEqual(reloaded.enabledExtensions, ["pdf", "md"])
+        XCTAssertEqual(reloaded.customFileExtensions, ["log", "trace"])
         XCTAssertFalse(reloaded.excludeHidden)
         XCTAssertEqual(reloaded.classifyStrategy, ClassificationStrategy.rule.rawValue)
         XCTAssertEqual(reloaded.llmChoice, AppSettings.LLMChoice.cloud.rawValue)
@@ -300,6 +345,26 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(AppSettings(store: store).cloudContextWindowTokens, 0)
     }
 
+    func testCloudContextWindowOverridesAreScopedToEachSelectedModel() {
+        let settings = AppSettings(store: store)
+        settings.setCloudBaseURL("https://gateway.example/v1")
+        settings.setCloudModel("model-a")
+        settings.setCloudContextWindowTokens(32_768)
+
+        settings.setCloudModel("model-b")
+        XCTAssertEqual(settings.cloudContextWindowTokens, 0)
+        settings.setCloudContextWindowTokens(65_536)
+
+        settings.setCloudModel("model-a")
+        XCTAssertEqual(settings.cloudContextWindowTokens, 32_768)
+        XCTAssertEqual(settings.cloudContextWindowOverride(), 32_768)
+        XCTAssertEqual(settings.cloudContextWindowOverride(for: "model-b"), 65_536)
+
+        let reloaded = AppSettings(store: store)
+        XCTAssertEqual(reloaded.cloudContextWindowOverride(for: "model-a"), 32_768)
+        XCTAssertEqual(reloaded.cloudContextWindowOverride(for: "model-b"), 65_536)
+    }
+
     func testLegacyDefaultChunkSettingsMigrateTo600And80() {
         store.setSetting("vector_chunk_words", "800")
         store.setSetting("vector_chunk_overlap", "100")
@@ -402,6 +467,15 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(migrated.ocrSource, AppSettings.OCRSource.local.rawValue)
         XCTAssertEqual(store.getSetting("ocr_source"), AppSettings.OCRSource.local.rawValue)
         XCTAssertEqual(store.getSetting("paddle_ocr_default_migration_v1"), "1")
+    }
+
+    func testFileTypeSelectorDefaultsCoverEveryBuiltInType() {
+        let settings = AppSettings(store: store)
+        let categorizedExtensions = Set(AppSettings.supportedFileExtensionCategories.flatMap(\.extensions))
+
+        XCTAssertEqual(Set(settings.enabledExtensions), categorizedExtensions)
+        XCTAssertEqual(Set(settings.vectorizeExtensions), Set(AppSettings.defaultVectorizeExtensions))
+        XCTAssertTrue(Set(AppSettings.defaultVectorizeExtensions).isSubset(of: categorizedExtensions))
     }
 
     func testAutoOrganizeScheduleClampsUnsafeValues() {

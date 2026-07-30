@@ -74,4 +74,9 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle('updates:check', () => controller.checkForUpdates())
   ipcMain.handle('logs:export', () => controller.exportLogs())
   ipcMain.handle('logs:clear', () => controller.clearLogs())
+  ipcMain.handle('skills:refresh', () => controller.refreshAgentSkills())
+  ipcMain.handle('skills:set-enabled', (_event, skillPath: string, enabled: boolean) => controller.setAgentSkillEnabled(skillPath, enabled))
+  ipcMain.handle('skills:import', () => controller.importAgentSkill())
+  ipcMain.handle('skills:delete', (_event, skillPath: string) => controller.deleteAgentSkill(skillPath))
+  ipcMain.handle('skills:open-folder', () => controller.openAgentSkillsFolder())
 }

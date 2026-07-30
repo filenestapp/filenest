@@ -59,6 +59,7 @@ final class AgentSkillServiceTests: XCTestCase {
 
         let skills = service.refresh()
         let skill = try XCTUnwrap(skills.first)
+        service.setEnabled(skill, enabled: true)
         XCTAssertEqual(skill.name, "invoice-review")
         XCTAssertFalse(service.catalogPrompt().contains("reconciliation workflow"))
 
@@ -84,10 +85,11 @@ final class AgentSkillServiceTests: XCTestCase {
         let service = makeService()
 
         let skill = try XCTUnwrap(service.refresh().first)
+        service.setEnabled(skill, enabled: true)
         XCTAssertEqual(skill.origin, .managed)
         XCTAssertEqual(skill.description, "Managed description")
         XCTAssertTrue(service.activate(names: [skill.name]).context.contains("Managed instructions"))
-        XCTAssertTrue(service.diagnostics().contains { $0.message.contains("shadows") })
+        XCTAssertTrue(service.diagnostics().contains { $0.message.contains("higher-precedence") })
     }
 
     func testExplicitActivationOnlyAcceptsInstalledEnabledSkills() throws {
@@ -99,6 +101,7 @@ final class AgentSkillServiceTests: XCTestCase {
         )
         let service = makeService()
         let skill = try XCTUnwrap(service.refresh().first)
+        service.setEnabled(skill, enabled: true)
 
         XCTAssertEqual(
             service.explicitSkillNames(in: "Use $travel-documents but not $missing-skill"),
@@ -146,7 +149,10 @@ final class AgentSkillServiceTests: XCTestCase {
                 .appendingPathComponent("SKILL.md")
         )
         let service = makeService()
-        _ = service.refresh()
+        let skills = service.refresh()
+        skills.filter { $0.origin != .bundled }.forEach {
+            service.setEnabled($0, enabled: true)
+        }
 
         let candidates = service.dynamicSkillNames(for: .attachedFileAnswer)
 
@@ -162,6 +168,73 @@ final class AgentSkillServiceTests: XCTestCase {
             ),
             ["invoice-review"]
         )
+    }
+
+    func testBundledSkillsAreAlwaysEnabledAndCannotBeDisabled() throws {
+        try writeSkill(
+            name: "bundled-review",
+            description: "Review bundled evidence.",
+            body: "Bundled instructions",
+            root: bundledDirectory
+        )
+        let service = makeService()
+        let skill = try XCTUnwrap(service.refresh().first)
+        XCTAssertTrue(skill.enabled)
+
+        service.setEnabled(skill, enabled: false)
+        XCTAssertTrue(service.refresh().first?.enabled == true)
+    }
+
+    func testUserSkillsRequireExplicitEnablement() throws {
+        try writeSkill(
+            name: "shared-review",
+            description: "Review shared evidence.",
+            body: "Shared instructions",
+            root: sharedDirectory
+        )
+        let service = makeService()
+        let skill = try XCTUnwrap(service.refresh().first)
+
+        XCTAssertFalse(skill.enabled)
+        service.setEnabled(skill, enabled: true)
+        XCTAssertTrue(service.refresh().first?.enabled == true)
+    }
+
+    func testManagedSkillsAreEnabledByDefaultButCanBeDisabled() throws {
+        try writeSkill(
+            name: "managed-review",
+            description: "Review FileNest-managed evidence.",
+            body: "Managed instructions",
+            root: managedDirectory
+        )
+        let service = makeService()
+        let skill = try XCTUnwrap(service.refresh().first)
+
+        XCTAssertEqual(skill.origin, .managed)
+        XCTAssertTrue(skill.enabled)
+        service.setEnabled(skill, enabled: false)
+        XCTAssertFalse(service.refresh().first?.enabled == true)
+        service.setEnabled(skill, enabled: true)
+        XCTAssertTrue(service.refresh().first?.enabled == true)
+    }
+
+    func testImportCopiesEnabledSkillPackageIntoManagedDirectory() throws {
+        try writeSkill(
+            name: "imported-review",
+            description: "Review imported evidence.",
+            body: "Imported instructions",
+            root: sharedDirectory
+        )
+        let service = makeService()
+        let source = sharedDirectory.appendingPathComponent("imported-review/SKILL.md")
+
+        let imported = try service.importSkillPackage(from: source)
+
+        XCTAssertEqual(imported.origin, .managed)
+        XCTAssertTrue(imported.enabled)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: managedDirectory.appendingPathComponent("imported-review/SKILL.md").path
+        ))
     }
 
     func testFeedbackEvolutionCreatesManagedStandardOverride() throws {
@@ -199,9 +272,37 @@ final class AgentSkillServiceTests: XCTestCase {
         )
         XCTAssertEqual(evolved.metadata["filenest-auto-activate"], "search")
         XCTAssertEqual(evolved.metadata["filenest-version"], "2")
+        XCTAssertTrue(evolved.enabled)
         let context = service.activate(names: [evolved.name]).context
         XCTAssertTrue(context.contains("## Learned Adjustments"))
         XCTAssertTrue(context.contains("complete core phrase evidence"))
+    }
+
+    func testDisabledManagedOverrideFallsBackToAlwaysEnabledBundledSkill() throws {
+        try writeSkill(
+            name: "shared-name",
+            description: "Bundled baseline.",
+            body: "Bundled instructions",
+            root: bundledDirectory
+        )
+        try writeSkill(
+            name: "shared-name",
+            description: "Managed override.",
+            body: "Managed instructions",
+            root: managedDirectory
+        )
+        let service = makeService()
+        let managed = try XCTUnwrap(service.refresh().first)
+        XCTAssertEqual(managed.origin, .managed)
+        service.setEnabled(managed, enabled: false)
+
+        let active = try XCTUnwrap(service.refresh().first)
+        XCTAssertEqual(active.origin, .bundled)
+        XCTAssertTrue(active.enabled)
+        XCTAssertTrue(service.activate(names: [active.name]).context.contains("Bundled instructions"))
+        XCTAssertTrue(service.diagnostics().contains {
+            $0.message.contains("does not shadow the enabled bundled skill")
+        })
     }
 
     func testInvalidStandardPackageIsDiagnosedAndNotDiscovered() throws {

@@ -94,6 +94,32 @@ final class AccelerateVectorStoreTests: XCTestCase {
         XCTAssertEqual(neighbors.last?.kind, .table)
     }
 
+    func testFilteredVectorSearchOnlyScoresAllowedFiles() async throws {
+        let strongestFileID = try insertFile(named: "strongest.txt")
+        let allowedFileID = try insertFile(named: "allowed.pdf")
+        let vectorStore = AccelerateVectorStore(store: store)
+        let insertedStrongest = await vectorStore.replace(
+            fileId: strongestFileID,
+            chunks: [EmbeddingChunk(vector: [1, 0], text: "Globally strongest")],
+            model: "test-model"
+        )
+        let insertedAllowed = await vectorStore.replace(
+            fileId: allowedFileID,
+            chunks: [EmbeddingChunk(vector: [0.8, 0.2], text: "Allowed candidate")],
+            model: "test-model"
+        )
+        XCTAssertTrue(insertedStrongest)
+        XCTAssertTrue(insertedAllowed)
+
+        let hits = await vectorStore.searchChunks(
+            [1, 0],
+            allowedFileIDs: [allowedFileID],
+            k: 10
+        )
+
+        XCTAssertEqual(hits.map(\.fileId), [allowedFileID])
+    }
+
     func testExactChunkTokenMetadataSurvivesVectorPersistence() async throws {
         let fileId = try insertFile(named: "tokenized.pdf")
         let vectorStore = AccelerateVectorStore(store: store)
