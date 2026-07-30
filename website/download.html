@@ -4,17 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#4f46e5" />
-    <meta name="description" content="FileNest desktop release status for macOS and Windows." />
-    <meta property="og:title" content="FileNest — Release status" />
-    <meta property="og:description" content="See the current FileNest desktop release status for macOS and Windows." />
+    <meta name="description" content="Download the notarized FileNest app for macOS. Keep file search, indexing, and AI grounded on your computer." />
+    <meta property="og:title" content="Download FileNest for macOS" />
+    <meta property="og:description" content="A notarized, local-first desktop app for understanding the files already on your Mac." />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://filenestapp.com/download.html" />
     <meta property="og:image" content="https://filenestapp.com/assets/filenest-og.png" />
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="canonical" href="https://filenestapp.com/download.html" />
     <link rel="icon" href="assets/app-icon.png" />
-    <link rel="stylesheet" href="styles.css" />
-    <title>FileNest — Release status</title>
+    <link rel="stylesheet" href="styles.css?v=20260730-4" />
+    <title>Download FileNest for macOS</title>
   </head>
   <body class="release-page">
     <a class="skip-link" href="#main">Skip to content</a>
@@ -29,40 +29,76 @@
         <a href="index.html#privacy">Privacy</a>
         <a href="index.html#questions">Questions</a>
       </nav>
-      <a class="header-cta" href="index.html#demo">Explore FileNest</a>
+      <a class="header-cta" href="downloads/FileNest-0.2.0-macOS.dmg" download>Download for macOS</a>
     </header>
 
     <main id="main">
       <section class="release-hero">
         <div>
-          <p class="release-eyebrow"><span class="status-dot" aria-hidden="true"></span> Desktop release status</p>
-          <h1>Built for the files you already trust your computer with.</h1>
-          <p class="release-lede">FileNest is preparing its public desktop release. The product stays local-first from indexing through answer generation, with cloud services remaining an explicit choice.</p>
+          <p class="release-eyebrow"><span class="status-dot" aria-hidden="true"></span> FileNest for macOS</p>
+          <h1>Give your files a little less to hide behind.</h1>
+          <p class="release-lede">FileNest indexes, searches, and chats with the files already on your Mac. In local mode, your content, index, notes, and conversations stay on this device.</p>
           <div class="release-actions">
-            <a class="button button--primary" href="index.html#demo">Explore the live demo</a>
-            <a class="button button--quiet" href="index.html#privacy">Read the privacy model</a>
+            <a class="button button--primary" href="downloads/FileNest-0.2.0-macOS.dmg" download>Download for macOS</a>
+            <a class="button button--quiet" href="#install">Installation guide</a>
           </div>
+          <p class="release-build-note">Version 0.2.0 · 13.7 MB · macOS 13 or later</p>
         </div>
         <div class="release-hero__art" aria-hidden="true">
           <img src="assets/app-icon.png" alt="" width="168" height="168" />
-          <span>Local AI</span><span>Private index</span><span>Desktop-native</span>
+          <span>Notarized</span><span>Local-first</span><span>macOS 13+</span>
         </div>
+      </section>
+
+      <section class="download-release section" id="macos-download" aria-labelledby="download-title">
+        <div class="section-heading">
+          <p class="section-intro">Current release</p>
+          <h2 id="download-title">FileNest 0.2.0 for macOS</h2>
+          <p>One signed, notarized download for a private workspace that understands your files.</p>
+        </div>
+        <div class="download-card">
+          <div class="download-card__identity">
+            <img src="assets/app-icon.png" alt="" width="72" height="72" />
+            <div>
+              <p>FileNest for macOS</p>
+              <span>DMG installer · 13.7 MB</span>
+            </div>
+          </div>
+          <div class="download-card__details">
+            <span>Requires macOS 13 Ventura or later</span>
+            <span>Developer ID signed and Apple notarized</span>
+          </div>
+          <a class="button button--primary" href="downloads/FileNest-0.2.0-macOS.dmg" download>Download DMG</a>
+          <p class="download-card__checksum">SHA-256 <code>bab36ed07e54336d5ffff2766021ef53c6f1e0bca833bfcbd50fc02b9240853b</code></p>
+        </div>
+      </section>
+
+      <section class="install-guide" id="install" aria-labelledby="install-title">
+        <div>
+          <p class="section-intro">Install in a minute</p>
+          <h2 id="install-title">Open. Drag. Start finding.</h2>
+        </div>
+        <ol class="install-steps">
+          <li><span>1</span><p><strong>Open the downloaded DMG.</strong> macOS verifies the signed installer when you open it.</p></li>
+          <li><span>2</span><p><strong>Drag FileNest to Applications.</strong> This adds it to your standard Applications folder.</p></li>
+          <li><span>3</span><p><strong>Choose the folders you want to understand.</strong> Local mode works without an account.</p></li>
+        </ol>
       </section>
 
       <section class="release-matrix section" aria-labelledby="platform-status-title">
         <div class="section-heading">
           <p class="section-intro">Platform readiness</p>
           <h2 id="platform-status-title">One product model, two native desktop experiences.</h2>
-          <p>Release availability is updated here as signed public artifacts are prepared.</p>
+          <p>macOS is available now. Windows availability will be added here after release validation is complete.</p>
         </div>
         <div class="release-cards">
           <article class="release-card release-card--ready">
-            <div class="release-card__top"><span class="release-platform">macOS</span><span class="release-badge">Current baseline</span></div>
+            <div class="release-card__top"><span class="release-platform">macOS</span><span class="release-badge">Available now</span></div>
             <h3>macOS 13 and later</h3>
             <p>Native SwiftUI interface, Finder integration, menu-bar presence, local indexing, and local-model workflows.</p>
             <ul>
-              <li>Apple silicon and Intel builds are in release preparation</li>
-              <li>Public signed download will appear here at launch</li>
+              <li>Requires macOS 13 Ventura or later</li>
+              <li><a href="downloads/FileNest-0.2.0-macOS.dmg" download>Download FileNest 0.2.0</a></li>
             </ul>
           </article>
           <article class="release-card">
@@ -71,7 +107,7 @@
             <p>Native shell actions, secure local credential storage, system-tray workflows, and feature-aligned search and chat.</p>
             <ul>
               <li>x64 and ARM64 installers are completing release validation</li>
-              <li>Public signed download will appear here at launch</li>
+              <li>Join us on macOS while Windows becomes available</li>
             </ul>
           </article>
         </div>
@@ -85,7 +121,7 @@
         <div class="release-notes__items">
           <p><strong>No account required for local mode.</strong> FileNest uses your operating-system account and the folders you select as its authorization boundary.</p>
           <p><strong>Cloud remains opt-in.</strong> File content is only sent to a cloud provider when you explicitly configure and use one for a chosen workflow.</p>
-          <p><strong>Release artifacts will be signed.</strong> Public installers will be accompanied by platform-specific installation guidance.</p>
+          <p><strong>Signed and notarized for macOS.</strong> The current DMG has an Apple notarization ticket and a Developer ID signature.</p>
         </div>
       </section>
     </main>
@@ -96,7 +132,7 @@
         <p>Local-first intelligent file management.</p>
       </div>
       <nav class="footer-nav" aria-label="Footer navigation">
-        <a href="index.html#demo">Live demo</a><a href="index.html#privacy">Privacy</a><a href="index.html#questions">Questions</a>
+        <a href="index.html#demo">Live demo</a><a href="index.html#privacy">Privacy</a><a href="index.html#questions">Questions</a><a href="#macos-download">Download</a>
       </nav>
       <div class="footer-meta"><a class="footer-domain" href="https://filenestapp.com/">filenestapp.com</a><p class="footer-note">© 2026 FileNest. All rights reserved.</p></div>
     </footer>

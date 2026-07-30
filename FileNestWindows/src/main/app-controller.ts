@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, shell } from 'electron'
 import { basename, dirname, join } from 'node:path'
-import { readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import type { AiConnectivityCheck, AppSnapshot, ChatFeedback, ChatStreamEvent, DuplicateFileGroup, DuplicateScanProgress, DuplicateTrashResult, FileCategory, FileRecord, LibrarySearchRequest, LibrarySearchResponse, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 import { FileNestDatabase } from './database'
@@ -11,7 +11,7 @@ import { IndexerService } from './indexer'
 import { OrganizerService } from './organizer'
 import { FileWatcherService } from './watcher'
 import { LlmService } from './llm'
-import { ChatService } from './chat'
+import { ChatService, cloudContextWindowOverrideKey } from './chat'
 import { OllamaManager, requiresOllamaService } from './ollama'
 import updater from 'electron-updater'
 import { doclingManager } from './docling'
@@ -22,6 +22,7 @@ import { prompts } from './prompts'
 import { RerankerServiceManager } from './reranker-manager'
 import { mediaTranscriptionManager } from './media-transcription'
 import { DuplicateFileService, sha256File } from './duplicate-files'
+import { AgentSkillService } from './agent-skills'
 
 const { autoUpdater } = updater
 
@@ -33,7 +34,8 @@ export class AppController {
   private readonly indexer = new IndexerService(this.database, this.extractor, this.embeddings, this.logger)
   private readonly organizer = new OrganizerService(this.database, this.logger)
   private readonly watcher = new FileWatcherService(this.database, this.indexer, this.organizer, this.logger)
-  private readonly chat = new ChatService(this.database, this.embeddings, new LlmService(), this.logger)
+  private readonly agentSkills = new AgentSkillService(this.database)
+  private readonly chat = new ChatService(this.database, this.embeddings, new LlmService(), this.logger, this.agentSkills)
   private readonly librarySearch = new LibrarySearchService(this.database, this.embeddings, this.logger)
   private readonly duplicateFiles = new DuplicateFileService(this.database)
   private readonly ollamaManager = new OllamaManager()
@@ -57,6 +59,7 @@ export class AppController {
 
   async initialize(): Promise<void> {
     await this.database.initialize()
+    await this.agentSkills.refresh()
     this.duplicateFileGroups = this.duplicateFiles.knownGroups()
     const settings = this.database.getSettings()
     this.selectedSessionId = null
@@ -75,7 +78,10 @@ export class AppController {
     if (settings.rerankerSource === 'local') void this.rerankerManager.start().catch((error) => this.logger.log('reranker', 'Unable to start the local reranker', error))
     if (process.platform === 'win32') app.setLoginItemSettings({ openAtLogin: settings.launchAtLogin, path: process.execPath })
     if (settings.onboardingCompleted) await this.watcher.start(settings)
-    if (settings.onboardingCompleted) void this.resumePendingOrganization()
+    if (settings.onboardingCompleted) {
+      void this.resumePendingOrganization()
+      void this.resumePendingReindex()
+    }
     void this.backfillFileCreationDates()
     if (settings.onboardingCompleted) void this.auditManagedContent()
     if (settings.automaticUpdateChecks && app.isPackaged) setTimeout(() => void this.checkForUpdates(), 10_000)
@@ -118,7 +124,9 @@ export class AppController {
       docling: await doclingManager.status(),
       ffmpeg: mediaTranscriptionManager.ffmpeg(),
       whisper: mediaTranscriptionManager.whisper(),
-      reranker: this.rerankerManager.status()
+      reranker: this.rerankerManager.status(),
+      agentSkills: this.agentSkills.all(),
+      agentSkillDiagnostics: this.agentSkills.allDiagnostics()
     }
   }
 
@@ -168,7 +176,21 @@ export class AppController {
 
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
     const previous = this.database.getSettings()
-    const next = await this.database.updateSettings(normalizeSettingsPatch(patch, previous))
+    const normalized = normalizeSettingsPatch(patch, previous)
+    const cloudScopeChanged = ['cloudApiFormat', 'cloudBaseUrl', 'cloudModel'].some((key) => key in normalized)
+    if (cloudScopeChanged && !('cloudContextWindowTokens' in normalized)) {
+      const scope = { ...previous, ...normalized }
+      normalized.cloudContextWindowTokens = previous.cloudContextWindowOverrides[cloudContextWindowOverrideKey(scope)] ?? 0
+    }
+    if ('cloudContextWindowTokens' in normalized) {
+      const scope = { ...previous, ...normalized }
+      const overrides = { ...previous.cloudContextWindowOverrides }
+      const key = cloudContextWindowOverrideKey(scope)
+      if ((normalized.cloudContextWindowTokens ?? 0) > 0) overrides[key] = normalized.cloudContextWindowTokens!
+      else delete overrides[key]
+      normalized.cloudContextWindowOverrides = overrides
+    }
+    const next = await this.database.updateSettings(normalized)
     if ('quickSearchShortcut' in patch) this.quickSearchShortcutError = this.onQuickSearchShortcutChanged?.(next.quickSearchShortcut) ?? null
     if ('launchAtLogin' in patch && process.platform === 'win32') app.setLoginItemSettings({ openAtLogin: next.launchAtLogin, path: process.execPath })
     if ('rerankerSource' in patch) {
@@ -236,7 +258,9 @@ export class AppController {
     await rm(this.pendingOrganizationPath, { force: true })
     this.notifyChanged()
   }
-  async reindexAll(mode: ReindexMode = 'all', categories: FileCategory[] = []): Promise<void> { await this.indexer.reindexAll(this.database.getSettings(), mode, categories); this.indexingProgress = null; this.notifyChanged() }
+  async reindexAll(mode: ReindexMode = 'all', categories: FileCategory[] = []): Promise<void> {
+    await this.runReindexJob({ mode, categories, fileIds: null })
+  }
   async reindexFile(id: number): Promise<void> {
     const file = this.database.getFile(id)
     if (!file) return
@@ -472,6 +496,21 @@ export class AppController {
 
   clearLogs(): Promise<number> { return this.logger.clear() }
 
+  async refreshAgentSkills(): Promise<void> { await this.agentSkills.refresh(); this.notifyChanged() }
+  async setAgentSkillEnabled(skillPath: string, enabled: boolean): Promise<void> { await this.agentSkills.setEnabled(skillPath, enabled); this.notifyChanged() }
+  async importAgentSkill(): Promise<void> {
+    const result = await dialog.showOpenDialog({ title: 'Import Agent Skill', properties: ['openFile'], filters: [{ name: 'Agent Skill', extensions: ['md'] }] })
+    const path = result.canceled ? null : result.filePaths[0] ?? null
+    if (!path) return
+    await this.agentSkills.importPackage(path)
+    this.notifyChanged()
+  }
+  async deleteAgentSkill(skillPath: string): Promise<void> { await this.agentSkills.deleteManagedPackage(skillPath); this.notifyChanged() }
+  async openAgentSkillsFolder(): Promise<string> {
+    await mkdir(this.agentSkills.managedDirectory, { recursive: true })
+    return shell.openPath(this.agentSkills.managedDirectory)
+  }
+
   async shutdown(): Promise<void> {
     this.indexer.cancel()
     await this.watcher.stop()
@@ -481,6 +520,7 @@ export class AppController {
   }
 
   private get pendingOrganizationPath(): string { return join(app.getPath('userData'), 'pending-organization-job.json') }
+  private get pendingReindexPath(): string { return join(app.getPath('userData'), 'pending-reindex-job.json') }
 
   private async resumePendingOrganization(): Promise<void> {
     const job = await readFile(this.pendingOrganizationPath, 'utf8')
@@ -488,6 +528,31 @@ export class AppController {
       .catch(() => null)
     if (!job || !Array.isArray(job.directories) || !job.directories.every((path) => typeof path === 'string')) return
     await this.organizeDirectoriesOnce(job.directories, job.recursively === true)
+  }
+
+  private async resumePendingReindex(): Promise<void> {
+    const job = await readFile(this.pendingReindexPath, 'utf8')
+      .then((value) => JSON.parse(value) as { mode?: unknown; categories?: unknown; fileIds?: unknown })
+      .catch(() => null)
+    if (!job || !isReindexMode(job.mode) || !Array.isArray(job.categories) || !job.categories.every(isFileCategory)) return
+    const fileIds = Array.isArray(job.fileIds) && job.fileIds.every((value) => Number.isInteger(value) && Number(value) > 0)
+      ? job.fileIds.map(Number)
+      : null
+    await this.runReindexJob({ mode: job.mode, categories: job.categories, fileIds })
+  }
+
+  private async runReindexJob(job: { mode: ReindexMode; categories: FileCategory[]; fileIds: number[] | null }): Promise<void> {
+    if (this.indexer.isRunning) return
+    await writeFile(this.pendingReindexPath, JSON.stringify(job), 'utf8')
+    try {
+      const result = await this.indexer.reindexAll(this.database.getSettings(), job.mode, job.categories, job.fileIds ?? undefined)
+      const retryIds = [...new Set([...result.failedFileIds, ...result.pendingFileIds])]
+      if (result.completed && retryIds.length === 0) await rm(this.pendingReindexPath, { force: true })
+      else await writeFile(this.pendingReindexPath, JSON.stringify({ ...job, fileIds: retryIds }), 'utf8')
+    } finally {
+      this.indexingProgress = null
+      this.notifyChanged()
+    }
   }
 
   private async ensureAttachedFile(path: string): Promise<FileRecord> {
@@ -524,6 +589,15 @@ export class AppController {
     for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('state:changed')
     this.onChanged?.()
   }
+}
+
+function isReindexMode(value: unknown): value is ReindexMode {
+  return value === 'all' || value === 'unindexed' || value === 'embeddings' || value === 'media'
+}
+
+function isFileCategory(value: unknown): value is FileCategory {
+  return value === 'documents' || value === 'images' || value === 'videos' || value === 'audio'
+    || value === 'code' || value === 'archives' || value === 'other'
 }
 
 const CONNECTIVITY_TEST_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='

@@ -3,6 +3,7 @@ import SwiftUI
 
 enum LibrarySortField: Equatable {
     case relevance
+    case added
     case modified
     case size
 }
@@ -53,6 +54,8 @@ struct LibraryFileQuery {
             switch field {
             case .relevance:
                 comparison = .orderedSame
+            case .added:
+                comparison = lhs.addedAt.compare(rhs.addedAt)
             case .modified:
                 comparison = lhs.mtime.compare(rhs.mtime)
             case .size:
@@ -122,7 +125,7 @@ struct LibraryView: View {
     @State private var searchText = FileNestEnvironment.isSearchPreview ? "renewal term" : ""
     @State private var selectedCategories = Set<FileCategory>()
     @AppStorage("librarySearchUsesAI") private var searchUsesAI = false
-    @State private var sortField: LibrarySortField = .modified
+    @State private var sortField: LibrarySortField = .added
     @State private var sortDirection: LibrarySortDirection = .descending
     @State private var dateField: LibraryDateField = .modified
     @State private var draftDateRange = LibraryDateRange(start: Date(), end: Date())
@@ -135,6 +138,7 @@ struct LibraryView: View {
     @State private var derivedSearchMatchesByPath: [String: LibrarySearchResult] = [:]
     @State private var dismissedAutomaticProcessingItemIDs = Set<Int64>()
     @State private var feedbackPresentation: LibraryFeedbackPresentation?
+    @State private var reportedSearchFrameIDs = Set<UUID>()
 
     private var searchActivity: LibrarySearchActivity? {
         appState.librarySearchActivity
@@ -624,10 +628,16 @@ struct LibraryView: View {
                             sortDirection: sortDirection,
                             sort: updateSort
                         )
+                        if searchResults != nil {
+                            Color.clear
+                                .frame(height: 0)
+                                .onAppear { recordSearchResultsFirstFrame() }
+                        }
                         ForEach(visibleFiles) { file in
                             LibraryFileRow(
                                 file: file,
                                 searchMatch: searchMatchesByPath[file.path],
+                                displayedDateSortField: sortField,
                                 startDocumentChat: startDocumentChat,
                                 markMostAccurate: searchResults == nil || isSearching || searchStage != nil ? nil : {
                                     beginSingleFileFeedback(for: file)
@@ -835,7 +845,9 @@ struct LibraryView: View {
             clearSearch()
             return
         }
-        startSearch(query: query, debounceNanoseconds: 150_000_000, recordHistory: false)
+        // A debounced search is still a completed user search. The active task is cancelled as
+        // typing continues, so only the last query that reaches completion is added to history.
+        startSearch(query: query, debounceNanoseconds: 150_000_000, recordHistory: true)
     }
 
     private func startSearch(
@@ -881,7 +893,7 @@ struct LibraryView: View {
 
     private func clearSearch() {
         appState.clearLibrarySearch()
-        sortField = .modified
+        sortField = .added
         sortDirection = .descending
         resetPagination()
     }
@@ -914,6 +926,30 @@ struct LibraryView: View {
 
     private func resetPagination() {
         visibleLimit = 20
+    }
+
+    private func recordSearchResultsFirstFrame() {
+        if reportedSearchFrameIDs.count >= 256 {
+            reportedSearchFrameIDs.removeAll(keepingCapacity: true)
+        }
+        guard let activity = searchActivity,
+              activity.results != nil,
+              !activity.isActive,
+              let completedAt = activity.completedAt,
+              reportedSearchFrameIDs.insert(activity.id).inserted else { return }
+        Task { @MainActor in
+            await Task.yield()
+            AppLogService.shared.write(
+                "library search results first frame presented",
+                category: .searchPerformance,
+                metadata: [
+                    "publishToFrameMs": "\(Int(Date().timeIntervalSince(completedAt) * 1_000))",
+                    "results": "\(activity.results?.count ?? 0)",
+                    "searchID": String(activity.id.uuidString.prefix(8)).lowercased(),
+                    "totalToFrameMs": "\(Int(Date().timeIntervalSince(activity.startedAt) * 1_000))",
+                ]
+            )
+        }
     }
 
     private func loadNextPage() {
@@ -1081,7 +1117,7 @@ private struct LibraryColumnHeader: View {
                 Text("Category").frame(width: LibraryTableLayout.categoryWidth, alignment: .leading)
             }
             sortableHeader("Size", field: .size, width: LibraryTableLayout.sizeWidth)
-            sortableHeader("Modified", field: .modified, width: LibraryTableLayout.modifiedWidth)
+            dateSortHeader
             Text("Actions").frame(width: LibraryTableLayout.actionsWidth, alignment: .center)
         }
         .font(.system(size: 11, weight: .medium))
@@ -1090,6 +1126,32 @@ private struct LibraryColumnHeader: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(FileNestTheme.border).frame(height: 1)
         }
+    }
+
+    private var dateSortHeader: some View {
+        let displayedField: LibrarySortField = sortField == .modified ? .modified : .added
+        let title = displayedField == .modified ? "Modified" : "Date Added"
+        return Menu {
+            Button("Date Added") { sort(.added) }
+            Button("Modified") { sort(.modified) }
+        } label: {
+            HStack(spacing: 4) {
+                Text(LocalizedStringKey(title))
+                if sortField == displayedField {
+                    Image(systemName: sortDirection == .descending ? "chevron.down" : "chevron.up")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(FileNestTheme.accent)
+                }
+            }
+            .frame(width: LibraryTableLayout.modifiedWidth, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.visible)
+        .fixedSize(horizontal: true, vertical: false)
+        .pointingHandOnHover()
+        .help("Choose Date Sort")
+        .accessibilityLabel(LocalizedStringKey(title))
     }
 
     private func sortableHeader(_ title: String, field: LibrarySortField, width: CGFloat) -> some View {
@@ -1118,6 +1180,7 @@ private struct LibraryFileRow: View {
     @EnvironmentObject private var appState: AppState
     let file: FileRecord
     let searchMatch: LibrarySearchResult?
+    let displayedDateSortField: LibrarySortField
     let startDocumentChat: (FileRecord) -> Void
     let markMostAccurate: (() -> Void)?
     @State private var isHovered = false
@@ -1234,7 +1297,7 @@ private struct LibraryFileRow: View {
             }
             Text(file.displaySize)
                 .frame(width: LibraryTableLayout.sizeWidth, alignment: .leading)
-            Text(file.mtime.formatted(date: .abbreviated, time: .shortened))
+            Text(displayedDate.formatted(date: .abbreviated, time: .shortened))
                 .frame(width: LibraryTableLayout.modifiedWidth, alignment: .leading)
         }
         .contentShape(Rectangle())
@@ -1246,6 +1309,10 @@ private struct LibraryFileRow: View {
         .accessibilityAction(named: Text("View File Details")) {
             appState.toggleFilePreview(file)
         }
+    }
+
+    private var displayedDate: Date {
+        displayedDateSortField == .modified ? file.mtime : file.addedAt
     }
 
     private var actionButtons: some View {

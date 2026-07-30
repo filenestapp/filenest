@@ -419,6 +419,176 @@ final class OrganizerServiceTests: XCTestCase {
         XCTAssertEqual(updated.contentText, "before")
     }
 
+    func testReconcileManagedFilesPreservesRAGDataAndChatAttachmentAfterRename() throws {
+        let topicDirectory = organizedDirectory
+            .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
+            .appendingPathComponent("Reports", isDirectory: true)
+        try FileManager.default.createDirectory(at: topicDirectory, withIntermediateDirectories: true)
+        let originalURL = topicDirectory.appendingPathComponent("quarterly-report.txt")
+        try Data("stable indexed content".utf8).write(to: originalURL)
+        let values = try originalURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let indexedAt = Date()
+        let fileID = try store.upsertFile(FileRecord(
+            id: nil,
+            path: originalURL.path,
+            name: originalURL.lastPathComponent,
+            ext: originalURL.pathExtension,
+            size: Int64(values.fileSize ?? 0),
+            mtime: values.contentModificationDate ?? Date(),
+            category: FileCategory.documents.rawValue,
+            sourceDir: sourceDirectory.path,
+            indexedAt: indexedAt,
+            contentHash: try FileContentHasher.sha256(of: originalURL),
+            title: "Quarterly report",
+            contentText: "stable indexed content",
+            organizedAt: Date(),
+            note: "Keep this note",
+            organizationSubfolder: "Reports",
+            indexSignature: "embedding-space"
+        ))
+        try store.dbPool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO document_chunks(
+                        file_id, chunk_idx, text, contextual_text, section_path, kind
+                    )
+                    VALUES (?, 0, 'stable indexed content', 'stable indexed content', '[]', 'text')
+                    """,
+                arguments: [fileID]
+            )
+        }
+        let chatSession = try store.createChatSession(attachedFilePath: originalURL.path)
+        let organizer = OrganizerService(
+            store: store,
+            settings: AppSettings(store: store),
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid
+        )
+
+        // The first reconciliation backfills the stable filesystem identity.
+        _ = organizer.reconcileManagedFiles()
+        let renamedURL = topicDirectory.appendingPathComponent("financial-overview.txt")
+        try FileManager.default.moveItem(at: originalURL, to: renamedURL)
+
+        _ = organizer.reconcileManagedFiles()
+
+        let renamed = try XCTUnwrap(store.file(id: fileID))
+        XCTAssertEqual(renamed.path, renamedURL.path)
+        XCTAssertEqual(renamed.name, renamedURL.lastPathComponent)
+        XCTAssertEqual(
+            try XCTUnwrap(renamed.indexedAt).timeIntervalSince1970,
+            indexedAt.timeIntervalSince1970,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(renamed.indexSignature, "embedding-space")
+        XCTAssertEqual(renamed.note, "Keep this note")
+        XCTAssertEqual(try store.documentChunkCount(fileID: fileID), 1)
+        XCTAssertNil(try store.file(path: originalURL.path))
+        XCTAssertEqual(try store.allFiles().count, 1)
+
+        let updatedSession = try XCTUnwrap(
+            store.allChatSessions().first(where: { $0.id == chatSession.id })
+        )
+        XCTAssertEqual(updatedSession.attachedFilePath, renamedURL.path)
+        XCTAssertEqual(updatedSession.title, renamedURL.lastPathComponent)
+    }
+
+    func testReconcileManagedFilesUsesContentHashWhenRenameIdentityWasNotBackfilled() throws {
+        let topicDirectory = organizedDirectory
+            .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
+            .appendingPathComponent("Reports", isDirectory: true)
+        try FileManager.default.createDirectory(at: topicDirectory, withIntermediateDirectories: true)
+        let originalURL = topicDirectory.appendingPathComponent("legacy-name.txt")
+        try Data("legacy indexed content".utf8).write(to: originalURL)
+        let values = try originalURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let indexedAt = Date()
+        let fileID = try store.upsertFile(FileRecord(
+            id: nil,
+            path: originalURL.path,
+            name: originalURL.lastPathComponent,
+            ext: originalURL.pathExtension,
+            size: Int64(values.fileSize ?? 0),
+            mtime: values.contentModificationDate ?? Date(),
+            category: FileCategory.documents.rawValue,
+            sourceDir: sourceDirectory.path,
+            indexedAt: indexedAt,
+            contentHash: try FileContentHasher.sha256(of: originalURL),
+            title: "Legacy title",
+            contentText: "legacy indexed content",
+            organizedAt: Date(),
+            note: "Legacy note",
+            organizationSubfolder: "Reports",
+            indexSignature: "embedding-space"
+        ))
+        let renamedURL = topicDirectory.appendingPathComponent("renamed-before-upgrade.txt")
+        try FileManager.default.moveItem(at: originalURL, to: renamedURL)
+        let organizer = OrganizerService(
+            store: store,
+            settings: AppSettings(store: store),
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid
+        )
+
+        _ = organizer.reconcileManagedFiles()
+
+        let renamed = try XCTUnwrap(store.file(id: fileID))
+        XCTAssertEqual(renamed.path, renamedURL.path)
+        XCTAssertEqual(
+            try XCTUnwrap(renamed.indexedAt).timeIntervalSince1970,
+            indexedAt.timeIntervalSince1970,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(renamed.note, "Legacy note")
+        XCTAssertEqual(try store.allFiles().count, 1)
+    }
+
+    func testReconcileManagedFilesKeepsIdentityButInvalidatesIndexWhenRenamedContentChanged() throws {
+        let topicDirectory = organizedDirectory
+            .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)
+            .appendingPathComponent("Reports", isDirectory: true)
+        try FileManager.default.createDirectory(at: topicDirectory, withIntermediateDirectories: true)
+        let originalURL = topicDirectory.appendingPathComponent("draft.txt")
+        try Data("before".utf8).write(to: originalURL)
+        let values = try originalURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let fileID = try store.upsertFile(FileRecord(
+            id: nil,
+            path: originalURL.path,
+            name: originalURL.lastPathComponent,
+            ext: originalURL.pathExtension,
+            size: Int64(values.fileSize ?? 0),
+            mtime: values.contentModificationDate ?? Date(),
+            category: FileCategory.documents.rawValue,
+            sourceDir: sourceDirectory.path,
+            indexedAt: Date(),
+            contentHash: try FileContentHasher.sha256(of: originalURL),
+            title: "Draft",
+            contentText: "before",
+            organizedAt: Date(),
+            note: "Keep this note",
+            organizationSubfolder: "Reports",
+            indexSignature: "embedding-space"
+        ))
+        let organizer = OrganizerService(
+            store: store,
+            settings: AppSettings(store: store),
+            organizeRoot: organizedDirectory,
+            strategy: .hybrid
+        )
+        _ = organizer.reconcileManagedFiles()
+        try Data("after content is longer".utf8).write(to: originalURL)
+        let renamedURL = topicDirectory.appendingPathComponent("final.txt")
+        try FileManager.default.moveItem(at: originalURL, to: renamedURL)
+
+        _ = organizer.reconcileManagedFiles()
+
+        let renamed = try XCTUnwrap(store.file(id: fileID))
+        XCTAssertEqual(renamed.path, renamedURL.path)
+        XCTAssertNil(renamed.indexedAt)
+        XCTAssertNil(renamed.indexSignature)
+        XCTAssertEqual(renamed.note, "Keep this note")
+        XCTAssertEqual(try store.allFiles().count, 1)
+    }
+
     func testManagedContentAuditDetectsOverwriteWithPreservedMetadata() async throws {
         let topicDirectory = organizedDirectory
             .appendingPathComponent(FileCategory.documents.folderName, isDirectory: true)

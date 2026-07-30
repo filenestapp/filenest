@@ -13,6 +13,13 @@ interface ActiveIndexTask {
   promise: Promise<boolean>
 }
 
+export interface ReindexRunResult {
+  completed: boolean
+  total: number
+  failedFileIds: number[]
+  pendingFileIds: number[]
+}
+
 export class IndexerService {
   private running = false
   private paused = false
@@ -219,12 +226,14 @@ export class IndexerService {
     }
   }
 
-  async reindexAll(settings: Settings, mode: ReindexMode = 'all', categories: FileCategory[] = []): Promise<void> {
-    if (this.running) return
+  async reindexAll(settings: Settings, mode: ReindexMode = 'all', categories: FileCategory[] = [], fileIds?: number[]): Promise<ReindexRunResult> {
+    if (this.running) return { completed: false, total: 0, failedFileIds: [], pendingFileIds: fileIds ?? [] }
     this.running = true
     this.paused = false
     const generation = ++this.batchGeneration
+    const requestedIds = fileIds == null ? null : new Set(fileIds)
     const files = this.database.listFiles().filter((file) => {
+      if (requestedIds && !requestedIds.has(file.id)) return false
       if (categories.length && !categories.includes(file.category)) return false
       if (mode === 'unindexed') return !file.indexedAt
       if (mode === 'media') return settings.mediaTranscriptionEnabled && MEDIA_TRANSCRIPTION_EXTENSIONS.includes(file.ext.toLowerCase())
@@ -232,6 +241,8 @@ export class IndexerService {
     })
     let failed = 0
     let completed = 0
+    const failedFileIds: number[] = []
+    const processedFileIds = new Set<number>()
     try {
       let nextIndex = 0
       const concurrency = Math.min(files.length, recommendedFileConcurrency(totalmem(), settings))
@@ -245,12 +256,23 @@ export class IndexerService {
           const succeeded = mode === 'embeddings'
             ? await this.updateNoteIndex(file, settings)
             : await this.indexFile(file, settings, undefined, mode === 'all' || mode === 'media', () => generation === this.batchGeneration)
-          if (!succeeded) failed += 1
+          if (!succeeded) {
+            failed += 1
+            failedFileIds.push(file.id)
+          }
           completed += 1
+          processedFileIds.add(file.id)
         }
       }
       await Promise.all(Array.from({ length: concurrency }, () => worker()))
-      this.onProgress?.(completed, files.length, '', failed, generation === this.batchGeneration ? 'Completed' : 'Stopped')
+      const finished = generation === this.batchGeneration
+      this.onProgress?.(completed, files.length, '', failed, finished ? 'Completed' : 'Stopped')
+      return {
+        completed: finished,
+        total: files.length,
+        failedFileIds,
+        pendingFileIds: files.filter((file) => !processedFileIds.has(file.id)).map((file) => file.id)
+      }
     } finally {
       if (generation === this.batchGeneration) this.batchGeneration += 1
       this.running = false

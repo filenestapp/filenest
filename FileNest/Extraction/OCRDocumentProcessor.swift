@@ -161,7 +161,15 @@ enum OCRDocumentProcessor {
         checkpoint: (@Sendable () async -> Bool)? = nil
     ) async -> String? {
         guard let provider else { return nil }
-        guard !isCoolingDown(url: url, provider: provider) else { return nil }
+        guard !isCoolingDown(url: url, provider: provider) else {
+            AppLogService.shared.write(
+                "OCR skipped while this processing route is in failure cooldown",
+                category: .indexExtraction,
+                level: .warning,
+                metadata: ["file": url.lastPathComponent, "provider": provider.name]
+            )
+            return nil
+        }
         let normalizedExtension = ext.lowercased()
 
         if imageExtensions.contains(normalizedExtension) {
@@ -440,6 +448,12 @@ enum OCRDocumentProcessor {
             return text.isEmpty ? nil : String(text.prefix(maxOCRCharacters))
         } catch {
             recordFailure(url: url, provider: provider)
+            AppLogService.shared.write(
+                "OCR request failed: \(error.localizedDescription)",
+                category: .indexExtraction,
+                level: .warning,
+                metadata: ["file": url.lastPathComponent, "provider": provider.name]
+            )
             return nil
         }
     }
@@ -449,9 +463,10 @@ enum OCRDocumentProcessor {
         defer { stateLock.unlock() }
         let now = Date()
         let path = url.standardizedFileURL.path
-        if let deadline = providerFailedUntil[provider.name] {
+        let providerScope = providerFailureScope(url: url, provider: provider)
+        if let deadline = providerFailedUntil[providerScope] {
             if deadline > now { return true }
-            providerFailedUntil.removeValue(forKey: provider.name)
+            providerFailedUntil.removeValue(forKey: providerScope)
         }
         if let deadline = failedUntil[path] {
             if deadline > now { return true }
@@ -464,16 +479,24 @@ enum OCRDocumentProcessor {
         stateLock.lock()
         let deadline = Date().addingTimeInterval(failureCooldown)
         failedUntil[url.standardizedFileURL.path] = deadline
-        // Trip the provider circuit after OCR service or model failures so every file does not wait for another network timeout.
-        providerFailedUntil[provider.name] = deadline
+        providerFailedUntil[providerFailureScope(url: url, provider: provider)] = deadline
         stateLock.unlock()
     }
 
     private static func clearFailure(url: URL, provider: OCRProvider) {
         stateLock.lock()
         failedUntil.removeValue(forKey: url.standardizedFileURL.path)
-        providerFailedUntil.removeValue(forKey: provider.name)
+        providerFailedUntil.removeValue(
+            forKey: providerFailureScope(url: url, provider: provider)
+        )
         stateLock.unlock()
+    }
+
+    /// A timeout caused by a very large raster image must not disable OCR for scanned PDFs.
+    /// Keep provider circuit breakers isolated by the materially different processing routes.
+    private static func providerFailureScope(url: URL, provider: OCRProvider) -> String {
+        let route = url.pathExtension.lowercased() == "pdf" ? "pdf" : "image"
+        return "\(provider.name)|\(route)"
     }
 
     static func analyzePDF(at url: URL) -> PDFContentAnalysis? {

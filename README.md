@@ -2,6 +2,10 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Continuous Integration](https://github.com/filenestapp/filenest/actions/workflows/ci.yml/badge.svg)](https://github.com/filenestapp/filenest/actions/workflows/ci.yml)
+[![Windows Release](https://github.com/filenestapp/filenest/actions/workflows/windows-release.yml/badge.svg)](https://github.com/filenestapp/filenest/actions/workflows/windows-release.yml)
+
 FileNest watches the folders you choose and turns stable files and project directories into a local, searchable knowledge base. It extracts content, runs OCR when needed, creates structured chunks and vector indexes, optionally organizes files, and supports regular search, Smart Search, Find with Chat, and Chat with File.
 
 This repository contains two desktop implementations:
@@ -72,6 +76,7 @@ Local Ollama or cloud LLM answers
 - Discovery loads only skill metadata. Full instructions and referenced resources are loaded after automatic routing, explicit `$skill-name` activation, or session reuse.
 - Search and answer feedback is stored as an audit record before an AI analysis proposes either a safe update to an existing skill or a distinct reusable skill. Learned changes cannot weaken local-data privacy, evidence grounding, citation validation, or prompt-injection defenses.
 - Skills can be reviewed, enabled, disabled, revealed, refreshed, or removed from Settings.
+- Reusable deterministic capabilities run through a controlled in-process tool runtime and the matching `filenest skill` CLI. Built-in tools are registered explicitly and currently use in-memory read-only data; Skills cannot execute arbitrary shell scripts.
 
 ### Local and cloud AI
 
@@ -136,6 +141,17 @@ Windows installer, Explorer/Recycle Bin integration, DPAPI, tray behavior, and a
 - In local mode, document content does not need to leave the device.
 - Content is sent to a configured cloud API only when the user explicitly configures cloud Chat, Embedding, or OCR for the relevant operation.
 - The app operates within the current macOS user's file permissions. It does not provide accounts, RBAC, or multi-tenant isolation.
+
+## Open source
+
+FileNest is open source under the [MIT License](LICENSE). Contributions are
+welcome:
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+- Follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+- Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+- Review [third-party notices](THIRD_PARTY_NOTICES.md) when redistributing the
+  app or bundled source.
 
 ## Documentation
 

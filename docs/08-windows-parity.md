@@ -32,10 +32,11 @@ A capability is complete only when all applicable layers agree:
 | Onboarding and watched-folder policy | complete | implemented, including per-folder process/preserve choice and persistent baseline | integration tests passed |
 | Stable file/directory watching | complete | implemented, including stop generations, budgeted directory inspection, offline arrival reconciliation, and a bounded 24-hour managed-content hash audit | watcher and directory-budget tests passed; Windows filesystem smoke pending |
 | Extraction, Docling, OCR, media transcription | complete | implemented with Windows-native legacy Office fallback, iWork package fallback, managed Docling, Tesseract, Ollama, cloud OCR, managed FFmpeg, and isolated OpenAI Whisper with time-coded transcript chunks | code-level tests passed; provider/runtime matrix pending Windows |
-| Vector lifecycle | complete | implemented with atomic replacement, semantic parent/child chunks, entity terms, per-file generations, mutation guards, recovery splitting, media scope, and file-category-scoped rebuild | index/database tests passed |
+| Vector lifecycle | complete | implemented with atomic replacement, semantic parent/child chunks, entity terms, per-file generations, mutation guards, recovery splitting, media scope, file-category-scoped rebuild, and a persisted retry queue that resumes interrupted/failed reindex items after restart | index/database tests passed |
 | Organization | complete | implemented with priority/ignore/hybrid logic, safe paths, conflicts, cross-volume fallback, rollback distinction, and restart-safe one-time multi-folder organization with optional recursion and repository exclusion | organizer tests passed; cross-volume Windows smoke pending |
 | Library | complete | implemented with complete Smart Search filters, lexical/entity/semantic RRF, dynamic semantic acceptance, optional reranking, the 50%/minimum-three display policy, duplicate management, sorting, paging, creation dates, and inspector | query/duplicate tests and Electron UI build passed |
-| Chat | complete | implemented with parent evidence expansion, stable citation validation, bounded context, persisted related-file confidence and answer feedback, copy-success state, immediate durable questions, 40-message history pages, configurable retrieval, document/image/transcribed-media chat, retry replacement, progress, metrics, cancellation, and retrieval fallback | chat/database tests and Electron UI build passed |
+| Chat | complete | implemented with parent evidence expansion, stable citation validation, per-provider/endpoint/model context windows, persisted related-file confidence and answer feedback, copy-success state, immediate durable questions, 40-message history pages, configurable retrieval, document/image/transcribed-media chat, complete-document batch processing with source coverage, retry replacement, progress, metrics, cancellation, and retrieval fallback | chat/database tests and Electron UI build passed |
+| Standard Agent Skills | complete | implemented with bundled, shared-user, and FileNest-managed `SKILL.md` discovery; precedence/diagnostics; opt-in shared packages; import, enable, disable, remove, reveal, progressive activation, and search/attached-document routing | Agent Skills tests and Electron UI build passed |
 | Rules | complete | implemented with create/edit/delete/toggle/generate/apply | integration and UI build passed |
 | Settings and managed services | complete | implemented with independent providers, connectivity checks, model lifecycle, managed Qwen3 reranker lifecycle, FFmpeg/Whisper setup and model management, and selective indexing controls | type check/build passed; provider runtime matrix pending Windows |
 | Statistics, logs, updates | complete | implemented with activity/category/storage/model metrics, log lifecycle, and updater configuration | database tests passed; signed update pending publisher infrastructure |
@@ -71,6 +72,11 @@ A capability is complete only when all applicable layers agree:
 - Added file creation-date backfill, file-type-scoped reindex controls, bounded directory inspection, a 24-hour/cursor/256 MB managed-content audit, and one-time schema migration markers.
 - Added Ollama embedding requests with truncation and an explicit 32,000-token context window.
 - Added locally persisted helpful/not-helpful answer feedback, localized feedback actions, and a temporary copied-success state matching the latest macOS conversation actions.
+- Added the current standard Agent Skills runtime: bundled packages are shipped as application resources; shared packages are discovered from the standard user directory but remain opt-in; managed packages can be imported, enabled, disabled, deleted, refreshed, and inspected from settings. Skills are activated only by capability, explicit `$skill-name`, or a matching long-document intent.
+- Added per-cloud-provider/endpoint/model context-window overrides, automatic restoration of the value for the active model scope, and normalized persistence.
+- Added complete attached-document processing for explicit full-document translation and summary requests. Ordered parent sections are processed in safe context-window batches, streamed with progress, and returned with a source-coverage statement.
+- Added a durable reindex job descriptor. Interrupted work and failed file IDs are retained locally and resume on the next eligible application launch instead of silently being dropped.
+- Added custom file-type registration in Settings; custom types are normalized, join the watch scope immediately, and can independently be included in the vector-index scope.
 
 The latest macOS changes also add launch arguments for deterministic UI screenshot fixtures. Those are macOS development/QA tooling rather than a shipped product capability; Windows keeps its existing Electron runtime/CDP smoke path instead of reproducing AppKit-specific preview windows.
 
@@ -88,11 +94,11 @@ These platform gates must not be reported as passed solely because packaging suc
 
 Therefore, the source implementation now targets complete functional parity, while the release as a whole remains **not yet certified as 100% parity** until the Windows-native gates above pass on x64 and ARM64 Windows 11.
 
-## Latest code-level verification — 2026-07-20
+## Latest code-level verification — 2026-07-29
 
 - Current macOS XCTest baseline: 339 tests passed, 0 failed.
 - TypeScript strict type check: passed.
-- Vitest: 37 tests passed across 2 files, 0 failed.
+- Vitest: 43 tests passed across 2 files, 0 failed.
 - Electron production build: main, preload, and renderer bundles passed.
 - Windows packaging cross-build: passed with one x64/ARM64 Universal NSIS Setup and separate x64/ARM64 Portable executables; native installation acceptance and Authenticode signing remain pending.
 - Windows-native installer, shell, DPAPI, tray, startup, managed FFmpeg/Whisper runtime, and signed update gates remain pending.

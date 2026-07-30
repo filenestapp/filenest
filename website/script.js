@@ -21,6 +21,8 @@ const demoSidebarChat = document.querySelector("[data-demo-sidebar-chat]");
 const demoRecentFind = document.querySelector("[data-demo-recent-find]");
 const demoRecentFile = document.querySelector("[data-demo-recent-file]");
 const heroDemoLinks = [...document.querySelectorAll("[data-hero-demo]")];
+const productVideo = document.querySelector("[data-product-video]");
+const productVideoToggle = document.querySelector("[data-product-video-toggle]");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 let currentLocale = localStorage.getItem("filenest-locale") || DEFAULT_LOCALE;
@@ -39,7 +41,7 @@ function getNestedValue(object, path) {
 
 async function applyLocale(locale) {
   try {
-    const response = await fetch(`locales/${locale}.json`);
+    const response = await fetch(`locales/${locale}.json?v=20260730-4`);
     if (!response.ok) throw new Error(`Locale request failed with status ${response.status}`);
     const messages = await response.json();
 
@@ -66,9 +68,19 @@ async function applyLocale(locale) {
     currentLocale = locale;
     currentMessages = messages;
     updateDemoLabels();
+    updateProductVideoLabel();
   } catch (error) {
     console.error("Unable to load the selected locale.", error);
   }
+}
+
+function updateProductVideoLabel() {
+  if (!productVideoToggle) return;
+  const isPlaying = !productVideo?.paused;
+  productVideoToggle.textContent = isPlaying
+    ? currentMessages?.video.pause || "Pause motion"
+    : currentMessages?.video.play || "Play motion";
+  productVideoToggle.setAttribute("aria-pressed", String(isPlaying));
 }
 
 function closeMenu() {
@@ -194,6 +206,18 @@ heroDemoLinks.forEach((link) => {
   });
 });
 
+if (productVideo && productVideoToggle) {
+  const syncProductVideo = () => updateProductVideoLabel();
+  productVideo.addEventListener("play", syncProductVideo);
+  productVideo.addEventListener("pause", syncProductVideo);
+  productVideoToggle.addEventListener("click", () => {
+    if (productVideo.paused) productVideo.play().catch(() => {});
+    else productVideo.pause();
+  });
+
+  if (reducedMotion.matches) productVideo.pause();
+}
+
 demoReplay.addEventListener("click", () => {
   restartDemoPanel(demoPanels[activeDemoIndex]);
   scheduleNextDemo();
@@ -226,6 +250,10 @@ reducedMotion.addEventListener("change", () => {
   demoPanels.forEach((panel) => panel.classList.remove("is-running"));
   updateDemoLabels();
   scheduleNextDemo();
+  if (productVideo) {
+    if (reducedMotion.matches) productVideo.pause();
+    else productVideo.play().catch(() => {});
+  }
 });
 
 const tiltTarget = document.querySelector("[data-tilt]");

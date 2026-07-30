@@ -2,6 +2,10 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Continuous Integration](https://github.com/filenestapp/filenest/actions/workflows/ci.yml/badge.svg)](https://github.com/filenestapp/filenest/actions/workflows/ci.yml)
+[![Windows Release](https://github.com/filenestapp/filenest/actions/workflows/windows-release.yml/badge.svg)](https://github.com/filenestapp/filenest/actions/workflows/windows-release.yml)
+
 FileNest 监听用户选择的目录，并在文件或项目目录进入稳定态后完成内容解析、OCR、结构化切片、向量索引与可选的自动整理。它提供普通搜索、Smart Search、Find with Chat 和 Chat with File。
 
 本仓库包含两套桌面实现：
@@ -72,6 +76,7 @@ SQLite + sqlite-vec + 关键词/实体/向量 RRF 融合
 - 发现阶段只加载名称和描述；完整指令与引用资源仅在自动路由、显式 `$skill-name` 激活或会话复用后加载。
 - 搜索与回答反馈会先保存为可审计记录，再由 AI 提议安全地更新已有 Skill，或生成一个职责明确、可复用的新 Skill。学习结果不能削弱本地隐私、证据约束、引用校验或 Prompt Injection 防护。
 - 可在设置页查看、启用、停用、定位、刷新或删除 Skills。
+- 可复用的确定性能力通过受控的应用内工具运行时和对应的 `filenest skill` CLI 执行。内置工具需要显式注册，目前仅处理内存中的只读数据；Skill 不能执行任意 shell 脚本。
 
 ### 本地与云端 AI
 
@@ -136,6 +141,16 @@ Windows 安装包、Explorer/Recycle Bin 集成、DPAPI、托盘行为与自动�
 - 本地模式下，文档内容无需发送到云端。
 - 只有用户明确配置云端 Chat、Embedding 或 OCR 时，对应操作的内容才会发送到配置的 API。
 - 应用以当前 macOS 用户的文件权限为授权边界，不提供账号、RBAC 或多租户隔离。
+
+## 开源与参与
+
+FileNest 基于 [MIT License](LICENSE) 开源，欢迎参与贡献：
+
+- 提交 Pull Request 前请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- 参与社区时请遵守 [行为准则](CODE_OF_CONDUCT.md)。
+- 安全漏洞请按照 [SECURITY.md](SECURITY.md) 私下报告。
+- 分发应用或仓库内包含的第三方源码前，请查看
+  [第三方声明](THIRD_PARTY_NOTICES.md)。
 
 ## 文档
 

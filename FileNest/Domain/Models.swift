@@ -534,6 +534,7 @@ extension AISystemSkill: FetchableRecord, MutablePersistableRecord {
 enum ReindexJobStatus: String, Codable {
     case running
     case interrupted
+    case completedWithErrors = "completed-with-errors"
     case failed
 }
 
@@ -645,6 +646,21 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var responseProvider: String? = nil
     var responseModel: String? = nil
     var feedback: String? = nil
+}
+
+extension ChatMessage {
+    /// Estimated decode throughput after the first streamed response fragment arrives.
+    var generationTokensPerSecond: Double? {
+        guard let outputTokens,
+              outputTokens > 0,
+              let firstResponseDuration,
+              let totalResponseDuration else {
+            return nil
+        }
+        let generationDuration = totalResponseDuration - firstResponseDuration
+        guard generationDuration >= 0.05 else { return nil }
+        return Double(outputTokens) / generationDuration
+    }
 }
 
 extension ChatMessage: FetchableRecord, MutablePersistableRecord {

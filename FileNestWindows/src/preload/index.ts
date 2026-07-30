@@ -85,6 +85,11 @@ const api: FileNestApi = {
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   exportLogs: () => ipcRenderer.invoke('logs:export'),
   clearLogs: () => ipcRenderer.invoke('logs:clear'),
+  refreshAgentSkills: () => ipcRenderer.invoke('skills:refresh'),
+  setAgentSkillEnabled: (skillPath: string, enabled: boolean) => ipcRenderer.invoke('skills:set-enabled', skillPath, enabled),
+  importAgentSkill: () => ipcRenderer.invoke('skills:import'),
+  deleteAgentSkill: (skillPath: string) => ipcRenderer.invoke('skills:delete', skillPath),
+  openAgentSkillsFolder: () => ipcRenderer.invoke('skills:open-folder'),
   onStateChanged: (callback: () => void) => {
     const listener = (): void => callback()
     ipcRenderer.on('state:changed', listener)

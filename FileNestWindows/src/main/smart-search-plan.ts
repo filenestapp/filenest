@@ -47,7 +47,8 @@ export async function resolveSmartSearchPlan(
   settings: Settings,
   llm: LlmService,
   signal: AbortSignal,
-  onIntent?: (intent: string) => void
+  onIntent?: (intent: string) => void,
+  skillContext = ''
 ): Promise<SmartSearchPlan> {
   const fallback = fallbackSmartSearchPlan(query)
   if (!query.trim() || settings.llmChoice === 'none') return fallback
@@ -55,7 +56,7 @@ export async function resolveSmartSearchPlan(
     let response = ''
     let lastIntent = ''
     for await (const delta of llm.stream([
-      { role: 'system', content: smartSearchPlannerPrompt(new Date().toISOString().slice(0, 10)) },
+      { role: 'system', content: `${smartSearchPlannerPrompt(new Date().toISOString().slice(0, 10))}${skillContext ? `\n\n${skillContext}` : ''}` },
       { role: 'user', content: query }
     ], settings, signal)) {
       response += delta

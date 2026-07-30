@@ -117,6 +117,693 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertLessThanOrEqual(plan.estimatedInputTokens, plan.inputBudgetTokens)
     }
 
+    func testLongDocumentTaskDetectsCombinedTranslationAndSummary() throws {
+        let request = "\u{8bf7}\u{7ffb}\u{8bd1}\u{5e76}\u{603b}\u{7ed3}\u{8fd9}\u{4e2a}\u{6587}\u{6863}"
+
+        let task = try XCTUnwrap(LongDocumentTask.detect(in: request))
+
+        XCTAssertEqual(task.operation, .translateAndSummarize)
+    }
+
+    func testLongDocumentTaskLeavesNarrowSectionRequestsOnOrdinaryFileChat() {
+        XCTAssertNil(LongDocumentTask.detect(in: "Translate section 4 into English"))
+        XCTAssertNotNil(LongDocumentTask.detect(in: "Translate the entire document into English"))
+    }
+
+    func testLongDocumentPlannerUsesEveryOrderedParentOnce() {
+        let parentText = String(repeating: "Parent evidence ", count: 80)
+        let chunks = [
+            indexedChunk(
+                index: 0,
+                text: "child one",
+                parentIndex: 0,
+                parentText: parentText,
+                pageStart: 1
+            ),
+            indexedChunk(
+                index: 1,
+                text: "child two",
+                parentIndex: 0,
+                parentText: parentText,
+                pageStart: 1
+            ),
+            indexedChunk(
+                index: 2,
+                text: "second parent",
+                parentIndex: 2,
+                parentText: "Second parent evidence",
+                pageStart: 2
+            ),
+        ]
+
+        let units = LongDocumentWorkflowPlanner.sourceUnits(
+            from: chunks,
+            maximumUnitTokens: 2_000
+        )
+
+        XCTAssertEqual(units.map(\.sourceChunkIndex), [0, 2])
+        XCTAssertEqual(units.map(\.id), ["C00001", "C00002"])
+        XCTAssertEqual(units.map(\.pageStart), [1, 2])
+    }
+
+    func testLongDocumentBatchesPreserveAllSourceUnitsInOrder() {
+        let chunks = (0..<12).map { index in
+            indexedChunk(
+                index: index,
+                text: String(repeating: "evidence \(index) ", count: 60),
+                parentIndex: index,
+                parentText: nil,
+                pageStart: index + 1
+            )
+        }
+        let units = LongDocumentWorkflowPlanner.sourceUnits(
+            from: chunks,
+            maximumUnitTokens: 400
+        )
+
+        let batches = LongDocumentWorkflowPlanner.batches(
+            from: units,
+            maximumTokens: 500
+        )
+
+        XCTAssertGreaterThan(batches.count, 1)
+        XCTAssertEqual(batches.flatMap(\.units).map(\.id), units.map(\.id))
+        XCTAssertEqual(Set(batches.flatMap(\.units).map(\.id)).count, units.count)
+    }
+
+    func testLongDocumentWorkflowUsesTokenBudgetForFewLargeUnits() {
+        let units = (0..<4).map { index in
+            LongDocumentSourceUnit(
+                id: String(format: "C%05d", index + 1),
+                sourceChunkIndex: index,
+                text: "Large source unit \(index + 1)",
+                sectionPath: [],
+                pageStart: nil,
+                pageEnd: nil,
+                kind: .text,
+                tokenCount: 1_600
+            )
+        }
+
+        XCTAssertTrue(LongDocumentWorkflowPlanner.shouldUseWorkflow(
+            task: LongDocumentTask(operation: .summarize, request: "Summarize this document"),
+            sourceUnits: units,
+            ordinaryChunkLimit: 6
+        ))
+    }
+
+    func testFocusedDocumentSummaryStaysOnRetrieval() {
+        XCTAssertNil(LongDocumentTask.detect(in: "总结该文档的营收信息"))
+        XCTAssertNil(LongDocumentTask.detect(in: "Summarize this document's revenue information"))
+        XCTAssertEqual(
+            LongDocumentTask.detect(in: "总结整份文档")?.operation,
+            .summarize
+        )
+        XCTAssertEqual(
+            LongDocumentTask.detect(in: "Translate the entire document")?.operation,
+            .translate
+        )
+    }
+
+    func testAmbiguousDocumentSummaryDefersScopeToTheConfiguredModel() {
+        switch LongDocumentTask.routingDisposition(in: "Summarize the document") {
+        case let .needsIntentClassification(operation, request):
+            XCTAssertEqual(operation, .summarize)
+            XCTAssertEqual(request, "Summarize the document")
+        default:
+            XCTFail("Expected an ambiguous request to use the second-stage classifier")
+        }
+
+        switch LongDocumentTask.routingDisposition(in: "Summarize the entire document") {
+        case let .explicitWholeDocument(task):
+            XCTAssertEqual(task.operation, .summarize)
+        default:
+            XCTFail("Expected an explicit whole-document request to avoid model routing")
+        }
+    }
+
+    func testLongDocumentPlannerUsesOperationAwareLocalBatchBudgets() {
+        XCTAssertEqual(
+            LongDocumentWorkflowPlanner.batchTokenBudget(
+                contextWindowTokens: 32_768,
+                providerName: "ollama",
+                operation: .translate
+            ),
+            4_096
+        )
+        XCTAssertEqual(
+            LongDocumentWorkflowPlanner.batchTokenBudget(
+                contextWindowTokens: 4_096,
+                providerName: "ollama",
+                operation: .translate
+            ),
+            1_024
+        )
+        XCTAssertEqual(
+            LongDocumentWorkflowPlanner.batchTokenBudget(
+                contextWindowTokens: 32_768,
+                providerName: "ollama",
+                operation: .summarize
+            ),
+            8_192
+        )
+    }
+
+    func testAttachedFilePreparationCacheReusesMatchingFingerprintAndInvalidatesChanges() async {
+        let cache = AttachedFilePreparationCache(maximumEntries: 4)
+        let fingerprint = AttachedFilePreparationFingerprint(
+            path: "/tmp/report.pdf",
+            size: 1_024,
+            modifiedAt: Date(timeIntervalSince1970: 100),
+            indexSignature: "",
+            indexedAt: nil,
+            configurationSignature: "config-a"
+        )
+        await cache.store(
+            .init(title: "Report", text: "Prepared document content"),
+            for: fingerprint
+        )
+
+        let cached = await cache.content(for: fingerprint)
+        let modifiedFingerprint = AttachedFilePreparationFingerprint(
+            path: fingerprint.path,
+            size: fingerprint.size,
+            modifiedAt: Date(timeIntervalSince1970: 101),
+            indexSignature: fingerprint.indexSignature,
+            indexedAt: fingerprint.indexedAt,
+            configurationSignature: fingerprint.configurationSignature
+        )
+        let modifiedCache = await cache.content(for: modifiedFingerprint)
+        let reconfiguredFingerprint = AttachedFilePreparationFingerprint(
+            path: fingerprint.path,
+            size: fingerprint.size,
+            modifiedAt: fingerprint.modifiedAt,
+            indexSignature: fingerprint.indexSignature,
+            indexedAt: fingerprint.indexedAt,
+            configurationSignature: "config-b"
+        )
+        let reconfiguredCache = await cache.content(for: reconfiguredFingerprint)
+
+        XCTAssertEqual(cached?.text, "Prepared document content")
+        XCTAssertNil(modifiedCache)
+        XCTAssertNil(reconfiguredCache)
+    }
+
+    func testAttachedFilePreparationCacheSeparatesSourceUnitsByModelBudget() async {
+        let cache = AttachedFilePreparationCache(maximumEntries: 4)
+        let fingerprint = AttachedFilePreparationFingerprint(
+            path: "/tmp/report.pdf",
+            size: 1_024,
+            modifiedAt: Date(timeIntervalSince1970: 100),
+            indexSignature: "index-a",
+            indexedAt: Date(timeIntervalSince1970: 110),
+            configurationSignature: "config-a"
+        )
+        let units = [LongDocumentSourceUnit(
+            id: "C00001",
+            sourceChunkIndex: 0,
+            text: "Prepared source section",
+            sectionPath: ["Overview"],
+            pageStart: 1,
+            pageEnd: 1,
+            kind: .text,
+            tokenCount: 100
+        )]
+        await cache.storeSourceUnits(
+            units,
+            for: fingerprint,
+            contextWindowTokens: 32_768,
+            prefersLowLatency: true
+        )
+
+        let matching = await cache.cachedSourceUnits(
+            for: fingerprint,
+            contextWindowTokens: 32_768,
+            prefersLowLatency: true
+        )
+        let differentContext = await cache.cachedSourceUnits(
+            for: fingerprint,
+            contextWindowTokens: 128_000,
+            prefersLowLatency: true
+        )
+        let differentProviderClass = await cache.cachedSourceUnits(
+            for: fingerprint,
+            contextWindowTokens: 32_768,
+            prefersLowLatency: false
+        )
+
+        XCTAssertEqual(matching, units)
+        XCTAssertNil(differentContext)
+        XCTAssertNil(differentProviderClass)
+    }
+
+    func testLongDocumentRouteUsesSingleCloudRequestWhenCompleteDocumentFits() {
+        let units = (0..<3).map { index in
+            LongDocumentSourceUnit(
+                id: "C\(index)", sourceChunkIndex: index, text: "Evidence \(index)",
+                sectionPath: [], pageStart: nil, pageEnd: nil, kind: .text, tokenCount: 1_000
+            )
+        }
+        XCTAssertEqual(
+            LongDocumentWorkflowPlanner.executionRoute(
+                task: LongDocumentTask(operation: .summarize, request: "Summarize the document"),
+                sourceUnits: units,
+                contextWindowTokens: 32_768,
+                providerName: "openai-compatible",
+                ordinaryChunkLimit: 6
+            ),
+            .directCompleteDocument
+        )
+    }
+
+    func testLongDocumentRouteKeepsLargeCloudTranslationOnMapReduce() {
+        let units = (0..<40).map { index in
+            LongDocumentSourceUnit(
+                id: "C\(index)", sourceChunkIndex: index, text: "Evidence \(index)",
+                sectionPath: [], pageStart: nil, pageEnd: nil, kind: .text, tokenCount: 1_000
+            )
+        }
+        XCTAssertEqual(
+            LongDocumentWorkflowPlanner.executionRoute(
+                task: LongDocumentTask(operation: .translate, request: "Translate the document"),
+                sourceUnits: units,
+                contextWindowTokens: 612_000,
+                providerName: "openai-compatible",
+                ordinaryChunkLimit: 6
+            ),
+            .mapReduce
+        )
+    }
+
+    func testLongDocumentRouteHonorsSkillRetrievalPreference() {
+        let units = (0..<12).map { index in
+            LongDocumentSourceUnit(
+                id: "C\(index)", sourceChunkIndex: index, text: "Evidence \(index)",
+                sectionPath: [], pageStart: nil, pageEnd: nil, kind: .text, tokenCount: 1_000
+            )
+        }
+        XCTAssertEqual(
+            LongDocumentWorkflowPlanner.executionRoute(
+                task: LongDocumentTask(operation: .summarize, request: "Summarize the entire document"),
+                sourceUnits: units,
+                contextWindowTokens: 32_768,
+                providerName: "ollama",
+                ordinaryChunkLimit: 6,
+                skillPreference: .retrieval
+            ),
+            .retrieval
+        )
+    }
+
+    func testLongDocumentExecutorSplitsTimedOutBatchAndCompletes() async throws {
+        let sourceUnits = (0..<4).map { index in
+            LongDocumentSourceUnit(
+                id: String(format: "C%05d", index + 1),
+                sourceChunkIndex: index,
+                text: "Source evidence \(index + 1)",
+                sectionPath: [],
+                pageStart: index + 1,
+                pageEnd: index + 1,
+                kind: .text,
+                tokenCount: 1_000
+            )
+        }
+        let provider = LongDocumentLLMProvider(maximumMapUnits: 2)
+        let executor = LongDocumentWorkflowExecutor(
+            store: store,
+            checkpointDirectory: temporaryDirectory.appendingPathComponent("split-checkpoints")
+        )
+        let result = try await executor.execute(
+            task: LongDocumentTask(operation: .translate, request: "Translate the entire document."),
+            file: longDocumentTestFile(),
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 64_000,
+            skillContext: "",
+            labels: longDocumentLabels()
+        ) { _ in }
+
+        XCTAssertEqual(result.processedUnitCount, sourceUnits.count)
+        XCTAssertEqual(provider.mappedSourceIDs, sourceUnits.map(\.id))
+    }
+
+    func testLongDocumentStructuredCollectorStopsAtFirstCompleteJSONObject() async throws {
+        let stream = AsyncThrowingStream<String, Error> { continuation in
+            continuation.yield(#"{"chunks":[{"id":"C00001","translation":"done"}]}"#)
+            continuation.yield(String(repeating: " meaningless output", count: 10_000))
+            continuation.finish()
+        }
+
+        let result = try await LongDocumentStructuredStreamCollector.collect(
+            stream,
+            totalTimeout: 1,
+            maximumOutputTokens: 1_000
+        )
+
+        XCTAssertEqual(result, #"{"chunks":[{"id":"C00001","translation":"done"}]}"#)
+    }
+
+    func testLongDocumentStructuredCollectorRejectsUnboundedIncompleteOutput() async throws {
+        let stream = AsyncThrowingStream<String, Error> { continuation in
+            continuation.yield(#"{"chunks":["# + String(repeating: "unbounded ", count: 500))
+            continuation.finish()
+        }
+
+        do {
+            _ = try await LongDocumentStructuredStreamCollector.collect(
+                stream,
+                totalTimeout: 1,
+                maximumOutputTokens: 20
+            )
+            XCTFail("Expected the collector to reject output that exceeds its batch budget")
+        } catch let error as LongDocumentStructuredStreamError {
+            XCTAssertEqual(error, .outputLimitExceeded(limit: 20))
+        }
+    }
+
+    func testLongDocumentExecutorSplitsInvalidStructuredBatchAndCompletes() async throws {
+        let sourceUnits = (0..<4).map { index in
+            LongDocumentSourceUnit(
+                id: String(format: "C%05d", index + 1),
+                sourceChunkIndex: index,
+                text: "Source evidence \(index + 1)",
+                sectionPath: [],
+                pageStart: index + 1,
+                pageEnd: index + 1,
+                kind: .text,
+                tokenCount: 1_000
+            )
+        }
+        let provider = LongDocumentLLMProvider(invalidMapUnitsAbove: 2)
+        let executor = LongDocumentWorkflowExecutor(
+            store: store,
+            checkpointDirectory: temporaryDirectory.appendingPathComponent("invalid-split-checkpoints")
+        )
+
+        let result = try await executor.execute(
+            task: LongDocumentTask(operation: .translate, request: "Translate the entire document."),
+            file: longDocumentTestFile(),
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 64_000,
+            skillContext: "",
+            labels: longDocumentLabels()
+        ) { _ in }
+
+        XCTAssertEqual(result.processedUnitCount, sourceUnits.count)
+        XCTAssertEqual(provider.mappedSourceIDs, sourceUnits.map(\.id))
+    }
+
+    func testLongDocumentExecutorNormalizesReorderedResponseIDsWithoutRetry() async throws {
+        let sourceUnits = (0..<4).map { index in
+            LongDocumentSourceUnit(
+                id: String(format: "C%05d", index + 1),
+                sourceChunkIndex: index,
+                text: "Source evidence \(index + 1)",
+                sectionPath: [],
+                pageStart: index + 1,
+                pageEnd: index + 1,
+                kind: .text,
+                tokenCount: 500
+            )
+        }
+        let provider = LongDocumentLLMProvider(reverseMapResponse: true, lowercaseMapIDs: true)
+        let executor = LongDocumentWorkflowExecutor(
+            store: store,
+            checkpointDirectory: temporaryDirectory.appendingPathComponent("reordered-checkpoints")
+        )
+
+        let result = try await executor.execute(
+            task: LongDocumentTask(operation: .translate, request: "Translate the entire document."),
+            file: longDocumentTestFile(),
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 64_000,
+            skillContext: "",
+            labels: longDocumentLabels()
+        ) { _ in }
+
+        XCTAssertEqual(result.processedUnitCount, sourceUnits.count)
+        XCTAssertEqual(provider.mappedSourceIDs, sourceUnits.map(\.id))
+        XCTAssertTrue(result.response.contains("Translated C00001"))
+        XCTAssertTrue(result.response.contains("Translated C00004"))
+    }
+
+    func testLongDocumentExecutorRepairsTrailingCommaJSON() async throws {
+        let sourceUnits = [LongDocumentSourceUnit(
+            id: "C00001",
+            sourceChunkIndex: 0,
+            text: "Source evidence",
+            sectionPath: [],
+            pageStart: 1,
+            pageEnd: 1,
+            kind: .text,
+            tokenCount: 100
+        )]
+        let provider = LongDocumentLLMProvider(trailingCommaResponse: true)
+        let executor = LongDocumentWorkflowExecutor(
+            store: store,
+            checkpointDirectory: temporaryDirectory.appendingPathComponent("json-repair-checkpoints")
+        )
+
+        let result = try await executor.execute(
+            task: LongDocumentTask(operation: .translate, request: "Translate the entire document."),
+            file: longDocumentTestFile(),
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 64_000,
+            skillContext: "",
+            labels: longDocumentLabels()
+        ) { _ in }
+
+        XCTAssertEqual(result.processedUnitCount, 1)
+        XCTAssertEqual(provider.mappedSourceIDs, ["C00001"])
+    }
+
+    func testLongDocumentExecutorRetriesUntranslatedEnglishForChineseTarget() async throws {
+        let sourceUnits = (0..<2).map { index in
+            LongDocumentSourceUnit(
+                id: String(format: "C%05d", index + 1),
+                sourceChunkIndex: index,
+                text: String(repeating: "This is a complete English sentence requiring translation. ", count: 2),
+                sectionPath: [],
+                pageStart: index + 1,
+                pageEnd: index + 1,
+                kind: .text,
+                tokenCount: 100
+            )
+        }
+        let provider = LongDocumentLLMProvider(untranslatedFirstAttempt: true)
+        let executor = LongDocumentWorkflowExecutor(
+            store: store,
+            checkpointDirectory: temporaryDirectory.appendingPathComponent("translation-quality-checkpoints")
+        )
+
+        let result = try await executor.execute(
+            task: LongDocumentTask(operation: .translate, request: "Translate the entire document."),
+            file: longDocumentTestFile(),
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 64_000,
+            skillContext: "",
+            labels: longDocumentLabels(),
+            targetLanguage: .simplifiedChinese
+        ) { _ in }
+
+        XCTAssertEqual(result.processedUnitCount, 2)
+        XCTAssertEqual(provider.mappedSourceIDs, ["C00001", "C00002", "C00001"])
+        XCTAssertTrue(result.response.contains("这是完整的中文翻译内容"))
+    }
+
+    func testLongDocumentExecutorProcessesEveryUnitAndReducesTheSummary() async throws {
+        let sourceUnits = (0..<8).map { index in
+            LongDocumentSourceUnit(
+                id: String(format: "C%05d", index + 1),
+                sourceChunkIndex: index,
+                text: "Source evidence \(index + 1)",
+                sectionPath: ["Section \(index + 1)"],
+                pageStart: index + 1,
+                pageEnd: index + 1,
+                kind: .text,
+                tokenCount: 500
+            )
+        }
+        let file = longDocumentTestFile()
+        let provider = LongDocumentLLMProvider()
+        let executor = LongDocumentWorkflowExecutor(
+            store: store,
+            checkpointDirectory: temporaryDirectory.appendingPathComponent("workflow-checkpoints")
+        )
+        var phases = [LongDocumentWorkflowPhase]()
+
+        let result = try await executor.execute(
+            task: LongDocumentTask(
+                operation: .translateAndSummarize,
+                request: "Translate and summarize the entire document."
+            ),
+            file: file,
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 4_096,
+            skillContext: "Preserve complete source coverage.",
+            labels: longDocumentLabels(),
+            progress: { phases.append($0) }
+        )
+
+        XCTAssertEqual(result.processedUnitCount, sourceUnits.count)
+        XCTAssertEqual(result.totalUnitCount, sourceUnits.count)
+        XCTAssertTrue(result.response.contains("Complete document summary"))
+        XCTAssertTrue(result.response.contains("## Key Facts"))
+        XCTAssertTrue(result.response.contains("- All mapped evidence was retained"))
+        XCTAssertFalse(result.response.contains(#""key_facts""#))
+        XCTAssertTrue(result.response.contains("Translated C00001"))
+        XCTAssertTrue(result.response.contains("Translated C00008"))
+        XCTAssertTrue(result.response.contains("Processed 8 of 8 source chunks."))
+        XCTAssertEqual(provider.mappedSourceIDs, sourceUnits.map(\.id))
+        XCTAssertGreaterThan(provider.reductionCallCount, 0)
+        XCTAssertEqual(phases.first, .preparing)
+        XCTAssertEqual(phases.last, .verifying)
+    }
+
+    func testLongDocumentExecutorFormatsStructuredSingleBatchSummaryAsMarkdown() async throws {
+        let sourceUnits = [
+            LongDocumentSourceUnit(
+                id: "C00001",
+                sourceChunkIndex: 0,
+                text: "Single batch source evidence",
+                sectionPath: ["Section 1"],
+                pageStart: 1,
+                pageEnd: 1,
+                kind: .text,
+                tokenCount: 100
+            ),
+        ]
+        let provider = LongDocumentLLMProvider(structuredBatchSummary: true)
+        let executor = LongDocumentWorkflowExecutor(
+            store: store,
+            checkpointDirectory: temporaryDirectory.appendingPathComponent("formatted-summary-checkpoints")
+        )
+
+        let result = try await executor.execute(
+            task: LongDocumentTask(operation: .summarize, request: "Summarize this document."),
+            file: longDocumentTestFile(),
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 64_000,
+            skillContext: "",
+            labels: longDocumentLabels()
+        ) { _ in }
+
+        XCTAssertTrue(result.response.contains("# Summary\n\nFormatted summary"))
+        XCTAssertTrue(result.response.contains("## Key Facts\n\n- Formatted fact"))
+        XCTAssertFalse(result.response.contains(#""summary":"Formatted summary""#))
+        XCTAssertFalse(result.response.contains(#""key_facts""#))
+    }
+
+    func testLongDocumentExecutorReusesCompletedTranslationForEquivalentRequest() async throws {
+        let sourceUnits = (0..<3).map { index in
+            LongDocumentSourceUnit(
+                id: String(format: "C%05d", index + 1),
+                sourceChunkIndex: index,
+                text: "Source evidence \(index + 1)",
+                sectionPath: [],
+                pageStart: index + 1,
+                pageEnd: index + 1,
+                kind: .text,
+                tokenCount: 500
+            )
+        }
+        let provider = LongDocumentLLMProvider()
+        let executor = LongDocumentWorkflowExecutor(
+            store: store,
+            checkpointDirectory: temporaryDirectory.appendingPathComponent("translation-cache-checkpoints")
+        )
+
+        _ = try await executor.execute(
+            task: LongDocumentTask(operation: .translate, request: "Translate the entire document."),
+            file: longDocumentTestFile(),
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 4_096,
+            skillContext: "",
+            labels: longDocumentLabels()
+        ) { _ in }
+        let initialMapCallCount = provider.mapCallCount
+
+        let result = try await executor.execute(
+            task: LongDocumentTask(operation: .translate, request: "Please translate this whole file."),
+            file: longDocumentTestFile(),
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 4_096,
+            skillContext: "",
+            labels: longDocumentLabels()
+        ) { _ in }
+
+        XCTAssertEqual(provider.mapCallCount, initialMapCallCount)
+        XCTAssertEqual(result.processedUnitCount, sourceUnits.count)
+        XCTAssertTrue(result.response.contains("Translated C00003"))
+    }
+
+    func testLongDocumentExecutorReusesCachedSummaryReduction() async throws {
+        let sourceUnits = (0..<6).map { index in
+            LongDocumentSourceUnit(
+                id: String(format: "C%05d", index + 1),
+                sourceChunkIndex: index,
+                text: "Source evidence \(index + 1)",
+                sectionPath: ["Section \(index + 1)"],
+                pageStart: index + 1,
+                pageEnd: index + 1,
+                kind: .text,
+                tokenCount: 600
+            )
+        }
+        let provider = LongDocumentLLMProvider()
+        let executor = LongDocumentWorkflowExecutor(
+            store: store,
+            checkpointDirectory: temporaryDirectory.appendingPathComponent("summary-cache-checkpoints")
+        )
+        let task = LongDocumentTask(operation: .summarize, request: "Summarize this entire document.")
+
+        _ = try await executor.execute(
+            task: task,
+            file: longDocumentTestFile(),
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 4_096,
+            skillContext: "",
+            labels: longDocumentLabels()
+        ) { _ in }
+        let initialMapCallCount = provider.mapCallCount
+        let initialReductionCallCount = provider.reductionCallCount
+        XCTAssertGreaterThan(initialReductionCallCount, 0)
+
+        let result = try await executor.execute(
+            task: task,
+            file: longDocumentTestFile(),
+            sourceUnits: sourceUnits,
+            provider: provider,
+            providerIdentity: provider.name,
+            contextWindowTokens: 4_096,
+            skillContext: "",
+            labels: longDocumentLabels()
+        ) { _ in }
+
+        XCTAssertEqual(provider.mapCallCount, initialMapCallCount)
+        XCTAssertEqual(provider.reductionCallCount, initialReductionCallCount)
+        XCTAssertTrue(result.response.contains("Complete document summary"))
+    }
+
     func testModelContextCatalogUsesKnownCloudWindowsAnd612KFallback() {
         XCTAssertEqual(
             ChatModelContextWindowCatalog.cloudContextWindow(model: "gpt-4o-mini", format: "openai"),
@@ -330,6 +1017,191 @@ final class ChatServiceTests: XCTestCase {
         func chat(_ messages: [ChatTurn], context: String?) async throws -> String {
             throw URLError(.cannotConnectToHost)
         }
+    }
+
+    private final class LongDocumentLLMProvider: LLMProvider, @unchecked Sendable {
+        let name = "long-document-stub"
+        private let maximumMapUnits: Int?
+        private let invalidMapUnitsAbove: Int?
+        private let reverseMapResponse: Bool
+        private let lowercaseMapIDs: Bool
+        private let trailingCommaResponse: Bool
+        private let untranslatedFirstAttempt: Bool
+        private let structuredBatchSummary: Bool
+        private let lock = NSLock()
+        private var storedMappedSourceIDs = [String]()
+        private var storedReductionCallCount = 0
+        private var storedMapCallCount = 0
+
+        var mappedSourceIDs: [String] {
+            lock.withLock { storedMappedSourceIDs }
+        }
+
+        var reductionCallCount: Int {
+            lock.withLock { storedReductionCallCount }
+        }
+
+        var mapCallCount: Int {
+            lock.withLock { storedMapCallCount }
+        }
+
+        init(
+            maximumMapUnits: Int? = nil,
+            invalidMapUnitsAbove: Int? = nil,
+            reverseMapResponse: Bool = false,
+            lowercaseMapIDs: Bool = false,
+            trailingCommaResponse: Bool = false,
+            untranslatedFirstAttempt: Bool = false,
+            structuredBatchSummary: Bool = false
+        ) {
+            self.maximumMapUnits = maximumMapUnits
+            self.invalidMapUnitsAbove = invalidMapUnitsAbove
+            self.reverseMapResponse = reverseMapResponse
+            self.lowercaseMapIDs = lowercaseMapIDs
+            self.trailingCommaResponse = trailingCommaResponse
+            self.untranslatedFirstAttempt = untranslatedFirstAttempt
+            self.structuredBatchSummary = structuredBatchSummary
+        }
+
+        func chat(_ messages: [ChatTurn], context: String?) async throws -> String {
+            if context?.contains("hierarchically reduce") == true {
+                lock.withLock { storedReductionCallCount += 1 }
+                return """
+                {
+                  "summary": "Complete document summary",
+                  "key_facts": ["All mapped evidence was retained"],
+                  "warnings": []
+                }
+                """
+            }
+
+            let raw = try XCTUnwrap(messages.last?.content)
+            let jsonEnd = try XCTUnwrap(raw.lastIndex(of: "}"))
+            let json = String(raw[...jsonEnd])
+            let data = try XCTUnwrap(json.data(using: .utf8))
+            if context?.contains("Translate every supplied source chunk completely") == true {
+                let request = try JSONDecoder().decode(LongDocumentTranslationRepairRequest.self, from: data)
+                lock.withLock { storedMappedSourceIDs.append(contentsOf: request.chunks.map(\.id)) }
+                let response = LongDocumentTranslationRepairStubResponse(
+                    translations: request.chunks.map {
+                        LongDocumentTranslationRepairStub(id: $0.id, translation: "这是完整的中文翻译内容 \($0.id)")
+                    }
+                )
+                return String(data: try JSONEncoder().encode(response), encoding: .utf8) ?? "{}"
+            }
+            let request = try JSONDecoder().decode(LongDocumentMapRequest.self, from: data)
+            if let maximumMapUnits, request.chunks.count > maximumMapUnits {
+                throw URLError(.timedOut)
+            }
+            if let invalidMapUnitsAbove, request.chunks.count > invalidMapUnitsAbove {
+                return "{\"chunks\":[],\"batch_summary\":\"\"}"
+            }
+            lock.withLock {
+                storedMappedSourceIDs.append(contentsOf: request.chunks.map(\.id))
+                storedMapCallCount += 1
+            }
+            let returnsUntranslatedSource = lock.withLock {
+                untranslatedFirstAttempt && storedMapCallCount == 1
+            }
+            let firstSourceID = request.chunks.first?.id
+            var chunks = request.chunks.map {
+                LongDocumentMappedStub(
+                    id: lowercaseMapIDs ? $0.id.lowercased() : $0.id,
+                    translation: returnsUntranslatedSource && $0.id == firstSourceID
+                        ? $0.text
+                        : untranslatedFirstAttempt ? "这是完整的中文翻译内容 \($0.id)" : "Translated \($0.id)",
+                    summary: "Summary \($0.id)",
+                    facts: ["Fact \($0.id)"],
+                    ambiguities: []
+                )
+            }
+            if reverseMapResponse { chunks.reverse() }
+            let response = LongDocumentMapStubResponse(
+                chunks: chunks,
+                batchSummary: structuredBatchSummary
+                    ? #"{"summary":"Formatted summary","key_facts":["Formatted fact"],"warnings":[]}"#
+                    : "Mapped \(request.chunks.count) source chunks"
+            )
+            var rendered = String(
+                data: try JSONEncoder().encode(response),
+                encoding: .utf8
+            ) ?? "{}"
+            if trailingCommaResponse,
+               let closingBrace = rendered.lastIndex(of: "}") {
+                rendered.insert(",", at: closingBrace)
+            }
+            return rendered
+        }
+
+        private struct LongDocumentMapRequest: Decodable {
+            struct Chunk: Decodable {
+                let id: String
+                let text: String
+            }
+
+            let chunks: [Chunk]
+        }
+
+        private struct LongDocumentTranslationRepairRequest: Decodable {
+            struct Chunk: Decodable { let id: String; let text: String }
+            let chunks: [Chunk]
+        }
+
+        private struct LongDocumentMappedStub: Encodable {
+            let id: String
+            let translation: String
+            let summary: String
+            let facts: [String]
+            let ambiguities: [String]
+        }
+
+        private struct LongDocumentMapStubResponse: Encodable {
+            let chunks: [LongDocumentMappedStub]
+            let batchSummary: String
+            enum CodingKeys: String, CodingKey {
+                case chunks
+                case batchSummary = "batch_summary"
+            }
+        }
+
+        private struct LongDocumentTranslationRepairStub: Encodable {
+            let id: String
+            let translation: String
+        }
+
+        private struct LongDocumentTranslationRepairStubResponse: Encodable {
+            let translations: [LongDocumentTranslationRepairStub]
+        }
+
+    }
+
+    private func longDocumentTestFile() -> FileRecord {
+        FileRecord(
+            id: 42,
+            path: "/tmp/long-document.pdf",
+            name: "long-document.pdf",
+            ext: "pdf",
+            size: 8_192,
+            mtime: Date(timeIntervalSince1970: 1_000),
+            category: FileCategory.documents.rawValue,
+            sourceDir: "/tmp",
+            indexedAt: Date(timeIntervalSince1970: 1_100),
+            contentHash: "long-document-test",
+            title: nil,
+            contentText: nil
+        )
+    }
+
+    private func longDocumentLabels() -> LongDocumentWorkflowLabels {
+        LongDocumentWorkflowLabels(
+            summary: "Summary",
+            keyFacts: "Key Facts",
+            translation: "Translation",
+            coverage: "Coverage",
+            coverageFormat: "Processed %d of %d source chunks.",
+            warnings: "Warnings",
+            translationRepairFailureFormat: "Translation could not be completed for %d source sections; those sections were omitted."
+        )
     }
 
     private var temporaryDirectory: URL!
@@ -1046,6 +1918,27 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertTrue(stages.contains(.matchingContent))
     }
 
+    func testSmartSearchDoesNotAcceptMetadataOnlyWhenQueryHasAContentSubject() async throws {
+        let provider = SmartSearchLLMProvider(response: """
+        {
+          "intent": "Find PDF invoices from last month",
+          "semantic_query": "invoice",
+          "keywords": ["invoice"],
+          "file_extensions": ["pdf"],
+          "content_mode": "metadata_only",
+          "sort": "newest"
+        }
+        """)
+        let chat = makeChatService(
+            embedder: FailingEmbedder(),
+            llmProvider: provider
+        )
+
+        let response = await chat.smartSearchLibrary("Find last month's PDF invoices")
+
+        XCTAssertEqual(response.plan.contentMode, .automatic)
+    }
+
     func testSmartSearchStreamsUserFacingIntentWhileBuildingPlan() async throws {
         let chat = makeChatService(llmProvider: StreamingSearchIntentLLMProvider())
         var intentUpdates = [String]()
@@ -1521,6 +2414,58 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertEqual(response?.relatedFiles.first?.path, fileURL.path)
     }
 
+    func testAttachedFileChatReusesPreparedContentUntilTheFileChanges() async throws {
+        let provider = StreamingLLMProvider()
+        let chat = makeChatService(llmProvider: provider)
+        let fileURL = temporaryDirectory.appendingPathComponent("multi-turn.md")
+        try Data("first prepared version".utf8).write(to: fileURL)
+        let session = try XCTUnwrap(chat.createSession(attachedFilePath: fileURL.path))
+        let sessionID = try XCTUnwrap(session.id)
+
+        var firstPreparation: ChatProgress?
+        for await update in chat.streamAnswer(
+            "What does this file contain?",
+            sessionId: sessionID,
+            attachedFilePath: fileURL.path
+        ) {
+            if case let .progress(progress) = update, progress.phase == .readingFile {
+                firstPreparation = progress
+            }
+        }
+
+        var secondPreparation: ChatProgress?
+        for await update in chat.streamAnswer(
+            "Give me one more detail.",
+            sessionId: sessionID,
+            attachedFilePath: fileURL.path
+        ) {
+            if case let .progress(progress) = update, progress.phase == .readingFile {
+                secondPreparation = progress
+            }
+        }
+
+        try Data("second changed version".utf8).write(to: fileURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)],
+            ofItemAtPath: fileURL.path
+        )
+        var changedPreparation: ChatProgress?
+        for await update in chat.streamAnswer(
+            "What changed?",
+            sessionId: sessionID,
+            attachedFilePath: fileURL.path
+        ) {
+            if case let .progress(progress) = update, progress.phase == .readingFile {
+                changedPreparation = progress
+            }
+        }
+
+        XCTAssertFalse(try XCTUnwrap(firstPreparation).usesPreparedFileCache)
+        XCTAssertTrue(try XCTUnwrap(secondPreparation).usesPreparedFileCache)
+        XCTAssertFalse(try XCTUnwrap(changedPreparation).usesPreparedFileCache)
+        XCTAssertTrue(provider.contexts.last?.contains("second changed version") == true)
+    }
+
     func testAttachedFileChatSkipsLibraryRetrievalEntirely() async throws {
         let libraryFileID = try insertFile(named: "roadmap-library.pdf", title: "Roadmap Library")
         let provider = StreamingLLMProvider()
@@ -1653,6 +2598,41 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertEqual(persisted.outputTokens, response.outputTokens)
         XCTAssertEqual(persisted.responseProvider, response.responseProvider)
         XCTAssertEqual(persisted.responseModel, response.responseModel)
+    }
+
+    func testChatMessageCalculatesGenerationSpeedAfterFirstResponse() throws {
+        let message = ChatMessage(
+            id: nil,
+            role: ChatRole.assistant.rawValue,
+            content: "Answer",
+            ts: Date(),
+            relatedFileIds: nil,
+            inputTokens: 5_100,
+            outputTokens: 934,
+            firstResponseDuration: 23.87,
+            totalResponseDuration: 65.68
+        )
+
+        XCTAssertEqual(
+            try XCTUnwrap(message.generationTokensPerSecond),
+            934.0 / (65.68 - 23.87),
+            accuracy: 0.001
+        )
+    }
+
+    func testChatMessageOmitsGenerationSpeedWithoutMeasurableDecodeDuration() {
+        let message = ChatMessage(
+            id: nil,
+            role: ChatRole.assistant.rawValue,
+            content: "Answer",
+            ts: Date(),
+            relatedFileIds: nil,
+            outputTokens: 100,
+            firstResponseDuration: 5,
+            totalResponseDuration: 5.01
+        )
+
+        XCTAssertNil(message.generationTokensPerSecond)
     }
 
     func testConfiguredCloudFailureRequestsFallbackWithoutPersistingFailedAnswer() async throws {
@@ -1835,6 +2815,30 @@ final class ChatServiceTests: XCTestCase {
         ])
 
         XCTAssertEqual(visible.map(\.file.name), ["first.pdf", "second.pdf", "fallback.pdf"])
+    }
+
+    private func indexedChunk(
+        index: Int,
+        text: String,
+        parentIndex: Int?,
+        parentText: String?,
+        pageStart: Int?
+    ) -> IndexedDocumentChunk {
+        IndexedDocumentChunk(
+            index: index,
+            text: text,
+            contextualText: text,
+            sectionPath: ["Section \(index + 1)"],
+            pageStart: pageStart,
+            pageEnd: pageStart,
+            kind: .text,
+            parentIndex: parentIndex,
+            parentText: parentText,
+            tokenCount: ChatService.estimatedTokens(in: text),
+            tokenizerProfile: TokenCounter.canonicalProfile,
+            tokenizerVersion: TokenCounter.canonicalVersion,
+            tokenCountAccuracy: .estimated
+        )
     }
 
     private func makeChatService(settings: AppSettings? = nil,

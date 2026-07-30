@@ -1,0 +1,20 @@
+#!/bin/zsh
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+repository_dir="$(cd "$script_dir/.." && pwd)"
+build_root="${TMPDIR:-/tmp}/filenest-skill-cli-build"
+executable="$build_root/Build/Products/Debug/filenest"
+runtime_source="$repository_dir/FileNest/Services/SkillToolRuntime.swift"
+cli_source="$repository_dir/FileNestCLI/FileNestSkillCLI.swift"
+
+if [[ ! -x "$executable" || "$runtime_source" -nt "$executable" || "$cli_source" -nt "$executable" ]]; then
+  xcodebuild \
+    -project "$repository_dir/FileNest.xcodeproj" \
+    -scheme FileNestSkillCLI \
+    -configuration Debug \
+    -derivedDataPath "$build_root" \
+    build >/dev/null
+fi
+
+exec "$executable" "$@"

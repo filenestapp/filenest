@@ -338,11 +338,15 @@ final class RerankerServiceManager: ObservableObject {
 
     nonisolated private static let serverScript = #"""
 import argparse
+import threading
+import time
+import numpy as np
 import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sentence_transformers import CrossEncoder
+from sentence_transformers.util import batch_to_device
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", required=True)
@@ -351,13 +355,50 @@ args = parser.parse_args()
 
 device = "mps" if torch.backends.mps.is_available() else "cpu"
 model = CrossEncoder(args.model, device=device)
-with torch.inference_mode():
-    model.predict(
-        [("File search", "A document stored on this Mac")],
-        activation_fn=torch.nn.Sigmoid(),
-        batch_size=1,
-        show_progress_bar=False,
-    )
+model.max_seq_length = min(model.max_seq_length or 384, 384)
+inference_lock = threading.Lock()
+
+def synchronize_device():
+    if device == "mps":
+        torch.mps.synchronize()
+
+def predict_with_timings(pairs):
+    length_sorted_indices = np.argsort([-model._input_length(pair) for pair in pairs])
+    sorted_pairs = [pairs[index] for index in length_sorted_indices]
+    sorted_scores = []
+    tokenize_ms = 0.0
+    inference_ms = 0.0
+    with torch.inference_mode():
+        for start in range(0, len(sorted_pairs), 16):
+            batch = sorted_pairs[start:start + 16]
+            tokenize_started = time.perf_counter()
+            features = model.preprocess(batch)
+            features = batch_to_device(features, device)
+            tokenize_ms += (time.perf_counter() - tokenize_started) * 1000
+
+            synchronize_device()
+            inference_started = time.perf_counter()
+            scores = model.forward(features)["scores"]
+            scores = torch.nn.functional.sigmoid(scores)
+            if model.num_labels == 1 and scores.ndim > 1:
+                scores = scores.squeeze(-1)
+            synchronize_device()
+            inference_ms += (time.perf_counter() - inference_started) * 1000
+            sorted_scores.extend(float(score.cpu().detach()) for score in scores)
+
+    original_order = np.argsort(length_sorted_indices)
+    return [sorted_scores[index] for index in original_order], tokenize_ms, inference_ms
+
+warmup_document = (
+    "A representative indexed document section containing filenames, notes, "
+    "metadata, dates, invoice details, project descriptions, and extracted text. "
+) * 18
+warmup_started = time.perf_counter()
+predict_with_timings([
+    ("Find relevant files in the local library", f"{warmup_document} Candidate {index}")
+    for index in range(16)
+])
+warmup_ms = (time.perf_counter() - warmup_started) * 1000
 app = FastAPI(docs_url=None, redoc_url=None)
 
 class RerankRequest(BaseModel):
@@ -368,25 +409,41 @@ class RerankRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "device": device,
+        "max_sequence_length": model.max_seq_length,
+        "warmup_ms": round(warmup_ms, 2),
+    }
 
 @app.post("/v1/rerank")
 def rerank(request: RerankRequest):
     if not request.documents:
         return {"results": []}
+    request_started = time.perf_counter()
     try:
-        scores = model.predict(
-            [(request.query, document) for document in request.documents],
-            activation_fn=torch.nn.Sigmoid(),
-            batch_size=16,
-            show_progress_bar=False,
-        )
+        with inference_lock:
+            queue_ms = (time.perf_counter() - request_started) * 1000
+            scores, tokenize_ms, inference_ms = predict_with_timings(
+                [(request.query, document) for document in request.documents]
+            )
         results = [
             {"index": index, "relevance_score": float(score)}
             for index, score in enumerate(scores)
         ]
         results.sort(key=lambda item: item["relevance_score"], reverse=True)
-        return {"results": results[:request.top_n] if request.top_n else results}
+        total_ms = (time.perf_counter() - request_started) * 1000
+        return {
+            "results": results[:request.top_n] if request.top_n else results,
+            "_meta": {
+                "device": device,
+                "document_count": len(request.documents),
+                "queue_ms": round(queue_ms, 2),
+                "tokenize_ms": round(tokenize_ms, 2),
+                "inference_ms": round(inference_ms, 2),
+                "total_ms": round(total_ms, 2),
+            },
+        }
     except Exception as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
 
