@@ -25,7 +25,11 @@ jobs:
         run: |
           xcodebuild -project FileNest.xcodeproj -scheme FileNest \
             -configuration Debug -destination 'platform=macOS' \
-            -derivedDataPath .build/DerivedData test
+            -derivedDataPath .build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM="" \
+            test
 
   windows-source:
     name: Windows source checks

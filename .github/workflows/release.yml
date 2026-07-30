@@ -1,0 +1,414 @@
+name: Cross-Platform Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Semantic release tag, for example v0.2.4"
+        required: true
+        default: "v0.2.4"
+        type: string
+      publish_release:
+        description: "Publish a GitHub Release after both builds pass"
+        required: true
+        default: false
+        type: boolean
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease"
+        required: true
+        default: true
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+jobs:
+  macos:
+    name: macOS package
+    runs-on: macos-15
+    outputs:
+      distribution_ready: ${{ steps.signing.outputs.distribution_ready }}
+    env:
+      MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+      MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+      MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+      MACOS_NOTARY_PRIVATE_KEY_BASE64: ${{ secrets.MACOS_NOTARY_PRIVATE_KEY_BASE64 }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          version="${RELEASE_TAG#v}"
+          project_version="$(
+            xcodebuild -project FileNest.xcodeproj -scheme FileNest \
+              -configuration Release -showBuildSettings \
+              CODE_SIGNING_ALLOWED=NO DEVELOPMENT_TEAM="" |
+              awk '/ MARKETING_VERSION = / { print $3; exit }'
+          )"
+          if [[ "$project_version" != "$version" ]]; then
+            echo "Release tag $RELEASE_TAG does not match macOS version $project_version" >&2
+            exit 1
+          fi
+
+      - name: Run macOS tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -project FileNest.xcodeproj -scheme FileNest \
+            -configuration Debug -destination 'platform=macOS' \
+            -derivedDataPath .build/TestDerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM="" \
+            test
+
+      - name: Configure distribution signing
+        id: signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          required_values=(
+            "$MACOS_CERTIFICATE_P12_BASE64"
+            "$MACOS_CERTIFICATE_PASSWORD"
+            "$MACOS_TEAM_ID"
+            "$MACOS_NOTARY_KEY_ID"
+            "$MACOS_NOTARY_ISSUER_ID"
+            "$MACOS_NOTARY_PRIVATE_KEY_BASE64"
+          )
+
+          missing=0
+          for value in "${required_values[@]}"; do
+            if [[ -z "$value" ]]; then
+              missing=1
+            fi
+          done
+
+          if [[ "$missing" -eq 1 ]]; then
+            echo "Distribution credentials are incomplete; building an unsigned validation artifact."
+            echo "distribution_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          certificate_path="$RUNNER_TEMP/filenest-developer-id.p12"
+          notary_key_path="$RUNNER_TEMP/AuthKey_${MACOS_NOTARY_KEY_ID}.p8"
+          keychain_path="$RUNNER_TEMP/filenest-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate_path"
+          printf '%s' "$MACOS_NOTARY_PRIVATE_KEY_BASE64" | base64 --decode > "$notary_key_path"
+          chmod 600 "$certificate_path" "$notary_key_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security list-keychains -d user -s "$keychain_path"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain_path"
+
+          signing_identity="$(
+            security find-identity -v -p codesigning "$keychain_path" |
+              sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' |
+              head -n 1
+          )"
+          if [[ -z "$signing_identity" ]]; then
+            echo "Developer ID Application identity was not found in the imported certificate." >&2
+            exit 1
+          fi
+
+          echo "identity=$signing_identity" >> "$GITHUB_OUTPUT"
+          echo "notary_key_path=$notary_key_path" >> "$GITHUB_OUTPUT"
+          echo "distribution_ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build macOS app
+        shell: bash
+        env:
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+          DISTRIBUTION_READY: ${{ steps.signing.outputs.distribution_ready }}
+        run: |
+          set -euo pipefail
+          build_args=(
+            -project FileNest.xcodeproj
+            -scheme FileNest
+            -configuration Release
+            -destination 'platform=macOS'
+            -derivedDataPath .build/ReleaseDerivedData
+          )
+
+          if [[ "$DISTRIBUTION_READY" == "true" ]]; then
+            xcodebuild "${build_args[@]}" \
+              CODE_SIGNING_ALLOWED=YES \
+              CODE_SIGNING_REQUIRED=YES \
+              CODE_SIGN_STYLE=Manual \
+              CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+              DEVELOPMENT_TEAM="$MACOS_TEAM_ID" \
+              CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
+              build
+          else
+            xcodebuild "${build_args[@]}" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              DEVELOPMENT_TEAM="" \
+              build
+            codesign --force --deep --sign - --options runtime \
+              .build/ReleaseDerivedData/Build/Products/Release/FileNest.app
+          fi
+
+      - name: Package and validate macOS artifacts
+        shell: bash
+        env:
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+          NOTARY_KEY_PATH: ${{ steps.signing.outputs.notary_key_path }}
+          DISTRIBUTION_READY: ${{ steps.signing.outputs.distribution_ready }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          app=".build/ReleaseDerivedData/Build/Products/Release/FileNest.app"
+          output="$RUNNER_TEMP/release-assets"
+          staging="$RUNNER_TEMP/dmg-staging"
+
+          mkdir -p "$output" "$staging"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          if [[ "$DISTRIBUTION_READY" == "true" ]]; then
+            zip_path="$output/FileNest-${version}-macOS.zip"
+            dmg_path="$output/FileNest-${version}-macOS.dmg"
+
+            ditto -c -k --sequesterRsrc --keepParent "$app" "$zip_path"
+            xcrun notarytool submit "$zip_path" \
+              --key "$NOTARY_KEY_PATH" \
+              --key-id "$MACOS_NOTARY_KEY_ID" \
+              --issuer "$MACOS_NOTARY_ISSUER_ID" \
+              --wait
+            xcrun stapler staple "$app"
+
+            ditto "$app" "$staging/FileNest.app"
+            hdiutil create \
+              -volname "FileNest" \
+              -srcfolder "$staging" \
+              -ov -format UDZO "$dmg_path"
+            codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$dmg_path"
+            xcrun notarytool submit "$dmg_path" \
+              --key "$NOTARY_KEY_PATH" \
+              --key-id "$MACOS_NOTARY_KEY_ID" \
+              --issuer "$MACOS_NOTARY_ISSUER_ID" \
+              --wait
+            xcrun stapler staple "$dmg_path"
+            xcrun stapler validate "$dmg_path"
+            spctl -a -vv -t exec "$app"
+          else
+            zip_path="$output/FileNest-${version}-macOS-unsigned.zip"
+            dmg_path="$output/FileNest-${version}-macOS-unsigned.dmg"
+            ditto -c -k --sequesterRsrc --keepParent "$app" "$zip_path"
+            ditto "$app" "$staging/FileNest.app"
+            hdiutil create \
+              -volname "FileNest" \
+              -srcfolder "$staging" \
+              -ov -format UDZO "$dmg_path"
+          fi
+
+          (
+            cd "$output"
+            shasum -a 256 ./* > SHA256SUMS-macOS.txt
+          )
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: ${{ runner.temp }}/release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows package
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: FileNestWindows
+    env:
+      WINDOWS_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      WINDOWS_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: FileNestWindows/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          if ($env:RELEASE_TAG -ne "v$version") {
+            throw "Release tag $env:RELEASE_TAG does not match Windows version $version"
+          }
+
+      - name: Verify source
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Build Windows packages
+        run: npm run package:win
+
+      - name: Validate Universal installer installation
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $installer = Resolve-Path "release/FileNest-Setup-$version.exe"
+          $process = Start-Process -FilePath $installer -ArgumentList @('/S', '/currentuser') -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Universal installer failed with exit code $($process.ExitCode)"
+          }
+
+          $mainExecutable = Join-Path $env:LOCALAPPDATA "Programs\FileNest\FileNest.exe"
+          if (-not (Test-Path $mainExecutable -PathType Leaf)) {
+            throw "Installed main executable is missing: $mainExecutable"
+          }
+
+          & $mainExecutable --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed main executable failed its smoke test with exit code $LASTEXITCODE"
+          }
+
+      - name: Verify release layout and checksums
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $expected = @(
+            "release/FileNest-Setup-$version.exe",
+            "release/FileNest-Setup-$version.exe.blockmap",
+            "release/FileNest-Portable-$version-x64.exe",
+            "release/FileNest-Portable-$version-arm64.exe",
+            "release/latest.yml"
+          )
+          foreach ($path in $expected) {
+            if (-not (Test-Path $path)) {
+              throw "Missing release artifact: $path"
+            }
+          }
+
+          $unexpected = Get-ChildItem "release/FileNest-Setup-$version-*.exe" -ErrorAction SilentlyContinue
+          if ($unexpected) {
+            throw "Architecture-specific Setup files were generated unexpectedly: $($unexpected.Name -join ', ')"
+          }
+
+          $checksumFiles = @(
+            "release/FileNest-Setup-$version.exe",
+            "release/FileNest-Portable-$version-x64.exe",
+            "release/FileNest-Portable-$version-arm64.exe"
+          )
+          $checksums = foreach ($path in $checksumFiles) {
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([System.IO.Path]::GetFileName($path))"
+          }
+          Set-Content -Path "release/SHA256SUMS-Windows.txt" -Value $checksums -Encoding ascii
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            FileNestWindows/release/FileNest-Setup-*.exe
+            FileNestWindows/release/FileNest-Setup-*.exe.blockmap
+            FileNestWindows/release/FileNest-Portable-*.exe
+            FileNestWindows/release/latest.yml
+            FileNestWindows/release/SHA256SUMS-Windows.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - macos
+      - windows
+    if: >-
+      ${{
+        always() &&
+        needs.macos.result == 'success' &&
+        needs.windows.result == 'success' &&
+        (github.event_name == 'push' || inputs.publish_release)
+      }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DISTRIBUTION_READY: ${{ needs.macos.outputs.distribution_ready }}
+
+    steps:
+      - name: Require signed and notarized macOS output
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$DISTRIBUTION_READY" != "true" ]]; then
+            echo "Publishing requires all macOS signing and notarization secrets." >&2
+            exit 1
+          fi
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release with GitHub CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_args=(
+            "$RELEASE_TAG"
+            release-assets/*
+            --repo "$GITHUB_REPOSITORY"
+            --target "$GITHUB_SHA"
+            --title "FileNest ${RELEASE_TAG#v}"
+            --generate-notes
+          )
+
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}" == "true" ]]; then
+            release_args+=(--prerelease)
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "${release_args[@]}"
+          fi

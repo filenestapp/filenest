@@ -20,8 +20,9 @@
 9. [Verification strategy](09-verification.md)
 10. [RAG evaluation](10-rag-evaluation.md)
 11. [Semantic chunking and reindexing](11-semantic-chunking-and-reindexing.md)
-12. [Source map](source-map.md)
-13. [2026-07-17 change analysis](changes/0cda7bf-to-2026-07-17.md)
+12. [Release process](12-release-process.md)
+13. [Source map](source-map.md)
+14. [2026-07-17 change analysis](changes/0cda7bf-to-2026-07-17.md)
 
 The deterministic inventory used as a starting point is retained under `_inventory/`. It includes build products and dependencies, so it is not used as primary product evidence.
 
