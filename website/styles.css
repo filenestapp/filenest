@@ -1558,3 +1558,92 @@
     .download-page .release-hero__art { min-height: 230px; }
   }
 }
+
+@layer download-detection-refinement {
+  .site-main--native .hero__download-panel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    max-width: 610px;
+    margin-top: 15px;
+    padding: 11px 13px 11px 15px;
+    border: 1px solid rgb(43 50 61 / 13%);
+    border-radius: 12px;
+    background: rgb(255 255 255 / 62%);
+    box-shadow: 0 1px 0 rgb(255 255 255 / 82%) inset;
+  }
+
+  .site-main--native .hero__download-detection {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 10px;
+  }
+
+  .site-main--native .hero__download-detection svg {
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    fill: #0d6bff;
+  }
+
+  .site-main--native .hero__download-detection span {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .site-main--native .hero__download-detection strong {
+    overflow: hidden;
+    color: #353b46;
+    font-size: 12px;
+    font-weight: 780;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .site-main--native .hero__download-detection small {
+    overflow: hidden;
+    color: #737a85;
+    font-size: 10px;
+    font-weight: 620;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .site-main--native .hero__download-panel > a,
+  .site-main--native .download-system-choice > a {
+    flex: 0 0 auto;
+    color: #0d6bff;
+    font-size: 11px;
+    font-weight: 780;
+    text-decoration: none;
+  }
+
+  .site-main--native .hero__download-panel > a:hover,
+  .site-main--native .download-system-choice > a:hover { color: #0759d8; text-decoration: underline; }
+
+  .site-main--native .download-system-choice {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    max-width: max-content;
+    margin-top: 16px;
+    padding: 9px 12px;
+    border: 1px solid rgb(43 50 61 / 13%);
+    border-radius: 10px;
+    background: rgb(255 255 255 / 58%);
+    color: #4f5661;
+  }
+
+  .site-main--native .download-system-choice > span { color: #0d6bff; font-size: 12px; font-weight: 800; }
+  .site-main--native .download-system-choice small { color: #727984; font-size: 11px; }
+
+  @media (max-width: 620px) {
+    .site-main--native .hero__download-panel { align-items: flex-start; flex-direction: column; }
+    .site-main--native .hero__download-panel > a { padding-left: 32px; }
+    .site-main--native .download-system-choice { align-items: flex-start; flex-direction: column; }
+  }
+}

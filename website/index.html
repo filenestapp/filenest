@@ -25,7 +25,7 @@
     <meta name="twitter:image" content="https://filenestapp.com/assets/filenest-og.png" />
     <link rel="canonical" href="https://filenestapp.com/" />
     <link rel="icon" href="assets/app-icon.png" />
-    <link rel="stylesheet" href="styles.css?v=20260731-6" />
+    <link rel="stylesheet" href="styles.css?v=20260731-8" />
     <title>FileNest — Your files, understood</title>
     <script type="application/ld+json">
       {
@@ -106,10 +106,21 @@
             Index, search, and chat with the files already on your computer using local AI. In local mode, content, indexes, notes, and conversations stay on this device.
           </p>
           <div class="hero__actions">
-            <a class="button button--primary" href="download.html" data-i18n="hero.primaryCta">Download for macOS</a>
+            <a class="button button--primary" data-release-auto-download href="download.html">
+              <span data-release-auto-label>Choose your download</span>
+            </a>
             <a class="button button--quiet" href="#demo" data-i18n="hero.secondaryCta">Explore the live demo</a>
           </div>
-          <p class="hero__download-note" data-i18n="hero.downloadNote">Version 0.2.4 · 15.1 MB · macOS 13 or later</p>
+          <div class="hero__download-panel" aria-live="polite">
+            <div class="hero__download-detection">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.75a8.75 8.75 0 1 0 8.75 8.75A8.76 8.76 0 0 0 12 2.75Zm0 2a6.75 6.75 0 1 1-6.75 6.75A6.76 6.76 0 0 1 12 4.75Zm-1 2.5v4.1l-1.65-1.64a1 1 0 0 0-1.42 1.41l3.36 3.36a1 1 0 0 0 1.42 0l3.36-3.36a1 1 0 0 0-1.42-1.41L13 11.35v-4.1a1 1 0 0 0-2 0ZM8.25 17a1 1 0 0 0 0 2h7.5a1 1 0 0 0 0-2h-7.5Z" /></svg>
+              <span>
+                <strong data-release-auto-platform>Checking your system</strong>
+                <small data-release-auto-build>Signed desktop installer · latest stable release</small>
+              </span>
+            </div>
+            <a href="download.html" data-release-all-download>See all downloads</a>
+          </div>
           <div class="hero__trust-grid" aria-label="Local AI, privacy, and security guarantees">
             <span><strong data-i18n="hero.localAiTitle">Local AI</strong><small data-i18n="hero.localAiBody">Ollama, OCR, and embeddings</small></span>
             <span><strong data-i18n="hero.privateIndexTitle">Private index</strong><small data-i18n="hero.privateIndexBody">Stored on this device</small></span>
@@ -567,6 +578,7 @@
       </div>
     </footer>
 
-    <script src="script.js?v=20260731-6" defer></script>
+    <script src="script.js?v=20260731-8" defer></script>
+    <script src="download.js?v=20260731-8" defer></script>
   </body>
 </html>

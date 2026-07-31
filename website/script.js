@@ -67,6 +67,8 @@ async function applyLocale(locale) {
     localStorage.setItem("filenest-locale", locale);
     currentLocale = locale;
     currentMessages = messages;
+    window.FileNestLocale = { locale, messages };
+    window.dispatchEvent(new CustomEvent("filenest:localechange", { detail: { locale } }));
     updateDemoLabels();
     updateProductVideoLabel();
   } catch (error) {

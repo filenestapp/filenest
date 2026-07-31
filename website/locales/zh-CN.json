@@ -30,6 +30,17 @@
     "workflowBody": "同一套原生产品界面，始终基于你的本地文件。",
     "captureNote": "真实界面 · 模拟工作区"
   },
+  "downloads": {
+    "macos": "macOS",
+    "windows": "Windows",
+    "unknownPlatform": "你的电脑",
+    "downloadFor": "下载 {platform} 版",
+    "chooseDownload": "选择下载版本",
+    "detectedPlatform": "已检测到：{platform}",
+    "selectPlatform": "请选择 macOS 或 Windows",
+    "installerNote": "{platform} 安装包 · {version} 版本 · 已签名发布",
+    "selectPlatformNote": "请选择受支持的桌面平台，以下载适合的安装包。"
+  },
   "formats": { "label": "一个文件库，接住散落在桌面各处的内容" },
   "video": {
     "intro": "看看它如何运转",

@@ -30,6 +30,17 @@
     "workflowBody": "One native product shell, grounded in your local files.",
     "captureNote": "Actual UI · mock workspace"
   },
+  "downloads": {
+    "macos": "macOS",
+    "windows": "Windows",
+    "unknownPlatform": "your computer",
+    "downloadFor": "Download for {platform}",
+    "chooseDownload": "Choose your download",
+    "detectedPlatform": "Detected: {platform}",
+    "selectPlatform": "Choose macOS or Windows",
+    "installerNote": "{platform} installer · Version {version} · Signed release",
+    "selectPlatformNote": "Select a supported desktop platform to download the right installer."
+  },
   "formats": { "label": "One library for the things scattered across your desktop" },
   "video": {
     "intro": "See it in motion",

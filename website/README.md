@@ -25,7 +25,7 @@ Then open `http://localhost:4173`.
 
 The interactive demos use a fictional Northstar Studio workspace. They cover local indexing, direct search, Smart Search, chat-based file discovery, and grounded chat with a selected file. Autoplay pauses when the demo leaves the viewport, and reduced-motion preferences disable the sequence animations.
 
-The homepage presents the public GitHub repository, MIT license, contribution guide, issue tracker, and release assets. Installer packages are hosted in GitHub Releases and are not committed to the source repository. The download page asks the GitHub Releases API for the latest stable release at runtime, with a versioned fallback for offline or rate-limited requests.
+The homepage presents the public GitHub repository, MIT license, contribution guide, issue tracker, and release assets. Installer packages are hosted in GitHub Releases and are not committed to the source repository. The homepage and download page ask the GitHub Releases API for the latest stable release at runtime, with a versioned fallback for offline or rate-limited requests. They identify macOS or Windows locally in the browser and link the primary download action to the matching installer; unsupported systems are directed to the complete download list.
 
 ## Publish a release
 
