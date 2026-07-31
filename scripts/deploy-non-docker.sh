@@ -529,7 +529,7 @@ if [ "$DEPLOY_BACKEND" = "1" ]; then
   echo "[Remote] Installing update API binary"
   sudo install -m 0755 "$STAGE_DIR/filenest-update-api" "$REMOTE_BINARY"
   DEPLOY_GROUP="$(id -gn "$DEPLOY_USER")"
-  sudo install -d -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_GROUP" "$REMOTE_DATA_DIR"
+  sudo install -d -m 0750 -o "$DEPLOY_USER" -g "$WEB_GROUP" "$REMOTE_DATA_DIR"
 
   if ! sudo test -f "$REMOTE_ENV_FILE"; then
     ENV_TMP="$(mktemp)"
