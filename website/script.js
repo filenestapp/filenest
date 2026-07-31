@@ -53,7 +53,9 @@ function updateGitHubStarDisplay() {
     element.textContent = formattedCount;
   });
 
-  const template = currentMessages?.nav.githubStarsLabel || "FileNest on GitHub, {count} stars";
+  const template = githubStarCount === 1
+    ? currentMessages?.nav.githubStarLabel || "FileNest on GitHub, {count} star"
+    : currentMessages?.nav.githubStarsLabel || "FileNest on GitHub, {count} stars";
   githubLinks.forEach((link) => {
     link.setAttribute("aria-label", template.replace("{count}", formattedCount));
   });
@@ -76,7 +78,7 @@ async function loadGitHubStarCount() {
 
 async function applyLocale(locale) {
   try {
-    const response = await fetch(`locales/${locale}.json?v=20260731-2`);
+    const response = await fetch(`locales/${locale}.json?v=20260731-4`);
     if (!response.ok) throw new Error(`Locale request failed with status ${response.status}`);
     const messages = await response.json();
 
