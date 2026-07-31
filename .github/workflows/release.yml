@@ -607,8 +607,15 @@ jobs:
           download_url="$(
             python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["download_url"])' "$metadata"
           )"
-          curl --fail --silent --show-error --location --head "$download_url" >/dev/null
-          curl --fail --silent --show-error \
+          # Use a unique query string and retries so a stale CDN 404 cannot
+          # fail the release immediately after the origin archive is replaced.
+          validation_url="${download_url}?release_validation=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          curl --fail-with-body --silent --show-error --location --head \
+            --retry 12 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            "$validation_url" >/dev/null
+          curl --fail-with-body --silent --show-error \
             --request POST \
             --header "Authorization: Bearer $FILENEST_UPDATE_ADMIN_TOKEN" \
             --header "Content-Type: application/json" \
