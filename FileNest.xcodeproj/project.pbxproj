@@ -63,6 +63,7 @@
 		973F86E6A2DFBFF214A72876 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B1E54077AA4314A64BF946B /* LibraryView.swift */; };
 		9BE37ACCBD9A4B542903877A /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 64E59484A5961578C5B1A8A2 /* GRDB */; };
 		9F2DDEB6C49B15E6EAD2FFC9 /* DoclingServiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDE601367998B1A01F5BBC35 /* DoclingServiceManager.swift */; };
+		A1D0A4C57F1E4E949DEB9E01 /* DownloadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2D0A4C57F1E4E949DEB9E02 /* DownloadCoordinator.swift */; };
 		9F838A2B83F874CAF4A49530 /* FileSummaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76AB49499CF6F2DE1415434C /* FileSummaryService.swift */; };
 		A02F1E1580AA1F36CA2E8255 /* FileNestApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A8A793C6CFB7D4E6B507F3E /* FileNestApp.swift */; };
 		AF858DEA4596E60D4F744EE2 /* FileStabilityTrackerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C1B8C692F4C1A7136F74DFF /* FileStabilityTrackerTests.swift */; };
@@ -156,6 +157,7 @@
 		9CA5D1539B5BF0191A893469 /* ReindexActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReindexActivityView.swift; sourceTree = "<group>"; };
 		9E792A846DAEB2DEAC97A618 /* FileNest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FileNest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A13F6E3E583635E529EED4C4 /* AgentSkillServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSkillServiceTests.swift; sourceTree = "<group>"; };
+		A2D0A4C57F1E4E949DEB9E02 /* DownloadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadCoordinator.swift; sourceTree = "<group>"; };
 		ACF82143A6594FB0098BAD8A /* AccelerateVectorStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccelerateVectorStoreTests.swift; sourceTree = "<group>"; };
 		B0074C4678D01C5C464228C9 /* OCRDocumentProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRDocumentProcessor.swift; sourceTree = "<group>"; };
 		B290655B42F0B0722076C1D9 /* ContentExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentExtractor.swift; sourceTree = "<group>"; };
@@ -224,6 +226,7 @@
 				812F58B8B1E370C9E41AC685 /* ChatContextManager.swift */,
 				8BC13866E4DE2369E11F04E4 /* ChatService.swift */,
 				DDE601367998B1A01F5BBC35 /* DoclingServiceManager.swift */,
+				A2D0A4C57F1E4E949DEB9E02 /* DownloadCoordinator.swift */,
 				5D5696358B1F92AD48267E65 /* DocumentTreeNavigator.swift */,
 				6593BF0E6103F8909253FADE /* FileStabilityTracker.swift */,
 				C9A8EA592BDC9D941191D08E /* FileSubfolderClassifier.swift */,
@@ -569,6 +572,7 @@
 				5C692283F5741559C274CE53 /* DesignSystem.swift in Sources */,
 				CC2060844D8D45F17E6EE1D6 /* DoclingDocumentProcessor.swift in Sources */,
 				9F2DDEB6C49B15E6EAD2FFC9 /* DoclingServiceManager.swift in Sources */,
+				A1D0A4C57F1E4E949DEB9E01 /* DownloadCoordinator.swift in Sources */,
 				3A4FA057F752A7DA6ED038B9 /* DocumentTreeNavigator.swift in Sources */,
 				2EAD682AF620F5C5BBBB3DAD /* EmbeddingProviders.swift in Sources */,
 				5E523175D5F8F4F0428ACAB2 /* FileContentHasher.swift in Sources */,

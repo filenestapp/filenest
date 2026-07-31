@@ -130,7 +130,6 @@ final class AppSettingsTests: XCTestCase {
             modifiers: UInt32(cmdKey | shiftKey)
         ))
         settings.setOnboardingCompleted(true)
-        settings.setUpdateFeedURL("https://updates.example.com/appcast.xml")
         settings.setAutomaticUpdateChecks(false)
         settings.setAutomaticallyDownloadsUpdates(true)
         let modelVersionCheckDate = Date(timeIntervalSince1970: 1_750_000_000)
@@ -183,7 +182,6 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(reloaded.quickSearchShortcutKeyCode, 11)
         XCTAssertEqual(reloaded.quickSearchShortcutModifiers, UInt32(cmdKey | shiftKey))
         XCTAssertTrue(reloaded.onboardingCompleted)
-        XCTAssertEqual(reloaded.updateFeedURL, "https://updates.example.com/appcast.xml")
         XCTAssertFalse(reloaded.automaticUpdateChecks)
         XCTAssertTrue(reloaded.automaticallyDownloadsUpdates)
         XCTAssertEqual(reloaded.lastAIModelVersionCheckAt, modelVersionCheckDate)
@@ -216,15 +214,14 @@ final class AppSettingsTests: XCTestCase {
     }
 
     @MainActor
-    func testUpdateServiceRequiresSecureAppcastURL() {
+    func testUpdateServiceUsesBuiltInProductionAppcastURL() {
         let settings = AppSettings(store: store)
         let updates = AppUpdateService(settings: settings, enabled: false)
 
-        updates.setFeedURL("http://updates.example.com/appcast.xml")
-        XCTAssertFalse(updates.hasValidFeedURL)
-        XCTAssertEqual(updates.status, .notConfigured)
-
-        updates.setFeedURL("https://updates.example.com/appcast.xml")
+        XCTAssertEqual(
+            updates.feedURLString,
+            "https://updates.filenestapp.com/appcast/stable.xml?arch=universal"
+        )
         XCTAssertTrue(updates.hasValidFeedURL)
         XCTAssertEqual(updates.status, .ready)
     }
@@ -274,6 +271,56 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(
             release.macOSDMGURL,
             URL(string: "https://example.test/v0.32.1/Ollama.dmg")
+        )
+    }
+
+    func testManagedServiceReleaseMetadataSelectsVerifiedFFmpegBinary() throws {
+        let github = Data(#"""
+        {
+          "tag_name":"b7.1.0",
+          "assets":[
+            {
+              "name":"ffmpeg-darwin-arm64",
+              "browser_download_url":"https://example.test/b7.1.0/ffmpeg-darwin-arm64",
+              "digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "name":"ffmpeg-darwin-x64",
+              "browser_download_url":"https://example.test/b7.1.0/ffmpeg-darwin-x64",
+              "digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          ]
+        }
+        """#.utf8)
+
+        let armRelease = try ManagedServiceReleaseAPI.ffmpegRelease(from: github, machine: "arm64")
+        let intelRelease = try ManagedServiceReleaseAPI.ffmpegRelease(from: github, machine: "x86_64")
+
+        XCTAssertEqual(armRelease.version, "7.1.0")
+        XCTAssertEqual(armRelease.downloadURL.lastPathComponent, "ffmpeg-darwin-arm64")
+        XCTAssertEqual(armRelease.sha256, String(repeating: "a", count: 64))
+        XCTAssertEqual(intelRelease.downloadURL.lastPathComponent, "ffmpeg-darwin-x64")
+        XCTAssertEqual(intelRelease.sha256, String(repeating: "b", count: 64))
+        XCTAssertThrowsError(
+            try ManagedServiceReleaseAPI.ffmpegRelease(from: github, machine: "unsupported")
+        )
+    }
+
+    func testManagedServiceReleaseMetadataRejectsUnverifiedFFmpegBinary() throws {
+        let github = Data(#"""
+        {
+          "tag_name":"b7.1.0",
+          "assets":[
+            {
+              "name":"ffmpeg-darwin-arm64",
+              "browser_download_url":"https://example.test/b7.1.0/ffmpeg-darwin-arm64"
+            }
+          ]
+        }
+        """#.utf8)
+
+        XCTAssertThrowsError(
+            try ManagedServiceReleaseAPI.ffmpegRelease(from: github, machine: "arm64")
         )
     }
 
@@ -902,5 +949,50 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertTrue(environment["HF_HOME"]?.hasPrefix(root) == true)
         XCTAssertTrue(environment["PADDLE_HOME"]?.hasPrefix(root) == true)
         XCTAssertTrue(environment["PADDLEX_HOME"]?.hasPrefix(root) == true)
+    }
+
+    @MainActor
+    func testDownloadCoordinatorTracksExternalDownloadsInOneQueue() {
+        let coordinator = DownloadCoordinator(
+            storageRoot: temporaryDirectory.appendingPathComponent("downloads", isDirectory: true)
+        )
+        let sourceURL = URL(string: "https://example.test/models/qwen3")!
+
+        coordinator.beginExternalDownload(
+            identifier: "ollama-model-qwen3",
+            displayName: "qwen3",
+            sourceURL: sourceURL
+        )
+        coordinator.updateExternalDownload(
+            identifier: "ollama-model-qwen3",
+            bytesReceived: 250,
+            bytesExpected: 1_000
+        )
+
+        XCTAssertEqual(coordinator.downloads.count, 1)
+        XCTAssertEqual(coordinator.downloads.first?.phase, .downloading)
+        XCTAssertEqual(coordinator.downloads.first?.fractionCompleted, 0.25)
+        XCTAssertTrue(coordinator.hasActiveDownloads)
+
+        coordinator.finishExternalDownload(identifier: "ollama-model-qwen3")
+
+        XCTAssertEqual(coordinator.downloads.first?.phase, .completed)
+        XCTAssertFalse(coordinator.hasActiveDownloads)
+        coordinator.clearFinishedDownloads()
+        XCTAssertTrue(coordinator.downloads.isEmpty)
+    }
+
+    func testDownloadSnapshotClampsReportedProgress() {
+        let snapshot = ManagedDownloadSnapshot(
+            id: "test",
+            displayName: "Test",
+            sourceURL: URL(string: "https://example.test/file")!,
+            phase: .downloading,
+            bytesReceived: 1_500,
+            bytesExpected: 1_000,
+            updatedAt: Date()
+        )
+
+        XCTAssertEqual(snapshot.fractionCompleted, 1)
     }
 }

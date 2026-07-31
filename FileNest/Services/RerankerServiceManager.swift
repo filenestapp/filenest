@@ -93,7 +93,7 @@ final class RerankerServiceManager: ObservableObject {
         defer { isInstalling = false }
 
         do {
-            let systemPython = try await ManagedPythonRuntimeInstaller.shared.ensureInstalled(session: session)
+            let systemPython = try await ManagedPythonRuntimeInstaller.shared.ensureInstalled()
             if !Self.runtimeIsReady {
                 installProgress = 0.12
                 installStatus = "Preparing the isolated reranker environment…"
@@ -109,10 +109,16 @@ final class RerankerServiceManager: ObservableObject {
 
             installProgress = 0.38
             installStatus = "Downloading Qwen3-Reranker-0.6B…"
-            try await Task.detached(priority: .userInitiated) {
-                try Self.downloadModel()
-                try Self.writeServerScript()
-            }.value
+            try await DownloadCoordinator.shared.performExternalDownload(
+                identifier: "huggingface-qwen3-reranker-0_6b",
+                displayName: "Qwen3-Reranker-0.6B",
+                sourceURL: URL(string: "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B")!
+            ) {
+                try await Task.detached(priority: .userInitiated) {
+                    try Self.downloadModel()
+                    try Self.writeServerScript()
+                }.value
+            }
 
             installProgress = 0.94
             installStatus = "Verifying the reranker model…"
@@ -376,8 +382,8 @@ def predict_with_timings(pairs):
     tokenize_ms = 0.0
     inference_ms = 0.0
     with torch.inference_mode():
-        for start in range(0, len(sorted_pairs), 16):
-            batch = sorted_pairs[start:start + 16]
+        for start in range(0, len(sorted_pairs), 8):
+            batch = sorted_pairs[start:start + 8]
             tokenize_started = time.perf_counter()
             features = model.preprocess(batch)
             features = batch_to_device(features, device)
@@ -403,7 +409,7 @@ warmup_document = (
 warmup_started = time.perf_counter()
 predict_with_timings([
     ("Find relevant files in the local library", f"{warmup_document} Candidate {index}")
-    for index in range(16)
+    for index in range(8)
 ])
 warmup_ms = (time.perf_counter() - warmup_started) * 1000
 app = FastAPI(docs_url=None, redoc_url=None)

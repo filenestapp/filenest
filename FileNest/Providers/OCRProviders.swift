@@ -167,7 +167,7 @@ final class PaddleOCRServiceManager: ObservableObject {
         defer { isInstalling = false }
 
         do {
-            let systemPython = try await ManagedPythonRuntimeInstaller.shared.ensureInstalled(session: session)
+            let systemPython = try await ManagedPythonRuntimeInstaller.shared.ensureInstalled()
             installProgress = 0.14
             installStatus = "Creating an isolated PaddleOCR environment…"
             let stagingRoot = Self.stagingRoot()
@@ -177,14 +177,26 @@ final class PaddleOCRServiceManager: ObservableObject {
             }.value
             installProgress = 0.22
             installStatus = "Installing the PaddlePaddle inference engine…"
-            try await Task.detached(priority: .userInitiated) {
-                try Self.installPaddlePaddle(in: venv, version: paddlePaddleTargetVersion)
-            }.value
+            try await DownloadCoordinator.shared.performExternalDownload(
+                identifier: "python-package-paddlepaddle-\(paddlePaddleTargetVersion)",
+                displayName: "PaddlePaddle \(paddlePaddleTargetVersion)",
+                sourceURL: ManagedServiceReleaseAPI.pypiURL(package: "paddlepaddle")
+            ) {
+                try await Task.detached(priority: .userInitiated) {
+                    try Self.installPaddlePaddle(in: venv, version: paddlePaddleTargetVersion)
+                }.value
+            }
             installProgress = 0.64
             installStatus = "Installing PaddleOCR…"
-            try await Task.detached(priority: .userInitiated) {
-                try Self.installPaddleOCR(in: venv, version: paddleOCRTargetVersion)
-            }.value
+            try await DownloadCoordinator.shared.performExternalDownload(
+                identifier: "python-package-paddleocr-\(paddleOCRTargetVersion)",
+                displayName: "PaddleOCR \(paddleOCRTargetVersion)",
+                sourceURL: ManagedServiceReleaseAPI.pypiURL(package: "paddleocr")
+            ) {
+                try await Task.detached(priority: .userInitiated) {
+                    try Self.installPaddleOCR(in: venv, version: paddleOCRTargetVersion)
+                }.value
+            }
             installProgress = 0.94
             installStatus = "Verifying the PaddleOCR installation…"
             try await Task.detached(priority: .userInitiated) {

@@ -67,6 +67,20 @@ struct MainView: View {
                         toolbarNavigationControls
                     }
                 }
+            } else {
+                // Retain the same native toolbar/title-bar geometry while Settings is
+                // embedded in this window. Without an item, a hidden-title-bar window
+                // collapses its title-bar region and the traffic-light controls jump.
+                if #available(macOS 26.0, *) {
+                    ToolbarItem(placement: .navigation) {
+                        titlebarGeometrySpacer
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .navigation) {
+                        titlebarGeometrySpacer
+                    }
+                }
             }
         }
         .onAppear {
@@ -188,6 +202,13 @@ struct MainView: View {
                 .allowsHitTesting(false)
         }
         .offset(y: toolbarVerticalOffset)
+    }
+
+    private var titlebarGeometrySpacer: some View {
+        Color.clear
+            .frame(width: 28, height: 28)
+            .accessibilityHidden(true)
+            .allowsHitTesting(false)
     }
 
     private var sidebarToggleButton: some View {

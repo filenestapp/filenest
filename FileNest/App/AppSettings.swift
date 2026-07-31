@@ -122,7 +122,6 @@ final class AppSettings: ObservableObject {
     @Published var quickSearchShortcutKeyCode: UInt32 = QuickSearchShortcut.defaultValue.keyCode
     @Published var quickSearchShortcutModifiers: UInt32 = QuickSearchShortcut.defaultValue.modifiers
     @Published var onboardingCompleted: Bool = false
-    @Published var updateFeedURL: String = ""
     @Published var automaticUpdateChecks: Bool = true
     @Published var automaticallyDownloadsUpdates: Bool = true
     @Published private(set) var lastAIModelVersionCheckAt: Date?
@@ -358,7 +357,6 @@ final class AppSettings: ObservableObject {
         quickSearchShortcutKeyCode = shortcut.keyCode
         quickSearchShortcutModifiers = shortcut.modifiers
         onboardingCompleted = load(.onboardingCompleted) == "1"
-        updateFeedURL = load(.updateFeedURL) ?? ""
         automaticUpdateChecks = load(.automaticUpdateChecks) != "0"
         automaticallyDownloadsUpdates = load(.automaticallyDownloadsUpdates) != "0"
         lastAIModelVersionCheckAt = load(.lastAIModelVersionCheckAt)
@@ -650,10 +648,6 @@ final class AppSettings: ObservableObject {
         onboardingCompleted = value
         save(.onboardingCompleted, value ? "1" : "0")
     }
-    func setUpdateFeedURL(_ value: String) {
-        updateFeedURL = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        save(.updateFeedURL, updateFeedURL)
-    }
     func setAutomaticUpdateChecks(_ value: Bool) {
         automaticUpdateChecks = value
         save(.automaticUpdateChecks, value ? "1" : "0")
@@ -732,7 +726,6 @@ final class AppSettings: ObservableObject {
         case quickSearchShortcutKeyCode = "quick_search_shortcut_key_code"
         case quickSearchShortcutModifiers = "quick_search_shortcut_modifiers"
         case onboardingCompleted = "onboarding_completed"
-        case updateFeedURL = "update_feed_url"
         case automaticUpdateChecks = "automatic_update_checks"
         case automaticallyDownloadsUpdates = "automatically_downloads_updates"
         case lastAIModelVersionCheckAt = "last_ai_model_version_check_at"

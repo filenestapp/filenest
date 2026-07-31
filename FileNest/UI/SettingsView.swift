@@ -13,7 +13,6 @@ struct SettingsView: View {
     @State private var modelPendingDeletion: OllamaModelInfo?
     @State private var isShowingDeleteRerankerConfirmation = false
     @State private var whisperModelPendingDeletion: String?
-    @State private var updateFeedDraft = ""
     @State private var isShowingClearLogsConfirmation = false
     @State private var logStatusMessage: String?
     @State private var isTestingAIConnectivity = false
@@ -45,7 +44,6 @@ struct SettingsView: View {
         .onAppear {
             appState.refreshReindexJobSummary()
             selectedSection = appState.selectedSettingsSection
-            updateFeedDraft = appState.updates.feedURLString
             if FileNestEnvironment.isStatisticsPreview {
                 selectedSection = .statistics
             } else if FileNestEnvironment.isSettingsRulesPreview {
@@ -517,33 +515,6 @@ struct SettingsView: View {
                     }
                     Spacer()
                     updateStatusLabel
-                }
-
-                LabeledContent("Update Source") {
-                    TextField(
-                        "",
-                        text: $updateFeedDraft,
-                        prompt: Text("https://example.com/appcast.xml")
-                    )
-                        .labelsHidden()
-                        .accessibilityLabel("Update Source")
-                        .textFieldStyle(.roundedBorder)
-                        .frame(minWidth: 360)
-                }
-
-                HStack {
-                    Text("Only HTTPS Sparkle appcast URLs are supported")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Save URL") {
-                        appState.updates.setFeedURL(updateFeedDraft)
-                        updateFeedDraft = appState.updates.feedURLString
-                    }
-                    .disabled(
-                        updateFeedDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                            == appState.updates.feedURLString
-                    )
                 }
 
                 Toggle("Automatically check for updates", isOn: Binding(
@@ -1295,6 +1266,16 @@ struct SettingsView: View {
                                     .foregroundStyle(paddleOCRReady ? FileNestTheme.success : .secondary)
                             }
                             Text(LocalizedStringKey(paddleOCRStatusText))
+                                .lineLimit(1)
+                            if !paddleOCRReady {
+                                Button {
+                                    Task { await appState.paddleOCR.install() }
+                                } label: {
+                                    Label("Install PaddleOCR", systemImage: "arrow.down.circle")
+                                }
+                                .fixedSize()
+                                .disabled(appState.paddleOCR.isInstalling)
+                            }
                         }
                     }
                     if paddleOCRReady {
@@ -1305,14 +1286,6 @@ struct SettingsView: View {
                             onCheck: { Task { await appState.refreshModelServicesIfNeeded(force: true) } },
                             onUpdate: { Task { await appState.paddleOCR.update() } }
                         )
-                    }
-                    if !paddleOCRReady {
-                        Button {
-                            Task { await appState.paddleOCR.install() }
-                        } label: {
-                            Label("Install PaddleOCR", systemImage: "arrow.down.circle")
-                        }
-                        .disabled(appState.paddleOCR.isInstalling)
                     }
                     if appState.paddleOCR.isInstalling {
                         SettingsOperationProgress(
@@ -1411,7 +1384,7 @@ struct SettingsView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
-                Text("Checks Ollama, PaddleOCR, and Docling for updates, and refreshes FFmpeg and Whisper status when this page opens.")
+                Text("Checks Ollama, PaddleOCR, Docling, and FFmpeg for updates, and refreshes Whisper status when this page opens.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -1460,6 +1433,16 @@ struct SettingsView: View {
                         Button("Install") { Task { await appState.ffmpeg.install() } }
                     }
                 }
+            }
+
+            if appState.ffmpeg.executablePath != nil {
+                ManagedServiceUpdateControls(
+                    installedVersion: appState.ffmpeg.version,
+                    status: appState.ffmpeg.updateStatus,
+                    isInstalling: appState.ffmpeg.isInstalling,
+                    onCheck: { Task { await appState.refreshModelServicesIfNeeded(force: true) } },
+                    onUpdate: { Task { await appState.ffmpeg.update() } }
+                )
             }
 
             if appState.ffmpeg.isInstalling {

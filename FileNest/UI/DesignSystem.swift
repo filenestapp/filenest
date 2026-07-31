@@ -95,10 +95,14 @@ final class FileNestScrollerStyleCoordinator {
         let notifications: [Notification.Name] = [
             NSWindow.didBecomeKeyNotification,
             NSWindow.didResizeNotification,
+            // SwiftUI replaces subtrees when switching between the main workspace and
+            // settings. A window update is emitted after the new NSScrollViews join
+            // the hierarchy, so it covers those late-created views.
+            NSWindow.didUpdateNotification,
         ]
         observerTokens = notifications.map { name in
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
-                guard let window = notification.object as? NSWindow else { return }
+                let window = notification.object as? NSWindow
                 Task { @MainActor [weak self, weak window] in
                     self?.schedule(window: window)
                 }
@@ -231,6 +235,7 @@ extension AppSettings {
             "PaddleOCR update failed: %@",
             "PaddleOCR installation failed: %@",
             "FFmpeg installation failed: %@",
+            "FFmpeg update failed: %@",
             "Whisper installation failed: %@",
             "Whisper model download failed: %@",
             "Could not start Ollama: %@",
@@ -994,17 +999,126 @@ struct FileIconView: View {
     let file: FileRecord
     var size: CGFloat = 38
 
+    private var presentation: FileIconPresentation {
+        FileIconPresentation(fileExtension: file.ext)
+    }
+
     private var image: NSImage {
         FileIconCache.shared.image(for: file)
     }
 
     var body: some View {
-        Image(nsImage: image)
-            .resizable()
-            .interpolation(.high)
-            .scaledToFit()
-            .frame(width: size, height: size)
-            .accessibilityHidden(true)
+        Group {
+            switch presentation {
+            case let .semantic(symbol, tint, label):
+                SemanticFileIcon(symbol: symbol, tint: tint, label: label, size: size)
+            case .finder:
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// FileNest uses stable semantic artwork for ubiquitous work files, while retaining
+/// Finder artwork and thumbnails for media and app-specific formats. This makes
+/// common files recognisable even when a Mac has no default document handler,
+/// without discarding useful previews for visual or proprietary file types.
+private enum FileIconPresentation {
+    case semantic(symbol: String, tint: Color, label: String?)
+    case finder
+
+    init(fileExtension: String) {
+        let fileExtension = fileExtension.lowercased()
+
+        switch fileExtension {
+        case "pdf":
+            self = .semantic(symbol: "doc.fill", tint: Self.pdfTint, label: "PDF")
+        case "doc", "docx", "docm", "odt":
+            self = .semantic(symbol: "doc.fill", tint: Self.documentTint, label: "DOC")
+        case "xls", "xlsx", "xlsm", "ods", "csv":
+            self = .semantic(symbol: "doc.fill", tint: Self.spreadsheetTint, label: "XLS")
+        case "ppt", "pptx", "ppsx", "odp":
+            self = .semantic(symbol: "doc.fill", tint: Self.presentationTint, label: "PPT")
+        case "txt", "rtf":
+            self = .semantic(symbol: "doc.fill", tint: Self.textTint, label: "TXT")
+        case "md", "markdown":
+            self = .semantic(symbol: "doc.fill", tint: Self.markdownTint, label: "MD")
+        case "epub":
+            self = .semantic(symbol: "book.closed.fill", tint: Self.bookTint, label: nil)
+        case "xml":
+            self = .semantic(symbol: "doc.fill", tint: Self.codeTint, label: "XML")
+        case "swift", "py", "js", "ts", "tsx", "jsx", "java", "kt", "go", "rs", "c", "cpp", "h", "hpp", "cs", "rb", "php", "sh", "sql", "json", "yaml", "yml", "html", "css", "vue", "lua", "r":
+            self = .semantic(
+                symbol: "doc.fill",
+                tint: Self.codeTint,
+                label: Self.codeLabel(for: fileExtension)
+            )
+        case "zip", "rar", "7z", "tar", "gz", "bz2", "xz":
+            self = .semantic(symbol: "archivebox.fill", tint: Self.archiveTint, label: nil)
+        // Images, audio, video, iWork, disk images, and design files keep the
+        // richer Finder icon or thumbnail that communicates their source app.
+        case "png", "jpg", "jpeg", "gif", "heic", "tiff", "svg", "psd", "sketch", "webp",
+             "mp4", "mov", "mkv", "avi", "m4v", "webm", "mpeg", "mpg",
+             "mp3", "wav", "aac", "flac", "m4a", "ogg", "opus", "aiff", "aif", "wma",
+             "pages", "numbers", "key", "keynote", "dmg", "iso":
+            self = .finder
+        default:
+            self = .finder
+        }
+    }
+
+    private static let pdfTint = Color(red: 0.86, green: 0.20, blue: 0.23)
+    private static let documentTint = Color(red: 0.15, green: 0.40, blue: 0.84)
+    private static let spreadsheetTint = Color(red: 0.10, green: 0.56, blue: 0.30)
+    private static let presentationTint = Color(red: 0.88, green: 0.40, blue: 0.12)
+    private static let textTint = Color(red: 0.40, green: 0.43, blue: 0.48)
+    private static let markdownTint = Color(red: 0.43, green: 0.30, blue: 0.78)
+    private static let bookTint = Color(red: 0.54, green: 0.35, blue: 0.16)
+    private static let codeTint = Color(red: 0.33, green: 0.31, blue: 0.90)
+    private static let archiveTint = Color(red: 0.72, green: 0.42, blue: 0.10)
+
+    private static func codeLabel(for fileExtension: String) -> String {
+        switch fileExtension {
+        case "cpp": return "C++"
+        case "hpp": return "H++"
+        case "yaml": return "YAML"
+        case "html": return "HTML"
+        case "json": return "JSON"
+        default: return fileExtension.uppercased()
+        }
+    }
+}
+
+private struct SemanticFileIcon: View {
+    let symbol: String
+    let tint: Color
+    let label: String?
+    let size: CGFloat
+
+    private var labelSize: CGFloat {
+        max(4.5, min(7.5, size * 0.19))
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Image(systemName: symbol)
+                .font(.system(size: size * 0.92, weight: .regular))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(tint)
+
+            if let label {
+                Text(label)
+                    .font(.system(size: labelSize, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.bottom, max(1, size * 0.08))
+            }
+        }
+        .frame(width: size, height: size)
     }
 }
 

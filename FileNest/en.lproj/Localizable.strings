@@ -498,6 +498,15 @@
 "Python 3.10 or later is required to install Whisper." = "Python 3.10 or later is required to install Whisper.";
 "The expected executable was not found after installation" = "The expected executable was not found after installation";
 "FFmpeg installation failed: %@" = "FFmpeg installation failed: %@";
+"FFmpeg update failed: %@" = "FFmpeg update failed: %@";
+"Preparing the FFmpeg update…" = "Preparing the FFmpeg update…";
+"Downloading the FFmpeg update…" = "Downloading the FFmpeg update…";
+"FFmpeg update complete" = "FFmpeg update complete";
+"FFmpeg update verification failed" = "FFmpeg update verification failed";
+"Could not read the installed FFmpeg version" = "Could not read the installed FFmpeg version";
+"Downloading the FileNest-managed FFmpeg runtime…" = "Downloading the FileNest-managed FFmpeg runtime…";
+"Verifying and installing FFmpeg…" = "Verifying and installing FFmpeg…";
+"Update failed" = "Update failed";
 "Whisper installation failed: %@" = "Whisper installation failed: %@";
 "Whisper model download failed: %@" = "Whisper model download failed: %@";
 "FFmpeg %@ is ready" = "FFmpeg %@ is ready";
@@ -700,9 +709,6 @@
 "Check for Updates…" = "Check for Updates…";
 "You're up to date" = "You're up to date";
 "Version %@ available" = "Version %@ available";
-"Update Source" = "Update Source";
-"Only HTTPS Sparkle appcast URLs are supported" = "Only HTTPS Sparkle appcast URLs are supported";
-"Save URL" = "Save URL";
 "Automatically check for updates" = "Automatically check for updates";
 "Automatically download available updates" = "Automatically download available updates";
 "Automatically install updates and restart FileNest" = "Automatically install updates and restart FileNest";
@@ -1154,7 +1160,7 @@
 "The Whisper %@ model will be removed from this Mac. You can download it again later." = "The Whisper %@ model will be removed from this Mac. You can download it again later.";
 "Audio and video stay on this Mac during transcription. FFmpeg is used only for media decoding." = "Audio and video stay on this Mac during transcription. FFmpeg is used only for media decoding.";
 "Checks Ollama, PaddleOCR, Docling, FFmpeg, and Whisper when this page opens, and skips repeated checks for 24 hours." = "Checks Ollama, PaddleOCR, Docling, FFmpeg, and Whisper when this page opens, and skips repeated checks for 24 hours.";
-"Checks Ollama, PaddleOCR, and Docling for updates, and refreshes FFmpeg and Whisper status when this page opens." = "Checks Ollama, PaddleOCR, and Docling for updates, and refreshes FFmpeg and Whisper status when this page opens.";
+"Checks Ollama, PaddleOCR, Docling, and FFmpeg for updates, and refreshes Whisper status when this page opens." = "Checks Ollama, PaddleOCR, Docling, and FFmpeg for updates, and refreshes Whisper status when this page opens.";
 "Transcribing audio or video" = "Transcribing audio or video";
 "Transcript Chunk" = "Transcript Chunk";
 "Fastest; suitable for clear speech" = "Fastest; suitable for clear speech";

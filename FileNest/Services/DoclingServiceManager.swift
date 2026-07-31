@@ -203,22 +203,27 @@ enum ManagedPythonRuntime {
     }
 }
 
-actor ManagedPythonRuntimeInstaller {
+@MainActor
+final class ManagedPythonRuntimeInstaller {
     static let shared = ManagedPythonRuntimeInstaller()
     private var activeTask: Task<URL, Error>?
 
-    func ensureInstalled(session: URLSession = .shared) async throws -> URL {
+    func ensureInstalled() async throws -> URL {
         if ManagedPythonRuntime.isInstalled { return ManagedPythonRuntime.executable }
         if let activeTask { return try await activeTask.value }
         guard let artifact = ManagedPythonRuntime.artifact() else {
             throw ManagedRuntimeError.unsupportedArchitecture
         }
         let task = Task<URL, Error> {
-            let (archive, response) = try await session.download(from: artifact.downloadURL)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else {
-                throw ManagedRuntimeError.downloadFailed
-            }
+            let archive = try await DownloadCoordinator.shared.download(
+                ManagedDownloadRequest(
+                    identifier: "managed-python-\(artifact.version)-\(ProcessInfo.processInfo.machineHardwareName)",
+                    displayName: "FileNest Python Runtime",
+                    sourceURL: artifact.downloadURL,
+                    expectedSHA256: artifact.sha256
+                )
+            )
+            defer { try? FileManager.default.removeItem(at: archive) }
             return try ManagedPythonRuntime.install(downloadedArchive: archive)
         }
         activeTask = task
@@ -378,7 +383,7 @@ final class DoclingServiceManager: ObservableObject {
         defer { isInstalling = false }
 
         do {
-            let python = try await ManagedPythonRuntimeInstaller.shared.ensureInstalled(session: session)
+            let python = try await ManagedPythonRuntimeInstaller.shared.ensureInstalled()
             installProgress = 0.15
             installStatus = "Creating an isolated Docling environment…"
             let stagingRoot = Self.stagingRoot()
@@ -388,9 +393,15 @@ final class DoclingServiceManager: ObservableObject {
             }.value
             installProgress = 0.25
             installStatus = "Downloading and installing Docling dependencies…"
-            try await Task.detached(priority: .userInitiated) {
-                try Self.installPackage(in: venv, version: targetVersion)
-            }.value
+            try await DownloadCoordinator.shared.performExternalDownload(
+                identifier: "python-package-docling-\(targetVersion)",
+                displayName: "Docling \(targetVersion)",
+                sourceURL: ManagedServiceReleaseAPI.pypiURL(package: "docling")
+            ) {
+                try await Task.detached(priority: .userInitiated) {
+                    try Self.installPackage(in: venv, version: targetVersion)
+                }.value
+            }
             installProgress = 0.92
             installStatus = "Verifying the Docling installation…"
             try await Task.detached(priority: .userInitiated) {
@@ -582,12 +593,15 @@ final class FFmpegServiceManager: ObservableObject {
     @Published private(set) var state: ManagedMediaServiceState = .unavailable
     @Published private(set) var executablePath: String?
     @Published private(set) var version: String?
+    @Published private(set) var latestVersion: String?
+    @Published private(set) var updateStatus: ManagedServiceUpdateStatus = .idle
     @Published private(set) var isInstalling = false
     @Published private(set) var installProgress: Double?
     @Published private(set) var installStatus = ""
     @Published private(set) var lastError: String?
 
     private let session: URLSession
+    private var latestArtifact: ManagedRuntimeArtifact?
 
     init(session: URLSession = .shared) {
         self.session = session
@@ -618,38 +632,113 @@ final class FFmpegServiceManager: ObservableObject {
     }
 
     func install() async {
+        guard let artifact = Self.artifact() else {
+            let message = MediaServiceError.unsupportedArchitecture.localizedDescription
+            state = .failed(message)
+            lastError = message
+            return
+        }
+        await install(artifact: artifact, isUpdate: false)
+    }
+
+    func checkForUpdates() async {
+        guard executablePath != nil else {
+            latestVersion = nil
+            latestArtifact = nil
+            updateStatus = .idle
+            return
+        }
+        guard !updateStatus.isBusy else { return }
+
+        updateStatus = .checking
+        do {
+            let release = try await ManagedServiceReleaseAPI.latestFFmpegRelease(
+                machine: ProcessInfo.processInfo.machineHardwareName,
+                session: session
+            )
+            latestVersion = release.version
+            latestArtifact = ManagedRuntimeArtifact(
+                version: release.version,
+                downloadURL: release.downloadURL,
+                sha256: release.sha256
+            )
+            guard let version else {
+                updateStatus = .failed("Could not read the installed FFmpeg version")
+                return
+            }
+            updateStatus = ManagedServiceReleaseAPI.isNewer(release.version, than: version)
+                ? .updateAvailable(release.version)
+                : .upToDate
+        } catch {
+            latestVersion = nil
+            latestArtifact = nil
+            updateStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    func update() async {
+        guard case let .updateAvailable(targetVersion) = updateStatus,
+              let latestArtifact else { return }
+        updateStatus = .updating
+        await install(artifact: latestArtifact, isUpdate: true)
+        if case .failed = updateStatus { return }
+        guard lastError == nil,
+              let installedVersion = version,
+              !ManagedServiceReleaseAPI.isNewer(targetVersion, than: installedVersion) else {
+            updateStatus = .failed(lastError ?? "FFmpeg update verification failed")
+            return
+        }
+        updateStatus = .upToDate
+    }
+
+    private func install(artifact: ManagedRuntimeArtifact, isUpdate: Bool) async {
         guard !isInstalling else { return }
         isInstalling = true
         state = .installing
         installProgress = 0.05
-        installStatus = "Preparing the FFmpeg download…"
+        installStatus = isUpdate
+            ? "Preparing the FFmpeg update…"
+            : "Preparing the FFmpeg download…"
         lastError = nil
         defer { isInstalling = false }
 
         do {
-            guard let artifact = Self.artifact() else {
-                throw MediaServiceError.unsupportedArchitecture
-            }
             installProgress = nil
-            installStatus = "Downloading the FileNest-managed FFmpeg runtime…"
-            let (downloaded, response) = try await session.download(from: artifact.downloadURL)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else {
-                throw MediaServiceError.downloadFailed
+            installStatus = isUpdate
+                ? "Downloading the FFmpeg update…"
+                : "Downloading the FileNest-managed FFmpeg runtime…"
+            let downloaded = try await DownloadCoordinator.shared.download(
+                ManagedDownloadRequest(
+                    identifier: "ffmpeg-\(artifact.version)-\(ProcessInfo.processInfo.machineHardwareName)",
+                    displayName: "FFmpeg \(artifact.version)",
+                    sourceURL: artifact.downloadURL,
+                    expectedSHA256: artifact.sha256
+                )
+            ) { [weak self] snapshot in
+                guard let fraction = snapshot.fractionCompleted else { return }
+                self?.installProgress = 0.05 + (fraction * 0.70)
             }
+            defer { try? FileManager.default.removeItem(at: downloaded) }
             installProgress = 0.75
             installStatus = "Verifying and installing FFmpeg…"
             try await Task.detached(priority: .userInitiated) {
                 try Self.installManagedBinary(downloaded, artifact: artifact)
             }.value
             installProgress = 1
-            installStatus = "FFmpeg installation complete"
+            installStatus = isUpdate ? "FFmpeg update complete" : "FFmpeg installation complete"
             refresh()
         } catch {
-            let message = "FFmpeg installation failed: \(error.localizedDescription)"
+            let message = isUpdate
+                ? "FFmpeg update failed: \(error.localizedDescription)"
+                : "FFmpeg installation failed: \(error.localizedDescription)"
             lastError = message
-            installStatus = "Installation failed"
-            state = .failed(message)
+            installStatus = isUpdate ? "Update failed" : "Installation failed"
+            if isUpdate {
+                refresh()
+                updateStatus = .failed(message)
+            } else {
+                state = .failed(message)
+            }
         }
     }
 
@@ -812,9 +901,15 @@ final class WhisperServiceManager: ObservableObject {
             defer { try? FileManager.default.removeItem(at: staging) }
             installProgress = 0.15
             installStatus = "Downloading and installing OpenAI Whisper…"
-            try await Task.detached(priority: .userInitiated) {
-                try Self.prepareRuntime(using: python, at: staging)
-            }.value
+            try await DownloadCoordinator.shared.performExternalDownload(
+                identifier: "python-package-openai-whisper-\(Self.pinnedVersion)",
+                displayName: "OpenAI Whisper",
+                sourceURL: ManagedServiceReleaseAPI.pypiURL(package: "openai-whisper")
+            ) {
+                try await Task.detached(priority: .userInitiated) {
+                    try Self.prepareRuntime(using: python, at: staging)
+                }.value
+            }
             installProgress = 0.9
             installStatus = "Verifying the Whisper installation…"
             try await Task.detached(priority: .userInitiated) {
@@ -851,24 +946,30 @@ final class WhisperServiceManager: ObservableObject {
             installingModel = nil
         }
         do {
-            try await Task.detached(priority: .userInitiated) {
-                try FileManager.default.createDirectory(at: Self.modelRoot, withIntermediateDirectories: true)
-                var environment = ManagedRuntimePaths.managedEnvironment()
-                if let ffmpeg = FFmpegServiceManager.resolveExecutable() {
-                    let path = environment["PATH"] ?? ""
-                    environment["PATH"] = "\(ffmpeg.deletingLastPathComponent().path):\(path)"
-                }
-                try FFmpegServiceManager.run(
-                    executable: Self.pythonExecutable,
-                    arguments: [
-                        "-c",
-                        "import sys, whisper; whisper.load_model(sys.argv[1], download_root=sys.argv[2])",
-                        model,
-                        Self.modelRoot.path,
-                    ],
-                    environment: environment
-                )
-            }.value
+            try await DownloadCoordinator.shared.performExternalDownload(
+                identifier: "whisper-model-\(model)",
+                displayName: "Whisper \(model)",
+                sourceURL: URL(string: "https://openaipublic.azureedge.net/main/whisper/models/")!
+            ) {
+                try await Task.detached(priority: .userInitiated) {
+                    try FileManager.default.createDirectory(at: Self.modelRoot, withIntermediateDirectories: true)
+                    var environment = ManagedRuntimePaths.managedEnvironment()
+                    if let ffmpeg = FFmpegServiceManager.resolveExecutable() {
+                        let path = environment["PATH"] ?? ""
+                        environment["PATH"] = "\(ffmpeg.deletingLastPathComponent().path):\(path)"
+                    }
+                    try FFmpegServiceManager.run(
+                        executable: Self.pythonExecutable,
+                        arguments: [
+                            "-c",
+                            "import sys, whisper; whisper.load_model(sys.argv[1], download_root=sys.argv[2])",
+                            model,
+                            Self.modelRoot.path,
+                        ],
+                        environment: environment
+                    )
+                }.value
+            }
             installProgress = 1
             installStatus = "Whisper model download complete"
             refresh()

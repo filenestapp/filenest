@@ -919,6 +919,42 @@ final class ChatServiceTests: XCTestCase {
         func loadAll() async {}
     }
 
+    private final class FilterAwareChunkVectorStore: VectorStore, @unchecked Sendable {
+        let hit: VectorSearchHit
+        private let lock = NSLock()
+        private var storedAllowedFileIDs = Set<Int64>()
+        var count: Int { 1 }
+
+        init(fileId: Int64, chunk: String) {
+            hit = VectorSearchHit(
+                fileId: fileId,
+                score: 0.95,
+                chunkText: chunk,
+                chunkIndex: 1
+            )
+        }
+
+        var allowedFileIDs: Set<Int64> {
+            lock.withLock { storedAllowedFileIDs }
+        }
+
+        func replace(fileId: Int64, chunks: [EmbeddingChunk], model: String) async -> Bool { false }
+        func remove(fileId: Int64) async {}
+        func search(_ query: [Float], k: Int) async -> [(fileId: Int64, score: Float)] {
+            [(hit.fileId, hit.score)]
+        }
+        func searchChunks(_ query: [Float], k: Int) async -> [VectorSearchHit] { [hit] }
+        func searchChunks(
+            _ query: [Float],
+            allowedFileIDs: Set<Int64>,
+            k: Int
+        ) async -> [VectorSearchHit] {
+            lock.withLock { storedAllowedFileIDs = allowedFileIDs }
+            return allowedFileIDs.contains(hit.fileId) ? [hit] : []
+        }
+        func loadAll() async {}
+    }
+
     private final class StubLLMProvider: LLMProvider, @unchecked Sendable {
         let name = "stub"
 
@@ -944,6 +980,7 @@ final class ChatServiceTests: XCTestCase {
         let name = "capturing-smart-search-stub"
         private let lock = NSLock()
         private var storedMessages = [[ChatTurn]]()
+        private var storedResponseFormats = [LLMResponseFormat]()
         let response: String
 
         init(response: String) {
@@ -954,9 +991,28 @@ final class ChatServiceTests: XCTestCase {
             lock.withLock { storedMessages }
         }
 
+        var responseFormats: [LLMResponseFormat] {
+            lock.withLock { storedResponseFormats }
+        }
+
         func chat(_ messages: [ChatTurn], context: String?) async throws -> String {
             lock.withLock { storedMessages.append(messages) }
             return response
+        }
+
+        func streamChat(
+            _ messages: [ChatTurn],
+            context: String?,
+            responseFormat: LLMResponseFormat
+        ) -> AsyncThrowingStream<String, Error> {
+            lock.withLock {
+                storedMessages.append(messages)
+                storedResponseFormats.append(responseFormat)
+            }
+            return AsyncThrowingStream { continuation in
+                continuation.yield(response)
+                continuation.finish()
+            }
         }
     }
 
@@ -1475,6 +1531,42 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertFalse(ChatService.isRelativeDateOnlyQuery("Invoices from yesterday"))
     }
 
+    func testStructuredFilterDoesNotTruncateSemanticScopeToNewestTwoHundredFiles() async throws {
+        let oldDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let newDate = Date(timeIntervalSince1970: 1_800_000_000)
+        let targetID = try insertFile(
+            named: "2025_20-F_Waterdrop Inc.pdf",
+            title: "Waterdrop annual report",
+            contentText: "Waterdrop Inc. consolidated financial statements",
+            discoveredAt: oldDate
+        )
+        for index in 0..<250 {
+            _ = try insertFile(
+                named: String(format: "newer-%03d.pdf", index),
+                title: "Unrelated PDF \(index)",
+                contentText: "Unrelated material",
+                discoveredAt: newDate.addingTimeInterval(Double(index))
+            )
+        }
+        let vectorStore = FilterAwareChunkVectorStore(
+            fileId: targetID,
+            chunk: "Waterdrop Inc. annual financial report"
+        )
+        let chat = makeChatService(
+            embedder: SuccessfulEmbedder(),
+            vectorStore: vectorStore
+        )
+
+        let results = await chat.searchLibrary(
+            "水滴财报的pdf文件在哪？",
+            limit: 10
+        )
+
+        XCTAssertEqual(vectorStore.allowedFileIDs.count, 251)
+        XCTAssertTrue(vectorStore.allowedFileIDs.contains(targetID))
+        XCTAssertTrue(results.contains(where: { $0.file.id == targetID }))
+    }
+
     func testSmartSearchUsesAIPlanForVectorQueryAndExactMetadataFilters() async throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -1519,6 +1611,73 @@ final class ChatServiceTests: XCTestCase {
         XCTAssertEqual(response.plan.categories, [.documents])
         XCTAssertEqual(embedder.texts.last, "invoice payment details")
         XCTAssertEqual(response.results.map(\.file.id), [matchingID])
+    }
+
+    func testSmartSearchToleratesIncompleteWeightedKeywordFields() async throws {
+        let matchingID = try insertFile(
+            named: "waterdrop.pdf",
+            title: "Waterdrop annual report",
+            contentText: "Waterdrop Inc. financial statements"
+        )
+        let provider = SmartSearchLLMProvider(response: """
+        {
+          "semantic_query": "Waterdrop annual report",
+          "keywords": ["Waterdrop"],
+          "weighted_keywords": [
+            {
+              "term": "Waterdrop",
+              "canonical": "",
+              "aliases": ["水滴"],
+              "weight": null,
+              "role": null,
+              "required": null
+            }
+          ]
+        }
+        """)
+        let chat = makeChatService(
+            embedder: FailingEmbedder(),
+            llmProvider: provider
+        )
+
+        let response = await chat.smartSearchLibrary("水滴财报")
+
+        XCTAssertTrue(response.usedAI)
+        XCTAssertTrue(response.results.contains(where: { $0.file.id == matchingID }))
+        let keyword = try XCTUnwrap(response.plan.weightedKeywords.first(where: {
+            $0.canonical == "Waterdrop"
+        }))
+        XCTAssertEqual(keyword.weight, 0.8)
+        XCTAssertTrue(response.plan.semanticQuery.contains("Waterdrop annual report"))
+    }
+
+    func testSmartSearchPreservesOriginalCJKTermsAlongsidePlannerTranslation() async throws {
+        _ = try insertFile(
+            named: "waterdrop.pdf",
+            title: "Waterdrop annual report",
+            contentText: "Waterdrop Inc. financial statements"
+        )
+        let provider = SmartSearchLLMProvider(response: """
+        {
+          "semantic_query": "Waterdrop annual report",
+          "keywords": ["Waterdrop"],
+          "weighted_keywords": []
+        }
+        """)
+        let embedder = RecordingEmbedder()
+        let chat = makeChatService(
+            embedder: embedder,
+            vectorStore: StubVectorStore(hits: []),
+            llmProvider: provider
+        )
+
+        let response = await chat.smartSearchLibrary("水滴财报的pdf文件在哪？")
+
+        XCTAssertTrue(response.usedAI)
+        XCTAssertTrue(response.plan.semanticQuery.contains("Waterdrop annual report"))
+        XCTAssertTrue(response.plan.semanticQuery.contains("水滴"))
+        XCTAssertTrue(embedder.texts.last?.contains("Waterdrop annual report") == true)
+        XCTAssertTrue(embedder.texts.last?.contains("水滴") == true)
     }
 
     func testSmartSearchAppliesFileRecordSpecificFilters() async throws {
@@ -1753,6 +1912,15 @@ final class ChatServiceTests: XCTestCase {
         let systemPrompt = try XCTUnwrap(provider.messages.first?.first?.content)
         XCTAssertTrue(systemPrompt.contains(#"<skill_content name="prefer-complete-phrases">"#))
         XCTAssertTrue(systemPrompt.contains("Prioritize complete exact core phrases during retrieval."))
+        guard case let .jsonSchema(schema) = try XCTUnwrap(provider.responseFormats.first) else {
+            XCTFail("Expected the search planner to request JSON Schema output")
+            return
+        }
+        let schemaObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(schema.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(schemaObject["type"] as? String, "object")
+        XCTAssertEqual(schemaObject["additionalProperties"] as? Bool, false)
     }
 
     func testRegularSearchCanRecallADistinctiveIdentifierWithoutHardCodingTerms() async throws {

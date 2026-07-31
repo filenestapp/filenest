@@ -359,6 +359,7 @@ final class AppState: ObservableObject {
     let chat: ChatService
     let ragLearning: RAGLearningService
     let agentSkills: AgentSkillService
+    let downloads: DownloadCoordinator
     let ollama: OllamaServiceManager
     let reranker: RerankerServiceManager
     let docling: DoclingServiceManager
@@ -447,6 +448,7 @@ final class AppState: ObservableObject {
     private var lastStatisticsRefreshAt: Date?
     private var lastStatisticsDays: Int?
     private var creationDateRefreshTask: Task<Void, Never>?
+    private var watchDirectoryStatusRefreshTask: Task<Void, Never>?
     private var lastCreationDateRefreshAt: Date?
     private var modelServiceStatusRefreshTask: Task<Void, Never>?
     private var servicePresentationRefreshTask: Task<Void, Never>?
@@ -688,6 +690,7 @@ final class AppState: ObservableObject {
             settings: settings,
             skillService: agentSkills
         )
+        let downloads = DownloadCoordinator.shared
         let ollama = OllamaServiceManager()
         let reranker = RerankerServiceManager()
         let docling = DoclingServiceManager()
@@ -706,6 +709,7 @@ final class AppState: ObservableObject {
         self.chat = chat
         self.ragLearning = ragLearning
         self.agentSkills = agentSkills
+        self.downloads = downloads
         self.ollama = ollama
         self.reranker = reranker
         self.docling = docling
@@ -2492,7 +2496,8 @@ final class AppState: ObservableObject {
             async let ollamaUpdates: Void = ollama.checkForUpdates()
             async let doclingUpdates: Void = docling.checkForUpdates()
             async let paddleUpdates: Void = paddleOCR.checkForUpdates()
-            _ = await (ollamaUpdates, doclingUpdates, paddleUpdates)
+            async let ffmpegUpdates: Void = ffmpeg.checkForUpdates()
+            _ = await (ollamaUpdates, doclingUpdates, paddleUpdates, ffmpegUpdates)
         }
         modelVersionCheckTask = task
         await task.value
@@ -2609,6 +2614,7 @@ final class AppState: ObservableObject {
     func shutdownManagedServices() async {
         watcher.stop()
         librarySearchTask?.cancel()
+        await downloads.suspendAll()
         let activeOrganizationTask = organizationTask
         let activeReindexTask = reindexTask
         let activeManagedSyncTask = managedSyncIndexTask
@@ -3015,9 +3021,9 @@ final class AppState: ObservableObject {
     }
 
     func startWatching() {
-        watcher.start()
         isWatching = true
-        refreshWatchDirectoryStatusesFromDisk()
+        seedWatchDirectoryStatuses()
+        watcher.start()
         statusText = indexingState.isActive ? indexingStatusTitle : watchStatusTitle
     }
 
@@ -4315,11 +4321,44 @@ final class AppState: ObservableObject {
         let activePaths = preservingActiveState
             ? Set(watchDirectoryStatuses.filter(\.isWatching).map(\.path))
             : []
-        watchDirectoryStatuses = watchDirectoryInventories().map { inventory in
-            WatchDirectoryStatus(
-                path: inventory.path,
-                accessState: inventory.accessState,
-                isWatching: isWatching && activePaths.contains(inventory.path)
+        let directoryPaths = settings.watchDirs
+        let enabledExtensions = settings.enabledExtensions
+        let excludeHidden = settings.excludeHidden
+
+        watchDirectoryStatusRefreshTask?.cancel()
+        watchDirectoryStatusRefreshTask = Task { @MainActor [weak self] in
+            let inventories = await Task.detached(priority: .utility) {
+                FileWatcherService.inventories(
+                    for: directoryPaths,
+                    enabledExtensions: enabledExtensions,
+                    excludeHidden: excludeHidden
+                )
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            let currentlyActivePaths = Set(
+                self.watchDirectoryStatuses.filter(\.isWatching).map(\.path)
+            ).union(activePaths)
+            self.watchDirectoryStatuses = inventories.map { inventory in
+                WatchDirectoryStatus(
+                    path: inventory.path,
+                    accessState: inventory.accessState,
+                    isWatching: self.isWatching && currentlyActivePaths.contains(inventory.path)
+                )
+            }
+        }
+    }
+
+    private func seedWatchDirectoryStatuses() {
+        let existingByPath = Dictionary(uniqueKeysWithValues: watchDirectoryStatuses.map { ($0.path, $0) })
+        var seen = Set<String>()
+        watchDirectoryStatuses = settings.watchDirs.compactMap { path in
+            let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+            guard seen.insert(normalizedPath).inserted else { return nil }
+            let existing = existingByPath[normalizedPath]
+            return WatchDirectoryStatus(
+                path: normalizedPath,
+                accessState: existing?.accessState ?? .unavailable,
+                isWatching: existing?.isWatching ?? false
             )
         }
     }

@@ -21,8 +21,17 @@ enum ManagedServiceReleaseAPI {
         let macOSDMGURL: URL
     }
 
+    struct GitHubAssetReleaseMetadata: Equatable {
+        let version: String
+        let downloadURL: URL
+        let sha256: String
+    }
+
     static let ollamaLatestReleaseURL = URL(
         string: "https://api.github.com/repos/ollama/ollama/releases/latest"
+    )!
+    static let ffmpegLatestReleaseURL = URL(
+        string: "https://api.github.com/repos/eugeneware/ffmpeg-static/releases/latest"
     )!
 
     static func pypiURL(package: String) -> URL {
@@ -53,6 +62,15 @@ enum ManagedServiceReleaseAPI {
         return try pypiVersion(from: data)
     }
 
+    static func latestFFmpegRelease(
+        machine: String,
+        session: URLSession = .shared,
+        url: URL = ffmpegLatestReleaseURL
+    ) async throws -> GitHubAssetReleaseMetadata {
+        let data = try await responseData(session: session, url: url)
+        return try ffmpegRelease(from: data, machine: machine)
+    }
+
     static func githubVersion(from data: Data) throws -> String {
         let response = try JSONDecoder().decode(GitHubRelease.self, from: data)
         return normalized(response.tagName)
@@ -76,6 +94,40 @@ enum ManagedServiceReleaseAPI {
         return normalized(response.info.version)
     }
 
+    static func ffmpegRelease(
+        from data: Data,
+        machine: String
+    ) throws -> GitHubAssetReleaseMetadata {
+        let assetName: String
+        switch machine {
+        case "arm64":
+            assetName = "ffmpeg-darwin-arm64"
+        case "x86_64":
+            assetName = "ffmpeg-darwin-x64"
+        default:
+            throw ManagedServiceReleaseError.unsupportedArchitecture
+        }
+
+        let response = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        guard let asset = response.assets?.first(where: {
+            $0.name.caseInsensitiveCompare(assetName) == .orderedSame
+        }),
+        let digest = asset.digest,
+        digest.lowercased().hasPrefix("sha256:") else {
+            throw ManagedServiceReleaseError.invalidResponse
+        }
+        let sha256 = String(digest.dropFirst("sha256:".count))
+        guard sha256.count == 64 else {
+            throw ManagedServiceReleaseError.invalidResponse
+        }
+
+        return GitHubAssetReleaseMetadata(
+            version: normalizedFFmpegVersion(response.tagName),
+            downloadURL: asset.browserDownloadURL,
+            sha256: sha256
+        )
+    }
+
     static func isNewer(_ candidate: String, than installed: String) -> Bool {
         normalized(candidate).compare(normalized(installed), options: .numeric) == .orderedDescending
     }
@@ -84,6 +136,15 @@ enum ManagedServiceReleaseAPI {
         let trimmed = version.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.lowercased().hasPrefix("v") { return String(trimmed.dropFirst()) }
         return trimmed
+    }
+
+    private static func normalizedFFmpegVersion(_ version: String) -> String {
+        let normalizedVersion = normalized(version)
+        guard normalizedVersion.lowercased().hasPrefix("b"),
+              normalizedVersion.dropFirst().first?.isNumber == true else {
+            return normalizedVersion
+        }
+        return String(normalizedVersion.dropFirst())
     }
 
     private static func responseData(session: URLSession, url: URL) async throws -> Data {
@@ -111,10 +172,12 @@ enum ManagedServiceReleaseAPI {
     private struct GitHubReleaseAsset: Decodable {
         let name: String
         let browserDownloadURL: URL
+        let digest: String?
 
         enum CodingKeys: String, CodingKey {
             case name
             case browserDownloadURL = "browser_download_url"
+            case digest
         }
     }
 
@@ -126,8 +189,16 @@ enum ManagedServiceReleaseAPI {
 
 private enum ManagedServiceReleaseError: LocalizedError {
     case invalidResponse
+    case unsupportedArchitecture
 
-    var errorDescription: String? { "Could not fetch the latest service version" }
+    var errorDescription: String? {
+        switch self {
+        case .invalidResponse:
+            return "Could not fetch the latest service version"
+        case .unsupportedArchitecture:
+            return "This Mac architecture is not supported by the FileNest runtime."
+        }
+    }
 }
 
 struct AppBuildInfo: Equatable, Sendable {
@@ -156,6 +227,9 @@ struct AppBuildInfo: Equatable, Sendable {
 
 @MainActor
 final class AppUpdateService: NSObject, ObservableObject, SPUUpdaterDelegate {
+    static let productionFeedURLString =
+        "https://updates.filenestapp.com/appcast/stable.xml?arch=universal"
+
     enum Status: Equatable {
         case notConfigured
         case ready
@@ -208,25 +282,13 @@ final class AppUpdateService: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
 
     var feedURLString: String {
-        if !settings.updateFeedURL.isEmpty { return settings.updateFeedURL }
-        return Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String ?? ""
+        Self.productionFeedURLString
     }
 
     var hasValidFeedURL: Bool { validatedFeedURL != nil }
 
     var canCheckForUpdates: Bool {
         isEnabled && hasValidFeedURL && !status.isBusy
-    }
-
-    func setFeedURL(_ value: String) {
-        settings.setUpdateFeedURL(value)
-        status = validatedFeedURL == nil ? .notConfigured : .ready
-
-        if updaterStarted {
-            updaterController.updater.resetUpdateCycleAfterShortDelay()
-        } else if settings.automaticUpdateChecks, validatedFeedURL != nil {
-            startUpdaterIfNeeded()
-        }
     }
 
     func setAutomaticChecks(_ value: Bool) {

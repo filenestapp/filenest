@@ -482,15 +482,18 @@ final class OllamaServiceManager: ObservableObject {
         lastError = nil
         defer { isInstalling = false }
 
-        let retainedDMG = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FileNest-Ollama-\(UUID().uuidString).dmg")
-        defer { try? FileManager.default.removeItem(at: retainedDMG) }
-
         do {
-            var request = URLRequest(url: downloadURL)
-            request.timeoutInterval = 900
-            let response = try await downloadOfficialDMG(request: request, to: retainedDMG)
-            try Self.validate(response)
+            let retainedDMG = try await DownloadCoordinator.shared.download(
+                ManagedDownloadRequest(
+                    identifier: "ollama-runtime",
+                    displayName: "Ollama Runtime",
+                    sourceURL: downloadURL
+                )
+            ) { [weak self] snapshot in
+                guard let fraction = snapshot.fractionCompleted else { return }
+                self?.installProgress = fraction * 0.72
+            }
+            defer { try? FileManager.default.removeItem(at: retainedDMG) }
 
             installProgress = 0.76
             installStatus = "Verifying and installing in your user directory…"
@@ -511,35 +514,6 @@ final class OllamaServiceManager: ObservableObject {
             installStatus = "Installation Failed"
             state = .failed(message)
             lastError = message
-        }
-    }
-
-    private func downloadOfficialDMG(request: URLRequest, to destination: URL) async throws -> URLResponse {
-        var progressObservation: NSKeyValueObservation?
-        defer { progressObservation?.invalidate() }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let task = session.downloadTask(with: request) { [weak self] temporaryURL, response, error in
-                do {
-                    if let error { throw error }
-                    guard let temporaryURL, let response else { throw OllamaManagerError.badResponse }
-                    try FileManager.default.copyItem(at: temporaryURL, to: destination)
-                    Task { @MainActor [weak self] in
-                        self?.installProgress = 0.72
-                    }
-                    continuation.resume(returning: response)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-            progressObservation = task.progress.observe(\.fractionCompleted, options: [.initial, .new]) {
-                [weak self] progress, _ in
-                let fraction = min(max(progress.fractionCompleted, 0), 1)
-                Task { @MainActor [weak self] in
-                    self?.installProgress = fraction * 0.72
-                }
-            }
-            task.resume()
         }
     }
 
@@ -737,6 +711,12 @@ final class OllamaServiceManager: ObservableObject {
         pullStatus = "Preparing Download"
         lastError = nil
         defer { pullingModel = nil }
+        let downloadIdentifier = "ollama-model-\(Self.canonicalModelName(name))"
+        DownloadCoordinator.shared.beginExternalDownload(
+            identifier: downloadIdentifier,
+            displayName: name,
+            sourceURL: url
+        )
 
         do {
             var request = URLRequest(url: url)
@@ -754,14 +734,24 @@ final class OllamaServiceManager: ObservableObject {
                 pullStatus = update.status ?? "Downloading"
                 if let completed = update.completed, let total = update.total, total > 0 {
                     pullProgress = min(max(Double(completed) / Double(total), 0), 1)
+                    DownloadCoordinator.shared.updateExternalDownload(
+                        identifier: downloadIdentifier,
+                        bytesReceived: Int64(clamping: completed),
+                        bytesExpected: Int64(clamping: total)
+                    )
                 }
             }
             pullProgress = 1
             pullStatus = "Download Complete"
+            DownloadCoordinator.shared.finishExternalDownload(identifier: downloadIdentifier)
             await refresh(host: host)
         } catch {
             lastError = "Model download failed: \(error.localizedDescription)"
             pullStatus = "Download Failed"
+            DownloadCoordinator.shared.failExternalDownload(
+                identifier: downloadIdentifier,
+                error: error
+            )
         }
     }
 

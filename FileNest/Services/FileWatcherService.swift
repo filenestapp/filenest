@@ -16,7 +16,7 @@ struct WatchDirectoryStatus: Identifiable, Equatable, Sendable {
     var id: String { path }
 }
 
-struct WatchDirectoryInventory: Identifiable, Equatable {
+struct WatchDirectoryInventory: Identifiable, Equatable, Sendable {
     let path: String
     let fileCount: Int
     let directoryCount: Int
@@ -144,9 +144,16 @@ final class FileWatcherService: @unchecked Sendable {
     /// Serial queue for all scan operations, preventing concurrent corruption of shared state.
     private let queue = DispatchQueue(label: "filenest.watcher")
     private var running = false
+    private let lifecycleStateLock = NSLock()
+    private var publishedRunning = false
+    private var publishedWatchedDirectoryCount = 0
     /// Changes on every start and stop to identify stale asynchronous indexing tasks.
     private var runGeneration: UInt64 = 0
-    var isRunning: Bool { queue.sync { running } }
+    var isRunning: Bool {
+        lifecycleStateLock.lock()
+        defer { lifecycleStateLock.unlock() }
+        return publishedRunning
+    }
     private let settings: AppSettings
     /// Forwarded to AppState so automatic work is not invisible to the user.
     var onAutomaticFileProcessing: (@Sendable (AutomaticFileProcessingEvent) -> Void)?
@@ -177,7 +184,11 @@ final class FileWatcherService: @unchecked Sendable {
     private var lastPublishedDirectoryStatuses: [WatchDirectoryStatus] = []
     private var manualOrganizationActive = false
     var onDirectoryStatusChange: (@Sendable ([WatchDirectoryStatus]) -> Void)?
-    var watchedDirectoryCount: Int { queue.sync { sources.count } }
+    var watchedDirectoryCount: Int {
+        lifecycleStateLock.lock()
+        defer { lifecycleStateLock.unlock() }
+        return publishedWatchedDirectoryCount
+    }
 
     init(store: SQLiteStore,
          organizer: OrganizerService,
@@ -196,6 +207,10 @@ final class FileWatcherService: @unchecked Sendable {
     }
 
     func start() {
+        updatePublishedLifecycleState(
+            isRunning: true,
+            watchedDirectoryCount: Self.normalizedDirectoryPaths(settings.watchDirs).count
+        )
         queue.async { [weak self] in self?.startLocked() }
     }
 
@@ -234,27 +249,33 @@ final class FileWatcherService: @unchecked Sendable {
             category: .watchLifecycle,
             metadata: ["sources": "\(sources.count)", "pollSeconds": "\(pollingInterval)"]
         )
+        updatePublishedLifecycleState(watchedDirectoryCount: sources.count)
         publishDirectoryStatusesIfChanged()
     }
 
     func stop() {
-        queue.sync {
-            running = false
-            runGeneration &+= 1
-            for source in sources.values { source.cancel() }
-            sources.removeAll()
-            pollTimer?.cancel()
-            pollTimer = nil
-            stabilityTracker = FileStabilityTracker()
-            directoryStabilityTracker = DirectoryStabilityTracker()
-            directoryInspectionCache.removeAll()
-            directoryInspectionRetries.removeAll()
-            startupContentAuditedPaths.removeAll()
-            startupContentMismatchPaths.removeAll()
-            lastScanDiagnostics.removeAll()
-            Self.log("watcher stopped", category: .watchLifecycle, level: .notice)
-            publishDirectoryStatusesIfChanged()
-        }
+        // Directory access can be waiting on macOS privacy authorization. Never
+        // synchronously wait for the watcher queue while the app is terminating.
+        updatePublishedLifecycleState(isRunning: false, watchedDirectoryCount: 0)
+        queue.async { [weak self] in self?.stopLocked() }
+    }
+
+    private func stopLocked() {
+        running = false
+        runGeneration &+= 1
+        for source in sources.values { source.cancel() }
+        sources.removeAll()
+        pollTimer?.cancel()
+        pollTimer = nil
+        stabilityTracker = FileStabilityTracker()
+        directoryStabilityTracker = DirectoryStabilityTracker()
+        directoryInspectionCache.removeAll()
+        directoryInspectionRetries.removeAll()
+        startupContentAuditedPaths.removeAll()
+        startupContentMismatchPaths.removeAll()
+        lastScanDiagnostics.removeAll()
+        Self.log("watcher stopped", category: .watchLifecycle, level: .notice)
+        publishDirectoryStatusesIfChanged()
     }
 
     /// Immediately scans the current watched folders; effective only while watching is active.
@@ -849,6 +870,7 @@ final class FileWatcherService: @unchecked Sendable {
             close(fd)
         }
         sources[path] = src
+        updatePublishedLifecycleState(watchedDirectoryCount: sources.count)
         src.resume()
         // Record the first snapshot on startup; later events or polling process files after they stabilize.
         if scanDirectory(standardizedURL) {
@@ -862,6 +884,7 @@ final class FileWatcherService: @unchecked Sendable {
 
     private func removeWatchDirectory(path: String, logLifecycle: Bool = true) {
         guard let source = sources.removeValue(forKey: path) else { return }
+        updatePublishedLifecycleState(watchedDirectoryCount: sources.count)
         source.cancel()
         lastScanDiagnostics.removeValue(forKey: path)
         if logLifecycle {
@@ -1563,6 +1586,20 @@ final class FileWatcherService: @unchecked Sendable {
         guard statuses != lastPublishedDirectoryStatuses else { return }
         lastPublishedDirectoryStatuses = statuses
         onDirectoryStatusChange?(statuses)
+    }
+
+    private func updatePublishedLifecycleState(
+        isRunning: Bool? = nil,
+        watchedDirectoryCount: Int? = nil
+    ) {
+        lifecycleStateLock.lock()
+        if let isRunning {
+            publishedRunning = isRunning
+        }
+        if let watchedDirectoryCount {
+            publishedWatchedDirectoryCount = watchedDirectoryCount
+        }
+        lifecycleStateLock.unlock()
     }
 
     private static func accessState(for error: Error) -> WatchDirectoryAccessState {

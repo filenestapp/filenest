@@ -1122,6 +1122,26 @@ final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    /// Resolves the complete metadata-filtered scope for vector and entity retrieval.
+    /// Unlike display hydration, this query intentionally has no recency limit: truncating
+    /// the ID set would make older matching files impossible to retrieve semantically.
+    func libraryFileIDs(matching filter: LibraryFileMetadataFilter) throws -> Set<Int64> {
+        try dbPool.read { db in
+            let filtered = Self.metadataFilterPredicate(filter)
+            let predicate = filtered.sql.isEmpty ? "" : "WHERE \(filtered.sql)"
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id
+                    FROM files
+                    \(predicate)
+                    """,
+                arguments: filtered.arguments
+            )
+            return Set(rows.compactMap { $0["id"] as Int64? })
+        }
+    }
+
     /// Loads persisted filesystem creation dates without touching the filesystem.
     func fileCreationDates() throws -> [String: Date] {
         try dbPool.read { db in

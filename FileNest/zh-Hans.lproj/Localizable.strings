@@ -504,6 +504,15 @@
 "Python 3.10 or later is required to install Whisper." = "安装 Whisper 需要 Python 3.10 或更高版本。";
 "The expected executable was not found after installation" = "安装后未找到预期的可执行文件";
 "FFmpeg installation failed: %@" = "FFmpeg 安装失败：%@";
+"FFmpeg update failed: %@" = "FFmpeg 更新失败：%@";
+"Preparing the FFmpeg update…" = "正在准备 FFmpeg 更新…";
+"Downloading the FFmpeg update…" = "正在下载 FFmpeg 更新…";
+"FFmpeg update complete" = "FFmpeg 更新完成";
+"FFmpeg update verification failed" = "FFmpeg 更新验证失败";
+"Could not read the installed FFmpeg version" = "无法读取已安装的 FFmpeg 版本";
+"Downloading the FileNest-managed FFmpeg runtime…" = "正在下载由 FileNest 管理的 FFmpeg 运行时…";
+"Verifying and installing FFmpeg…" = "正在验证并安装 FFmpeg…";
+"Update failed" = "更新失败";
 "Whisper installation failed: %@" = "Whisper 安装失败：%@";
 "Whisper model download failed: %@" = "Whisper 模型下载失败：%@";
 "FFmpeg %@ is ready" = "FFmpeg %@ 已就绪";
@@ -706,9 +715,6 @@
 "Check for Updates…" = "检查更新…";
 "You're up to date" = "已是最新版本";
 "Version %@ available" = "发现版本 %@";
-"Update Source" = "更新源";
-"Only HTTPS Sparkle appcast URLs are supported" = "仅支持 HTTPS Sparkle Appcast 地址";
-"Save URL" = "保存地址";
 "Automatically check for updates" = "自动检查更新";
 "Automatically download available updates" = "自动下载可用更新";
 "Automatically install updates and restart FileNest" = "自动安装更新并重启 FileNest";
@@ -1160,7 +1166,7 @@
 "The Whisper %@ model will be removed from this Mac. You can download it again later." = "Whisper %@ 模型将从此 Mac 删除，之后可以重新下载。";
 "Audio and video stay on this Mac during transcription. FFmpeg is used only for media decoding." = "转写期间音视频始终保留在此 Mac 上，FFmpeg 仅用于媒体解码。";
 "Checks Ollama, PaddleOCR, Docling, FFmpeg, and Whisper when this page opens, and skips repeated checks for 24 hours." = "打开此页面时检查 Ollama、PaddleOCR、Docling、FFmpeg 和 Whisper，并在 24 小时内跳过重复检查。";
-"Checks Ollama, PaddleOCR, and Docling for updates, and refreshes FFmpeg and Whisper status when this page opens." = "打开此页面时检查 Ollama、PaddleOCR 和 Docling 更新，并刷新 FFmpeg 与 Whisper 状态。";
+"Checks Ollama, PaddleOCR, Docling, and FFmpeg for updates, and refreshes Whisper status when this page opens." = "打开此页面时检查 Ollama、PaddleOCR、Docling 和 FFmpeg 更新，并刷新 Whisper 状态。";
 "Transcribing audio or video" = "正在转写音频或视频";
 "Transcript Chunk" = "转写切片";
 "Fastest; suitable for clear speech" = "速度最快，适合清晰语音";

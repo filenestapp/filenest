@@ -387,7 +387,7 @@ private struct SmartSearchPlanPayload: Decodable {
     let intent: String?
     let semanticQuery: String?
     let keywords: [String]?
-    let weightedKeywords: [SmartSearchKeyword]?
+    let weightedKeywords: [SmartSearchKeywordPayload]?
     let exactName: String?
     let fileExtensions: [String]?
     let categories: [String]?
@@ -425,12 +425,28 @@ private struct SmartSearchPlanPayload: Decodable {
     }
 }
 
+private struct SmartSearchKeywordPayload: Decodable {
+    let term: String?
+    let canonical: String?
+    let aliases: [String]?
+    let weight: Double?
+    let role: String?
+    let required: Bool?
+}
+
 private struct CachedSmartSearchPlanPayload: Codable {
     let plan: SmartLibrarySearchPlan
 }
 
-private enum SmartSearchPlanError: Error {
-    case invalidJSON
+private enum SmartSearchPlanError: LocalizedError {
+    case invalidJSON(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .invalidJSON(detail):
+            return "The search planner returned invalid structured output: \(detail)"
+        }
+    }
 }
 
 private actor RerankResultCache {
@@ -595,6 +611,9 @@ final class ChatService {
     private static let attachedContextCharacterLimit = 24_000
     private static let semanticScoreFloor: Float = 0.38
     private static let semanticScoreWindow: Float = 0.18
+    private static let smartSearchPlannerTimeout: TimeInterval = 45
+    private static let defaultRerankCandidateLimit = 8
+    private static let rerankerDocumentTokenLimit = 192
     private let store: SQLiteStore
     private let settings: AppSettings
     private let providedEmbedder: EmbeddingProvider?
@@ -1342,7 +1361,7 @@ final class ChatService {
         managedRootPath: String? = nil,
         includeSemantic: Bool = true,
         includeChunkContent: Bool = true,
-        rerankCandidateLimit: Int = 16,
+        rerankCandidateLimit: Int = ChatService.defaultRerankCandidateLimit,
         allowedCategories: Set<FileCategory> = [],
         onStage: ((LibrarySearchProgressStage) -> Void)? = nil
     ) async -> [LibrarySearchResult] {
@@ -1735,29 +1754,39 @@ final class ChatService {
         }
 
         let startedAt = Date()
+        var reply = ""
+        var streamedReply = ""
+        var lastIntent = ""
+        var firstTokenMilliseconds: Int?
+        var chunkCount = 0
         do {
-            var reply = ""
-            var lastIntent = ""
-            var firstTokenMilliseconds: Int?
-            var chunkCount = 0
-            for try await chunk in provider.streamChat([
-                ChatTurn(
-                    role: .system,
-                    content: smartSearchSystemPrompt(skillContext: skillContext)
+            reply = try await LLMRequestTimeout.collect(
+                provider.streamChat(
+                    [
+                        ChatTurn(
+                            role: .system,
+                            content: smartSearchSystemPrompt(skillContext: skillContext)
+                        ),
+                        ChatTurn(role: .user, content: query),
+                    ],
+                    context: nil,
+                    responseFormat: .jsonSchema(Self.smartSearchPlanResponseSchema)
                 ),
-                ChatTurn(role: .user, content: query),
-            ], context: nil) {
-                try Task.checkCancellation()
-                chunkCount += 1
-                if firstTokenMilliseconds == nil {
-                    firstTokenMilliseconds = Int(Date().timeIntervalSince(startedAt) * 1_000)
+                totalTimeout: Self.smartSearchPlannerTimeout,
+                onFragment: { chunk in
+                    chunkCount += 1
+                    streamedReply += chunk
+                    if firstTokenMilliseconds == nil {
+                        firstTokenMilliseconds = Int(
+                            Date().timeIntervalSince(startedAt) * 1_000
+                        )
+                    }
+                    guard let intent = Self.streamedSearchIntent(in: streamedReply),
+                          intent != lastIntent else { return }
+                    lastIntent = intent
+                    onIntentUpdate?(intent)
                 }
-                reply += chunk
-                guard let intent = Self.streamedSearchIntent(in: reply),
-                      intent != lastIntent else { continue }
-                lastIntent = intent
-                onIntentUpdate?(intent)
-            }
+            )
             let decoded = try Self.decodeSmartSearchPlan(reply, fallbackQuery: query)
             let plan = Self.reconciledSmartSearchPlan(
                 decoded,
@@ -1793,7 +1822,9 @@ final class ChatService {
                 metadata: [
                     "durationMs": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))",
                     "error": error.localizedDescription,
+                    "jsonObjectDetected": "\(reply.firstIndex(of: "{") != nil && reply.lastIndex(of: "}") != nil)",
                     "provider": provider.name,
+                    "responseCharacters": "\(reply.count)",
                 ]
             )
             return (fallbackPlan, false)
@@ -1806,7 +1837,7 @@ final class ChatService {
         smartPlan: SmartLibrarySearchPlan?,
         includeSemantic: Bool = true,
         includeChunkContent: Bool = true,
-        rerankCandidateLimit: Int = 16,
+        rerankCandidateLimit: Int = ChatService.defaultRerankCandidateLimit,
         onStage: ((LibrarySearchProgressStage) -> Void)? = nil
     ) async -> [LibrarySearchResult] {
         await executeLibrarySearchDetails(
@@ -1828,7 +1859,7 @@ final class ChatService {
         sortByConfidence: Bool = false,
         includeSemantic: Bool = true,
         includeChunkContent: Bool = true,
-        rerankCandidateLimit: Int = 16,
+        rerankCandidateLimit: Int = ChatService.defaultRerankCandidateLimit,
         onReranking: (() -> Void)? = nil,
         onStage: ((LibrarySearchProgressStage) -> Void)? = nil
     ) async -> LibrarySearchExecution {
@@ -1897,7 +1928,21 @@ final class ChatService {
                 structuredByID[id] = file
             }
         }
-        let allowedFileIDs = structuredFilter.map { _ in Set(structuredByID.keys) }
+        var allowedFileIDs: Set<Int64>?
+        if let structuredFilter {
+            do {
+                allowedFileIDs = try store.libraryFileIDs(matching: structuredFilter)
+            } catch {
+                // Final result filtering still enforces the structured plan. Searching
+                // the unscoped vector index is safer than silently excluding valid files.
+                AppLogService.shared.write(
+                    "complete structured retrieval scope unavailable; using unscoped semantic recall",
+                    category: .searchPerformance,
+                    level: .warning,
+                    metadata: ["error": error.localizedDescription]
+                )
+            }
+        }
         let structuredMilliseconds = Int(Date().timeIntervalSince(structuredStartedAt) * 1_000)
         onStage?(.matchingMetadata)
         let lexicalStartedAt = Date()
@@ -2374,6 +2419,7 @@ final class ChatService {
                 "rerankerMs": "\(rerankerMilliseconds)",
                 "results": "\(sortedResults.count)",
                 "semantic": "\(shouldSearchSemantic)",
+                "structuredScope": "\(allowedFileIDs?.count ?? 0)",
                 "structuredCandidates": "\(structuredByID.count)",
                 "structuredFilterMs": "\(structuredMilliseconds)",
                 "vectorMs": "\(vectorMilliseconds)",
@@ -3115,6 +3161,82 @@ final class ChatService {
             .contains { normalized.contains($0) }
     }
 
+    private static let smartSearchPlanResponseSchema = """
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "intent": {"type": "string"},
+        "semantic_query": {"type": "string"},
+        "keywords": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {"type": "string"}
+        },
+        "weighted_keywords": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "term": {"type": "string"},
+              "canonical": {"type": "string"},
+              "aliases": {
+                "type": "array",
+                "maxItems": 3,
+                "items": {"type": "string"}
+              },
+              "weight": {"type": "number", "minimum": 0, "maximum": 1},
+              "role": {"type": "string", "enum": ["core", "support", "format"]},
+              "required": {"type": "boolean"}
+            },
+            "required": ["term", "canonical", "aliases", "weight", "role", "required"]
+          }
+        },
+        "exact_name": {"type": ["string", "null"]},
+        "file_extensions": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["documents", "images", "videos", "audio", "code", "archives", "other"]
+          }
+        },
+        "folder_terms": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {"type": "string"}
+        },
+        "item_kind": {"type": "string", "enum": ["any", "file", "directory"]},
+        "date_field": {"type": "string", "enum": ["modified", "added", "organized"]},
+        "date_from": {"type": ["string", "null"]},
+        "date_to": {"type": ["string", "null"]},
+        "size_min_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "size_max_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "has_note": {"type": ["boolean", "null"]},
+        "is_indexed": {"type": ["boolean", "null"]},
+        "content_mode": {
+          "type": "string",
+          "enum": ["automatic", "metadata_only", "indexed_content"]
+        },
+        "sort": {
+          "type": "string",
+          "enum": ["relevance", "newest", "oldest", "largest", "smallest"]
+        }
+      },
+      "required": [
+        "intent", "semantic_query", "keywords", "weighted_keywords", "exact_name",
+        "file_extensions", "categories", "folder_terms", "item_kind", "date_field",
+        "date_from", "date_to", "size_min_bytes", "size_max_bytes", "has_note",
+        "is_indexed", "content_mode", "sort"
+      ]
+    }
+    """
+
     private func smartSearchSystemPrompt(
         skillContext: String,
         now: Date = Date(),
@@ -3174,10 +3296,17 @@ final class ChatService {
     ) throws -> SmartLibrarySearchPlan {
         guard let start = response.firstIndex(of: "{"),
               let end = response.lastIndex(of: "}"),
-              start <= end,
-              let data = String(response[start...end]).data(using: .utf8),
-              let payload = try? JSONDecoder().decode(SmartSearchPlanPayload.self, from: data) else {
-            throw SmartSearchPlanError.invalidJSON
+              start <= end else {
+            throw SmartSearchPlanError.invalidJSON("no JSON object was detected")
+        }
+        guard let data = String(response[start...end]).data(using: .utf8) else {
+            throw SmartSearchPlanError.invalidJSON("the JSON object was not valid UTF-8")
+        }
+        let payload: SmartSearchPlanPayload
+        do {
+            payload = try JSONDecoder().decode(SmartSearchPlanPayload.self, from: data)
+        } catch {
+            throw SmartSearchPlanError.invalidJSON(String(describing: error))
         }
 
         let semanticQuery = payload.semanticQuery?
@@ -3187,8 +3316,27 @@ final class ChatService {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
             .prefix(8)
+        let decodedWeightedKeywords = (payload.weightedKeywords ?? []).compactMap {
+            keyword -> SmartSearchKeyword? in
+            let term = keyword.term?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let canonical = keyword.canonical?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !term.isEmpty || !canonical.isEmpty else { return nil }
+            let resolvedCanonical = canonical.isEmpty ? term : canonical
+            return SmartSearchKeyword(
+                term: term.isEmpty ? resolvedCanonical : term,
+                canonical: resolvedCanonical,
+                aliases: keyword.aliases ?? [],
+                weight: keyword.weight ?? 0.8,
+                role: SmartSearchKeywordRole(
+                    rawValue: keyword.role?.lowercased() ?? ""
+                ) ?? .support,
+                required: keyword.required ?? false
+            )
+        }
         let weightedKeywords = normalizedWeightedKeywords(
-            payload.weightedKeywords ?? [],
+            decodedWeightedKeywords,
             fallbackKeywords: Array(keywords),
             query: fallbackQuery
         )
@@ -3305,7 +3453,17 @@ final class ChatService {
         if !aiSemanticQuery.isEmpty, !containsStructuralQueryMarker(in: aiSemanticQuery) {
             // A clean model paraphrase can improve vector recall, but it never
             // participates in lexical matching or filter construction.
-            semanticQuery = aiSemanticQuery
+            // Preserve the source-language concepts when the planner translates a
+            // CJK query. The translation improves cross-language recall, while the
+            // original terms keep retrieval useful if the translation is wrong.
+            if containsCJKText(query), !containsCJKText(aiSemanticQuery) {
+                semanticQuery = uniqueSearchTerms([
+                    aiSemanticQuery,
+                    fallback.semanticQuery,
+                ]).joined(separator: " ")
+            } else {
+                semanticQuery = aiSemanticQuery
+            }
         } else {
             semanticQuery = uniqueSearchTerms(
                 contentSearchTerms(in: query) + aiPlan.keywords.filter(isLexicalEvidenceTerm)
@@ -3349,6 +3507,17 @@ final class ChatService {
             }(),
             sort: aiPlan.sort
         )
+    }
+
+    private static func containsCJKText(_ value: String) -> Bool {
+        value.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF:
+                true
+            default:
+                false
+            }
+        }
     }
 
     private static func normalizedWeightedKeywords(
@@ -4368,7 +4537,10 @@ final class ChatService {
         let candidates = partition.candidates
         guard candidates.count > 1 else { return candidates + partition.tail }
         let documents = candidates.map {
-            Self.rerankerInputText($0.chunkText ?? "", maximumTokens: 256)
+            Self.rerankerInputText(
+                $0.chunkText ?? "",
+                maximumTokens: Self.rerankerDocumentTokenLimit
+            )
         }
         let cacheKey = Self.rerankerCacheKey(
             providerName: provider.name,
