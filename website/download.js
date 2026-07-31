@@ -80,11 +80,12 @@ function renderAutoDownload() {
 function applyRelease(release) {
   activeRelease = release;
   const data = releaseData(release);
+  const macOSSize = formatSize(data.macOSAsset?.size);
 
   updateText("[data-release-version]", data.version);
   updateText("[data-release-build-note]", `Version ${data.version} · macOS 13 or later · Developer ID signed and notarized`);
-  updateText("[data-release-asset-details]", data.macOSAsset
-    ? `DMG installer · ${formatSize(data.macOSAsset.size)}`
+  updateText("[data-release-asset-details]", macOSSize
+    ? `DMG installer · ${macOSSize}`
     : "Signed DMG installer");
   document.querySelectorAll("[data-release-url]").forEach((element) => {
     element.href = release.html_url;
