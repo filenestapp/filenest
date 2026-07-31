@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Semantic release tag, for example v0.2.4"
+        description: "Semantic release tag, for example v0.2.5"
         required: true
-        default: "v0.2.4"
+        default: "v0.2.5"
         type: string
       publish_release:
         description: "Publish a GitHub Release after both builds pass"
@@ -45,6 +45,10 @@ jobs:
       MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
       MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
       MACOS_NOTARY_PRIVATE_KEY_BASE64: ${{ secrets.MACOS_NOTARY_PRIVATE_KEY_BASE64 }}
+      FILENEST_SPARKLE_PRIVATE_KEY: ${{ secrets.FILENEST_SPARKLE_PRIVATE_KEY }}
+      FILENEST_UPDATE_FEED_URL: ${{ vars.FILENEST_UPDATE_FEED_URL }}
+      FILENEST_SPARKLE_PUBLIC_KEY: ${{ vars.FILENEST_SPARKLE_PUBLIC_KEY }}
+      FILENEST_DOWNLOAD_BASE_URL: ${{ vars.FILENEST_DOWNLOAD_BASE_URL }}
 
     steps:
       - name: Check out source
@@ -95,6 +99,10 @@ jobs:
             "$MACOS_NOTARY_KEY_ID"
             "$MACOS_NOTARY_ISSUER_ID"
             "$MACOS_NOTARY_PRIVATE_KEY_BASE64"
+            "$FILENEST_SPARKLE_PRIVATE_KEY"
+            "$FILENEST_UPDATE_FEED_URL"
+            "$FILENEST_SPARKLE_PUBLIC_KEY"
+            "$FILENEST_DOWNLOAD_BASE_URL"
           )
 
           missing=0
@@ -105,7 +113,7 @@ jobs:
           done
 
           if [[ "$missing" -eq 1 ]]; then
-            echo "Distribution credentials are incomplete; building an unsigned validation artifact."
+            echo "Distribution signing or automatic-update configuration is incomplete; building an unsigned validation artifact."
             echo "distribution_ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -168,6 +176,8 @@ jobs:
               CODE_SIGN_STYLE=Manual \
               CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
               DEVELOPMENT_TEAM="$MACOS_TEAM_ID" \
+              FILENEST_UPDATE_FEED_URL="$FILENEST_UPDATE_FEED_URL" \
+              FILENEST_SPARKLE_PUBLIC_KEY="$FILENEST_SPARKLE_PUBLIC_KEY" \
               CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
               OTHER_CODE_SIGN_FLAGS="--timestamp" \
               build
@@ -224,6 +234,8 @@ jobs:
               CODE_SIGNING_ALLOWED=NO \
               CODE_SIGNING_REQUIRED=NO \
               DEVELOPMENT_TEAM="" \
+              FILENEST_UPDATE_FEED_URL="$FILENEST_UPDATE_FEED_URL" \
+              FILENEST_SPARKLE_PUBLIC_KEY="$FILENEST_SPARKLE_PUBLIC_KEY" \
               build
             codesign --force --deep --sign - --options runtime \
               .build/ReleaseDerivedData/Build/Products/Release/FileNest.app
@@ -278,10 +290,29 @@ jobs:
 
             zip_path="$output/FileNest-${version}-macOS.zip"
             dmg_path="$output/FileNest-${version}-macOS.dmg"
+            notary_submission="$RUNNER_TEMP/FileNest-${version}-notary-submission.zip"
 
-            ditto -c -k --sequesterRsrc --keepParent "$app" "$zip_path"
-            notarize_and_require_acceptance "$zip_path"
+            ditto -c -k --sequesterRsrc --keepParent "$app" "$notary_submission"
+            notarize_and_require_acceptance "$notary_submission"
             xcrun stapler staple "$app"
+            xcrun stapler validate "$app"
+
+            # Recreate the distributable archive from the stapled app so the
+            # offline Gatekeeper ticket is included in the signed update.
+            ditto -c -k --sequesterRsrc --keepParent "$app" "$zip_path"
+            sparkle_signer=".build/ReleaseDerivedData/SourcePackages/artifacts/sparkle/Sparkle/bin/sign_update"
+            if [[ ! -x "$sparkle_signer" ]]; then
+              echo "Sparkle sign_update tool was not found at $sparkle_signer" >&2
+              exit 1
+            fi
+            sparkle_signature="$(
+              printf '%s' "$FILENEST_SPARKLE_PRIVATE_KEY" |
+                "$sparkle_signer" --ed-key-file - -p "$zip_path"
+            )"
+            if [[ -z "$sparkle_signature" ]]; then
+              echo "Sparkle update signature is empty." >&2
+              exit 1
+            fi
 
             ditto "$app" "$staging/FileNest.app"
             hdiutil create \
@@ -293,6 +324,44 @@ jobs:
             xcrun stapler staple "$dmg_path"
             xcrun stapler validate "$dmg_path"
             spctl -a -vv -t exec "$app"
+
+            build_number="$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")"
+            file_size="$(stat -f '%z' "$zip_path")"
+            sha256="$(shasum -a 256 "$zip_path" | awk '{print $1}')"
+            archive_name="$(basename "$zip_path")"
+            metadata_path="$output/FileNest-${version}-macOS-update.json"
+            export version build_number file_size sha256 archive_name sparkle_signature metadata_path
+            python3 <<'PY'
+            import json
+            import os
+            from datetime import datetime, timezone
+            from pathlib import Path
+
+            repository = os.environ["GITHUB_REPOSITORY"]
+            release_tag = os.environ["RELEASE_TAG"]
+            download_base = os.environ["FILENEST_DOWNLOAD_BASE_URL"].rstrip("/")
+            payload = {
+                "id": f"macos-universal-stable-{os.environ['version']}-{os.environ['build_number']}",
+                "version": os.environ["version"],
+                "build": int(os.environ["build_number"]),
+                "platform": "macos",
+                "architecture": "universal",
+                "channel": "stable",
+                "published_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "download_url": f"{download_base}/{os.environ['archive_name']}",
+                "file_size": int(os.environ["file_size"]),
+                "sha256": os.environ["sha256"],
+                "sparkle_ed_signature": os.environ["sparkle_signature"],
+                "minimum_os_version": "13.0",
+                "release_notes_url": f"https://github.com/{repository}/releases/tag/{release_tag}",
+                "release_notes": "See the release notes for details.",
+                "critical": False,
+            }
+            Path(os.environ["metadata_path"]).write_text(
+                json.dumps(payload, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            PY
           else
             zip_path="$output/FileNest-${version}-macOS-unsigned.zip"
             dmg_path="$output/FileNest-${version}-macOS-unsigned.dmg"
@@ -447,6 +516,11 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       DISTRIBUTION_READY: ${{ needs.macos.outputs.distribution_ready }}
+      FILENEST_DEPLOY_HOST: ${{ vars.FILENEST_DEPLOY_HOST }}
+      FILENEST_DEPLOY_USER: ${{ vars.FILENEST_DEPLOY_USER }}
+      FILENEST_DEPLOY_SSH_KEY: ${{ secrets.FILENEST_DEPLOY_SSH_KEY }}
+      FILENEST_UPDATE_ADMIN_URL: ${{ vars.FILENEST_UPDATE_ADMIN_URL }}
+      FILENEST_UPDATE_ADMIN_TOKEN: ${{ secrets.FILENEST_UPDATE_ADMIN_TOKEN }}
 
     steps:
       - name: Require signed and notarized macOS output
@@ -489,3 +563,57 @@ jobs:
           else
             gh release create "${release_args[@]}"
           fi
+
+      - name: Publish signed macOS update
+        shell: bash
+        run: |
+          set -euo pipefail
+          required_values=(
+            "$FILENEST_DEPLOY_HOST"
+            "$FILENEST_DEPLOY_USER"
+            "$FILENEST_DEPLOY_SSH_KEY"
+            "$FILENEST_UPDATE_ADMIN_URL"
+            "$FILENEST_UPDATE_ADMIN_TOKEN"
+          )
+          for value in "${required_values[@]}"; do
+            if [[ -z "$value" ]]; then
+              echo "Production update deployment configuration is incomplete." >&2
+              exit 1
+            fi
+          done
+
+          version="${RELEASE_TAG#v}"
+          archive="release-assets/FileNest-${version}-macOS.zip"
+          metadata="release-assets/FileNest-${version}-macOS-update.json"
+          if [[ ! -f "$archive" || ! -f "$metadata" ]]; then
+            echo "Signed update archive or metadata is missing." >&2
+            exit 1
+          fi
+
+          ssh_key="$RUNNER_TEMP/filenest-deploy-key"
+          known_hosts="$RUNNER_TEMP/known_hosts"
+          printf '%s\n' "$FILENEST_DEPLOY_SSH_KEY" > "$ssh_key"
+          chmod 600 "$ssh_key"
+          ssh-keyscan -H "$FILENEST_DEPLOY_HOST" > "$known_hosts"
+
+          remote_staging="/home/${FILENEST_DEPLOY_USER}/.$(basename "$archive").upload"
+          scp -i "$ssh_key" -o UserKnownHostsFile="$known_hosts" \
+            "$archive" \
+            "${FILENEST_DEPLOY_USER}@${FILENEST_DEPLOY_HOST}:${remote_staging}"
+          ssh -i "$ssh_key" -o UserKnownHostsFile="$known_hosts" \
+            "${FILENEST_DEPLOY_USER}@${FILENEST_DEPLOY_HOST}" \
+            "sudo install -m 0644 -o ${FILENEST_DEPLOY_USER} -g www '$remote_staging' '/var/lib/filenest-update-api/downloads/$(basename "$archive")' && unlink '$remote_staging'"
+
+          download_url="$(
+            python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["download_url"])' "$metadata"
+          )"
+          curl --fail --silent --show-error --location --head "$download_url" >/dev/null
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer $FILENEST_UPDATE_ADMIN_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data-binary "@$metadata" \
+            "$FILENEST_UPDATE_ADMIN_URL/v1/admin/releases" >/dev/null
+
+          rm -f "$ssh_key" "$known_hosts"
+          echo "Published signed macOS update metadata and archive."

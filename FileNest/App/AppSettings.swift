@@ -124,7 +124,7 @@ final class AppSettings: ObservableObject {
     @Published var onboardingCompleted: Bool = false
     @Published var updateFeedURL: String = ""
     @Published var automaticUpdateChecks: Bool = true
-    @Published var automaticallyDownloadsUpdates: Bool = false
+    @Published var automaticallyDownloadsUpdates: Bool = true
     @Published private(set) var lastAIModelVersionCheckAt: Date?
 
     enum LLMChoice: String, CaseIterable, Identifiable { case ollama, cloud, none
@@ -360,7 +360,7 @@ final class AppSettings: ObservableObject {
         onboardingCompleted = load(.onboardingCompleted) == "1"
         updateFeedURL = load(.updateFeedURL) ?? ""
         automaticUpdateChecks = load(.automaticUpdateChecks) != "0"
-        automaticallyDownloadsUpdates = load(.automaticallyDownloadsUpdates) == "1"
+        automaticallyDownloadsUpdates = load(.automaticallyDownloadsUpdates) != "0"
         lastAIModelVersionCheckAt = load(.lastAIModelVersionCheckAt)
             .flatMap(TimeInterval.init)
             .map(Date.init(timeIntervalSince1970:))

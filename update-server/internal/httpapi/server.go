@@ -400,7 +400,7 @@ func marshalAppcast(channel string, releases []release.Release) ([]byte, error) 
 		Sparkle: "http://www.andymatuschak.org/xml-namespaces/sparkle",
 		Channel: appcastChannel{
 			Title:       fmt.Sprintf("FileNest %s Updates", channel),
-			Link:        "https://filenest.app",
+			Link:        "https://filenestapp.com",
 			Description: fmt.Sprintf("Signed FileNest %s update feed", channel),
 			Language:    "en",
 			Items:       items,

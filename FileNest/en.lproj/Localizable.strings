@@ -705,6 +705,10 @@
 "Save URL" = "Save URL";
 "Automatically check for updates" = "Automatically check for updates";
 "Automatically download available updates" = "Automatically download available updates";
+"Automatically install updates and restart FileNest" = "Automatically install updates and restart FileNest";
+"Downloading version %@…" = "Downloading version %@…";
+"Preparing version %@…" = "Preparing version %@…";
+"Installing version %@ and restarting…" = "Installing version %@ and restarting…";
 "Last checked: %@" = "Last checked: %@";
 "Current Version" = "Current Version";
 "Check for Updates" = "Check for Updates";
@@ -722,6 +726,7 @@
 "Docling update complete" = "Docling update complete";
 "Docling update failed: %@" = "Docling update failed: %@";
 "Sparkle verifies update packages and asks before installation. Production releases require Developer ID, an EdDSA public key, and a signed appcast." = "Sparkle verifies update packages and asks before installation. Production releases require Developer ID, an EdDSA public key, and a signed appcast.";
+"Signed updates are verified before installation. Automatic installation safely stops managed services, installs the update, and restarts FileNest." = "Signed updates are verified before installation. Automatic installation safely stops managed services, installs the update, and restarts FileNest.";
 "Configure a valid HTTPS update URL first" = "Configure a valid HTTPS update URL first";
 "Watching and indexing" = "Watching and indexing";
 

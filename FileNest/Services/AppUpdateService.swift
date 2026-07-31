@@ -162,7 +162,19 @@ final class AppUpdateService: NSObject, ObservableObject, SPUUpdaterDelegate {
         case checking
         case upToDate
         case updateAvailable(version: String, build: String)
+        case downloading(version: String)
+        case preparingToInstall(version: String)
+        case installing(version: String)
         case failed(String)
+
+        var isBusy: Bool {
+            switch self {
+            case .checking, .downloading, .preparingToInstall, .installing:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     @Published private(set) var status: Status = .notConfigured
@@ -203,7 +215,7 @@ final class AppUpdateService: NSObject, ObservableObject, SPUUpdaterDelegate {
     var hasValidFeedURL: Bool { validatedFeedURL != nil }
 
     var canCheckForUpdates: Bool {
-        isEnabled && hasValidFeedURL && status != .checking
+        isEnabled && hasValidFeedURL && !status.isBusy
     }
 
     func setFeedURL(_ value: String) {
@@ -234,6 +246,7 @@ final class AppUpdateService: NSObject, ObservableObject, SPUUpdaterDelegate {
         settings.setAutomaticallyDownloadsUpdates(value)
         guard startUpdaterIfNeeded() else { return }
         updaterController.updater.automaticallyDownloadsUpdates = value
+        updaterController.updater.resetUpdateCycleAfterShortDelay()
     }
 
     func checkForUpdates() {
@@ -258,6 +271,14 @@ final class AppUpdateService: NSObject, ObservableObject, SPUUpdaterDelegate {
             version: item.displayVersionString,
             build: item.versionString
         )
+        Self.log(
+            "Application update found",
+            metadata: [
+                "version": item.displayVersionString,
+                "build": item.versionString,
+                "automaticInstall": String(settings.automaticallyDownloadsUpdates),
+            ]
+        )
     }
 
     func updaterDidNotFindUpdate(_ updater: SPUUpdater, error: Error) {
@@ -268,6 +289,85 @@ final class AppUpdateService: NSObject, ObservableObject, SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
         lastCheckedAt = Date()
         status = .failed(error.localizedDescription)
+        Self.log(
+            "Application update cycle failed",
+            level: .error,
+            metadata: ["error": error.localizedDescription]
+        )
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        willDownloadUpdate item: SUAppcastItem,
+        with request: NSMutableURLRequest
+    ) {
+        status = .downloading(version: item.displayVersionString)
+        Self.log(
+            "Application update download started",
+            metadata: ["version": item.displayVersionString]
+        )
+    }
+
+    func updater(_ updater: SPUUpdater, didDownloadUpdate item: SUAppcastItem) {
+        status = .preparingToInstall(version: item.displayVersionString)
+        Self.log(
+            "Application update download completed",
+            metadata: ["version": item.displayVersionString]
+        )
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        failedToDownloadUpdate item: SUAppcastItem,
+        error: Error
+    ) {
+        status = .failed(error.localizedDescription)
+        Self.log(
+            "Application update download failed",
+            level: .error,
+            metadata: [
+                "version": item.displayVersionString,
+                "error": error.localizedDescription,
+            ]
+        )
+    }
+
+    func updater(_ updater: SPUUpdater, willExtractUpdate item: SUAppcastItem) {
+        status = .preparingToInstall(version: item.displayVersionString)
+    }
+
+    func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        status = .installing(version: item.displayVersionString)
+        Self.log(
+            "Application update installation started",
+            metadata: ["version": item.displayVersionString]
+        )
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        willInstallUpdateOnQuit item: SUAppcastItem,
+        immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
+    ) -> Bool {
+        guard Self.shouldInstallImmediately(
+            automaticChecksEnabled: settings.automaticUpdateChecks,
+            automaticInstallationEnabled: settings.automaticallyDownloadsUpdates
+        ) else {
+            return false
+        }
+
+        status = .installing(version: item.displayVersionString)
+        Self.log(
+            "Application update will install immediately and relaunch",
+            metadata: ["version": item.displayVersionString]
+        )
+        Task { @MainActor in
+            // Yield one run-loop turn so SwiftUI can render the restart state before
+            // Sparkle requests application termination.
+            await Task.yield()
+            immediateInstallHandler()
+        }
+        return true
     }
 
     private var validatedFeedURL: URL? {
@@ -291,10 +391,39 @@ final class AppUpdateService: NSObject, ObservableObject, SPUUpdaterDelegate {
             updaterController.updater.automaticallyChecksForUpdates = settings.automaticUpdateChecks
             updaterController.updater.automaticallyDownloadsUpdates = settings.automaticallyDownloadsUpdates
             status = .ready
+            if settings.automaticUpdateChecks {
+                status = .checking
+                updaterController.updater.checkForUpdatesInBackground()
+            }
             return true
         } catch {
             status = .failed(error.localizedDescription)
+            Self.log(
+                "Application update service failed to start",
+                level: .error,
+                metadata: ["error": error.localizedDescription]
+            )
             return false
         }
+    }
+
+    nonisolated static func shouldInstallImmediately(
+        automaticChecksEnabled: Bool,
+        automaticInstallationEnabled: Bool
+    ) -> Bool {
+        automaticChecksEnabled && automaticInstallationEnabled
+    }
+
+    private static func log(
+        _ message: String,
+        level: AppLogLevel = .notice,
+        metadata: [String: String] = [:]
+    ) {
+        AppLogService.shared.write(
+            message,
+            category: .appLifecycle,
+            level: level,
+            metadata: metadata
+        )
     }
 }

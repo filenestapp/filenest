@@ -551,7 +551,7 @@ struct SettingsView: View {
                     set: { appState.updates.setAutomaticChecks($0) }
                 ))
 
-                Toggle("Automatically download available updates", isOn: Binding(
+                Toggle("Automatically install updates and restart FileNest", isOn: Binding(
                     get: { appState.settings.automaticallyDownloadsUpdates },
                     set: { appState.updates.setAutomaticallyDownloadsUpdates($0) }
                 ))
@@ -583,7 +583,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Text("Sparkle verifies update packages and asks before installation. Production releases require Developer ID, an EdDSA public key, and a signed appcast.")
+                Text("Signed updates are verified before installation. Automatic installation safely stops managed services, installs the update, and restarts FileNest.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -754,6 +754,24 @@ struct SettingsView: View {
         case let .updateAvailable(version, _):
             Label(appState.settings.localizedFormat("Version %@ available", version), systemImage: "arrow.down.circle.fill")
                 .foregroundStyle(FileNestTheme.accent)
+        case let .downloading(version):
+            Label(
+                appState.settings.localizedFormat("Downloading version %@…", version),
+                systemImage: "arrow.down.circle"
+            )
+            .foregroundStyle(FileNestTheme.accent)
+        case let .preparingToInstall(version):
+            Label(
+                appState.settings.localizedFormat("Preparing version %@…", version),
+                systemImage: "shippingbox"
+            )
+            .foregroundStyle(FileNestTheme.accent)
+        case let .installing(version):
+            Label(
+                appState.settings.localizedFormat("Installing version %@ and restarting…", version),
+                systemImage: "arrow.clockwise.circle.fill"
+            )
+            .foregroundStyle(FileNestTheme.accent)
         case let .failed(message):
             Label(appState.settings.localizedRuntimeMessage(message), systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(FileNestTheme.warning)

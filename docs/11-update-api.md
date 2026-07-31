@@ -10,9 +10,23 @@ FileNest uses the independent Go service in [`update-server`](../update-server) 
 4. The archive is uploaded to immutable HTTPS storage.
 5. CI posts the metadata to `POST /v1/admin/releases`.
 6. FileNest reads `/appcast/{channel}.xml` through Sparkle.
-7. Other clients and operations tools can use `/v1/updates/check`.
+7. FileNest checks once at startup and continues on Sparkle's background
+   schedule.
+8. When automatic installation is enabled, Sparkle downloads and verifies the
+   archive, FileNest drains its managed services, then the updater installs
+   the release and relaunches the application.
+9. Other clients and operations tools can use `/v1/updates/check`.
 
 The API never receives or stores Apple signing certificates, notarization credentials, or the Sparkle private key.
+
+Release builds receive the appcast URL and EdDSA public key through the
+`FILENEST_UPDATE_FEED_URL` and `FILENEST_SPARKLE_PUBLIC_KEY` Xcode build
+settings. The private key is used only by the release signer.
+
+Production endpoints:
+
+- Appcast and update API: `https://updates.filenestapp.com`
+- Immutable macOS update archives: `https://downloads.filenestapp.com`
 
 ## JSON update check
 
@@ -31,7 +45,7 @@ GET /v1/updates/check?platform=macos&arch=arm64&channel=stable&version=0.2.0&bui
     "architecture": "arm64",
     "channel": "stable",
     "published_at": "2026-07-29T10:00:00Z",
-    "download_url": "https://updates.example.com/FileNest-0.3.0.zip",
+    "download_url": "https://downloads.filenestapp.com/FileNest-0.3.0-macOS.zip",
     "file_size": 12345678,
     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "sparkle_ed_signature": "public-signature",
@@ -61,5 +75,8 @@ When no matching release exists, `latest` is omitted and `update_available` is `
 - Release metadata is written through a temporary file and atomic rename.
 - Production download and release-note URLs must use HTTPS.
 - CORS is disabled unless explicit browser origins are configured.
+- `updates.filenestapp.com` is reverse-proxied to the loopback-only Go API.
+- `downloads.filenestapp.com` serves release archives directly from Nginx and
+  does not expose the admin API.
 
 See [`update-server/README.md`](../update-server/README.md) for local execution, Docker, release publishing, and FileNest integration.

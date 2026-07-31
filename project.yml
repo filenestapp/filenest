@@ -9,8 +9,8 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     MACOSX_DEPLOYMENT_TARGET: "13.0"
-    MARKETING_VERSION: "0.2.4"
-    CURRENT_PROJECT_VERSION: "4"
+    MARKETING_VERSION: "0.2.5"
+    CURRENT_PROJECT_VERSION: "5"
     GENERATE_INFOPLIST_FILE: "YES"
     INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright (c) 2026 FileNest"
     INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
@@ -20,6 +20,8 @@ settings:
     ENABLE_HARDENED_RUNTIME: YES
     SWIFT_STRICT_CONCURRENCY: minimal
     DEAD_CODE_STRIPPING: YES
+    FILENEST_UPDATE_FEED_URL: ""
+    FILENEST_SPARKLE_PUBLIC_KEY: ""
 
 targets:
   FileNest:
@@ -64,6 +66,28 @@ targets:
           /usr/bin/plutil -replace BuildDate -string "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${INFO_FILE}"
           /usr/bin/plutil -replace MarketingVersion -string "${MARKETING_VERSION}" "${INFO_FILE}"
           /usr/bin/plutil -replace BuildNumber -string "${CURRENT_PROJECT_VERSION}" "${INFO_FILE}"
+
+          APP_INFO_PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          /usr/bin/plutil -replace SUEnableAutomaticChecks -bool YES "${APP_INFO_PLIST}" 2>/dev/null \
+            || /usr/bin/plutil -insert SUEnableAutomaticChecks -bool YES "${APP_INFO_PLIST}"
+          /usr/bin/plutil -replace SUAllowsAutomaticUpdates -bool YES "${APP_INFO_PLIST}" 2>/dev/null \
+            || /usr/bin/plutil -insert SUAllowsAutomaticUpdates -bool YES "${APP_INFO_PLIST}"
+          /usr/bin/plutil -replace SUAutomaticallyUpdate -bool YES "${APP_INFO_PLIST}" 2>/dev/null \
+            || /usr/bin/plutil -insert SUAutomaticallyUpdate -bool YES "${APP_INFO_PLIST}"
+
+          if [[ -n "${FILENEST_UPDATE_FEED_URL:-}" ]]; then
+            /usr/bin/plutil -replace SUFeedURL -string "${FILENEST_UPDATE_FEED_URL}" "${APP_INFO_PLIST}" 2>/dev/null \
+              || /usr/bin/plutil -insert SUFeedURL -string "${FILENEST_UPDATE_FEED_URL}" "${APP_INFO_PLIST}"
+          else
+            /usr/bin/plutil -remove SUFeedURL "${APP_INFO_PLIST}" 2>/dev/null || true
+          fi
+
+          if [[ -n "${FILENEST_SPARKLE_PUBLIC_KEY:-}" ]]; then
+            /usr/bin/plutil -replace SUPublicEDKey -string "${FILENEST_SPARKLE_PUBLIC_KEY}" "${APP_INFO_PLIST}" 2>/dev/null \
+              || /usr/bin/plutil -insert SUPublicEDKey -string "${FILENEST_SPARKLE_PUBLIC_KEY}" "${APP_INFO_PLIST}"
+          else
+            /usr/bin/plutil -remove SUPublicEDKey "${APP_INFO_PLIST}" 2>/dev/null || true
+          fi
 
   FileNestSkillCLI:
     type: tool

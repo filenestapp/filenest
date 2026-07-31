@@ -229,6 +229,26 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(updates.status, .ready)
     }
 
+    @MainActor
+    func testAppUpdatesDefaultToAutomaticCheckInstallAndRelaunch() {
+        let settings = AppSettings(store: store)
+
+        XCTAssertTrue(settings.automaticUpdateChecks)
+        XCTAssertTrue(settings.automaticallyDownloadsUpdates)
+        XCTAssertTrue(AppUpdateService.shouldInstallImmediately(
+            automaticChecksEnabled: settings.automaticUpdateChecks,
+            automaticInstallationEnabled: settings.automaticallyDownloadsUpdates
+        ))
+        XCTAssertFalse(AppUpdateService.shouldInstallImmediately(
+            automaticChecksEnabled: false,
+            automaticInstallationEnabled: true
+        ))
+        XCTAssertFalse(AppUpdateService.shouldInstallImmediately(
+            automaticChecksEnabled: true,
+            automaticInstallationEnabled: false
+        ))
+    }
+
     func testManagedServiceReleaseMetadataParsesOfficialFormats() throws {
         let github = Data(#"{"tag_name":"v0.32.0"}"#.utf8)
         let pypi = Data(#"{"info":{"version":"3.7.0"}}"#.utf8)

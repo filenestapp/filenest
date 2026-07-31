@@ -711,6 +711,10 @@
 "Save URL" = "保存地址";
 "Automatically check for updates" = "自动检查更新";
 "Automatically download available updates" = "自动下载可用更新";
+"Automatically install updates and restart FileNest" = "自动安装更新并重启 FileNest";
+"Downloading version %@…" = "正在下载版本 %@…";
+"Preparing version %@…" = "正在准备版本 %@…";
+"Installing version %@ and restarting…" = "正在安装版本 %@ 并重启…";
 "Last checked: %@" = "上次检查：%@";
 "Current Version" = "当前版本";
 "Check for Updates" = "检查更新";
@@ -728,6 +732,7 @@
 "Docling update complete" = "Docling 更新完成";
 "Docling update failed: %@" = "Docling 更新失败：%@";
 "Sparkle verifies update packages and asks before installation. Production releases require Developer ID, an EdDSA public key, and a signed appcast." = "更新包会由 Sparkle 校验并在安装前请求确认。正式发布时需要配置 Developer ID、EdDSA 公钥和已签名 Appcast。";
+"Signed updates are verified before installation. Automatic installation safely stops managed services, installs the update, and restarts FileNest." = "安装前会验证更新签名。自动安装会安全停止托管服务、安装更新并重新启动 FileNest。";
 "Configure a valid HTTPS update URL first" = "请先配置有效的 HTTPS 更新地址";
 "Watching and indexing" = "正在监听并建立索引";
 
