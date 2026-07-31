@@ -331,37 +331,37 @@ jobs:
             archive_name="$(basename "$zip_path")"
             metadata_path="$output/FileNest-${version}-macOS-update.json"
             export version build_number file_size sha256 archive_name sparkle_signature metadata_path
-            python3 <<'PY'
-            import json
-            import os
-            from datetime import datetime, timezone
-            from pathlib import Path
+          python3 <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
 
-            repository = os.environ["GITHUB_REPOSITORY"]
-            release_tag = os.environ["RELEASE_TAG"]
-            download_base = os.environ["FILENEST_DOWNLOAD_BASE_URL"].rstrip("/")
-            payload = {
-                "id": f"macos-universal-stable-{os.environ['version']}-{os.environ['build_number']}",
-                "version": os.environ["version"],
-                "build": int(os.environ["build_number"]),
-                "platform": "macos",
-                "architecture": "universal",
-                "channel": "stable",
-                "published_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "download_url": f"{download_base}/{os.environ['archive_name']}",
-                "file_size": int(os.environ["file_size"]),
-                "sha256": os.environ["sha256"],
-                "sparkle_ed_signature": os.environ["sparkle_signature"],
-                "minimum_os_version": "13.0",
-                "release_notes_url": f"https://github.com/{repository}/releases/tag/{release_tag}",
-                "release_notes": "See the release notes for details.",
-                "critical": False,
-            }
-            Path(os.environ["metadata_path"]).write_text(
-                json.dumps(payload, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            PY
+          repository = os.environ["GITHUB_REPOSITORY"]
+          release_tag = os.environ["RELEASE_TAG"]
+          download_base = os.environ["FILENEST_DOWNLOAD_BASE_URL"].rstrip("/")
+          payload = {
+              "id": f"macos-universal-stable-{os.environ['version']}-{os.environ['build_number']}",
+              "version": os.environ["version"],
+              "build": int(os.environ["build_number"]),
+              "platform": "macos",
+              "architecture": "universal",
+              "channel": "stable",
+              "published_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "download_url": f"{download_base}/{os.environ['archive_name']}",
+              "file_size": int(os.environ["file_size"]),
+              "sha256": os.environ["sha256"],
+              "sparkle_ed_signature": os.environ["sparkle_signature"],
+              "minimum_os_version": "13.0",
+              "release_notes_url": f"https://github.com/{repository}/releases/tag/{release_tag}",
+              "release_notes": "See the release notes for details.",
+              "critical": False,
+          }
+          Path(os.environ["metadata_path"]).write_text(
+              json.dumps(payload, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
           else
             zip_path="$output/FileNest-${version}-macOS-unsigned.zip"
             dmg_path="$output/FileNest-${version}-macOS-unsigned.dmg"
