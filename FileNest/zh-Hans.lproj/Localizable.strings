@@ -1068,6 +1068,7 @@
 "Reranking improves the final order of fused search candidates. If the service is unavailable, FileNest automatically keeps the original retrieval order." = "重排会优化融合检索候选的最终顺序；服务不可用时，FileNest 会自动保留原始检索顺序。";
 "Evidence note: this answer did not include a verifiable source citation. Review the matched files before relying on specific details." = "证据提示：此回答未包含可验证的来源引用，请先核对匹配文件，再依赖其中的具体信息。";
 "Reranking the strongest matches" = "正在重排最相关的结果";
+"Navigating relevant document sections" = "正在导航相关文档章节";
 "Verifying answer citations" = "正在验证回答引用";
 "Retrieval Reranker" = "检索重排模型";
 "Local Status" = "本地状态";

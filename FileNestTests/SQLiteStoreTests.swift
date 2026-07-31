@@ -650,6 +650,49 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(secondPage.first?.text, "A result table")
     }
 
+    func testDocumentParentSectionsAreBoundedAndExcludeNonBodyEvidence() throws {
+        let fileID = try store.upsertFile(makeFile(path: filePath("report.pdf"), title: "Report"))
+        try store.dbPool.write { db in
+            for index in 0..<5 {
+                try db.execute(
+                    sql: """
+                        INSERT INTO document_parents(
+                            file_id, parent_idx, text, contextual_text, section_path,
+                            page_start, page_end, kind, token_count
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        fileID,
+                        index,
+                        "Section \(index + 1) evidence",
+                        "Report > Section \(index + 1)\nEvidence",
+                        "[\"Report\",\"Section \(index + 1)\"]",
+                        index + 1,
+                        index + 1,
+                        DocumentChunkKind.text.rawValue,
+                        8,
+                    ]
+                )
+            }
+            try db.execute(
+                sql: """
+                    INSERT INTO document_parents(
+                        file_id, parent_idx, text, contextual_text, section_path,
+                        kind, token_count
+                    ) VALUES (?, 99, 'User note', 'User note', '[]', ?, 2)
+                    """,
+                arguments: [fileID, DocumentChunkKind.note.rawValue]
+            )
+        }
+
+        let sections = try store.documentParentSections(fileID: fileID, limit: 3)
+
+        XCTAssertEqual(sections.map(\.index), [0, 1, 2])
+        XCTAssertEqual(sections.map(\.parentIndex), [0, 1, 2])
+        XCTAssertEqual(sections.last?.sectionPath, ["Report", "Section 3"])
+        XCTAssertFalse(sections.contains(where: { $0.kind == .note }))
+    }
+
     func testUpsertPreservesExistingNoteAndOrganizationSubfolder() throws {
         var original = makeFile(path: filePath("preserved.txt"), title: "Original")
         original.note = "User note"

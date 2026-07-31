@@ -1475,7 +1475,8 @@ private struct ChatProgressSteps: View {
 
                 if progress.phase != .planningSearch
                     && progress.phase != .queryingIndex
-                    && progress.phase != .reranking {
+                    && progress.phase != .reranking
+                    && progress.phase != .navigatingSections {
                     progressRow(
                         appState.settings.localizedFormat(
                             "Matched %d related files",
@@ -1489,7 +1490,8 @@ private struct ChatProgressSteps: View {
 
                 if !progress.matchedFiles.isEmpty
                     && progress.phase != .planningSearch
-                    && progress.phase != .queryingIndex {
+                    && progress.phase != .queryingIndex
+                    && progress.phase != .navigatingSections {
                     ChatMatchedFilesStrip(
                         files: progress.matchedFiles,
                         preview: preview,
@@ -1503,6 +1505,8 @@ private struct ChatProgressSteps: View {
                 progressRow("AI is analyzing and organizing the answer", completed: false)
             } else if progress.phase == .thinking {
                 progressRow("Thinking Mode: performing deeper analysis", completed: false)
+            } else if progress.phase == .navigatingSections {
+                progressRow("Navigating relevant document sections", completed: false)
             } else if progress.phase == .verifying {
                 progressRow("Verifying answer citations", completed: false)
             } else if progress.phase == .preparingDocument {

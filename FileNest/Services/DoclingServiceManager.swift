@@ -1,4 +1,282 @@
+import Darwin
 import Foundation
+
+struct ManagedRuntimeArtifact: Equatable, Sendable {
+    let version: String
+    let downloadURL: URL
+    let sha256: String
+}
+
+enum ManagedRuntimePaths {
+    nonisolated static var applicationSupportRoot: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        return support.appendingPathComponent("FileNest", isDirectory: true)
+    }
+
+    nonisolated static var cacheRoot: URL {
+        applicationSupportRoot.appendingPathComponent("Caches", isDirectory: true)
+    }
+
+    nonisolated static var huggingFaceRoot: URL {
+        cacheRoot.appendingPathComponent("HuggingFace", isDirectory: true)
+    }
+
+    nonisolated static var paddleRoot: URL {
+        cacheRoot.appendingPathComponent("Paddle", isDirectory: true)
+    }
+
+    nonisolated static var paddleXRoot: URL {
+        cacheRoot.appendingPathComponent("PaddleX", isDirectory: true)
+    }
+
+    nonisolated static var ollamaModelsRoot: URL {
+        applicationSupportRoot.appendingPathComponent("Ollama/models", isDirectory: true)
+    }
+
+    nonisolated static func managedEnvironment(
+        merging additions: [String: String] = [:]
+    ) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = [
+            ManagedPythonRuntime.executable.deletingLastPathComponent().path,
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin"
+        ].joined(separator: ":")
+        environment.removeValue(forKey: "PYTHONHOME")
+        environment.removeValue(forKey: "PYTHONPATH")
+        environment["PYTHONNOUSERSITE"] = "1"
+        environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+        environment["HF_HOME"] = huggingFaceRoot.path
+        environment["HUGGINGFACE_HUB_CACHE"] = huggingFaceRoot.appendingPathComponent("hub").path
+        environment["TRANSFORMERS_CACHE"] = huggingFaceRoot.appendingPathComponent("transformers").path
+        environment["XDG_CACHE_HOME"] = cacheRoot.path
+        environment["PADDLE_HOME"] = paddleRoot.path
+        environment["PADDLEX_HOME"] = paddleXRoot.path
+        additions.forEach { environment[$0.key] = $0.value }
+        return environment
+    }
+
+    nonisolated static func prepareCacheDirectories() throws {
+        for directory in [cacheRoot, huggingFaceRoot, paddleRoot, paddleXRoot] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+    }
+}
+
+enum ManagedPythonRuntime {
+    nonisolated static let version = "3.13.14+20260728"
+
+    nonisolated static var installRoot: URL {
+        ManagedRuntimePaths.applicationSupportRoot
+            .appendingPathComponent("Runtime/Python", isDirectory: true)
+    }
+
+    nonisolated static var executable: URL {
+        installRoot.appendingPathComponent("python/bin/python3")
+    }
+
+    nonisolated static var isInstalled: Bool {
+        FileManager.default.isExecutableFile(atPath: executable.path)
+            && (try? String(
+                contentsOf: installRoot.appendingPathComponent("version.txt"),
+                encoding: .utf8
+            ).trimmingCharacters(in: .whitespacesAndNewlines)) == version
+    }
+
+    nonisolated static func artifact(machine: String = ProcessInfo.processInfo.machineHardwareName)
+        -> ManagedRuntimeArtifact? {
+        switch machine {
+        case "arm64":
+            return ManagedRuntimeArtifact(
+                version: version,
+                downloadURL: URL(string:
+                    "https://github.com/astral-sh/python-build-standalone/releases/download/20260728/" +
+                    "cpython-3.13.14%2B20260728-aarch64-apple-darwin-install_only_stripped.tar.gz"
+                )!,
+                sha256: "aa2a054f5e04bde63ae199e3bb6bbb634e457423efd294842deeb1299e7e5932"
+            )
+        case "x86_64":
+            return ManagedRuntimeArtifact(
+                version: version,
+                downloadURL: URL(string:
+                    "https://github.com/astral-sh/python-build-standalone/releases/download/20260728/" +
+                    "cpython-3.13.14%2B20260728-x86_64-apple-darwin-install_only_stripped.tar.gz"
+                )!,
+                sha256: "aa73c37aebebe3b7264dce1e49923719ab0ac0fc590353adf393eee3e2041c18"
+            )
+        default:
+            return nil
+        }
+    }
+
+    nonisolated static func virtualEnvironmentUsesManagedPython(at venv: URL) -> Bool {
+        let interpreter = venv.appendingPathComponent("bin/python")
+        guard FileManager.default.isExecutableFile(atPath: interpreter.path) else { return false }
+        let resolved = interpreter.resolvingSymlinksInPath().standardizedFileURL.path
+        let managedRoot = installRoot.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        return resolved.hasPrefix(managedRoot)
+    }
+
+    nonisolated static func relocateVirtualEnvironment(
+        at venv: URL,
+        from oldRoot: URL,
+        to newRoot: URL
+    ) throws {
+        let bin = venv.appendingPathComponent("bin", isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: bin,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        for file in files {
+            guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true,
+                  let data = try? Data(contentsOf: file),
+                  data.count <= 2_000_000,
+                  var text = String(data: data, encoding: .utf8),
+                  text.contains(oldRoot.path) else { continue }
+            text = text.replacingOccurrences(of: oldRoot.path, with: newRoot.path)
+            try Data(text.utf8).write(to: file, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: file.path
+            )
+        }
+    }
+
+    nonisolated fileprivate static func install(downloadedArchive: URL) throws -> URL {
+        guard let artifact = artifact() else { throw ManagedRuntimeError.unsupportedArchitecture }
+        let actualHash = try FileContentHasher.sha256(of: downloadedArchive)
+        guard actualHash.caseInsensitiveCompare(artifact.sha256) == .orderedSame else {
+            throw ManagedRuntimeError.checksumMismatch
+        }
+
+        let manager = FileManager.default
+        let parent = installRoot.deletingLastPathComponent()
+        let staging = parent.appendingPathComponent(
+            "Python.installing-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let backup = parent.appendingPathComponent(
+            "Python.backup-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer {
+            try? manager.removeItem(at: staging)
+            try? manager.removeItem(at: backup)
+        }
+        try manager.createDirectory(at: staging, withIntermediateDirectories: true)
+        try ManagedProcess.run(
+            executable: URL(fileURLWithPath: "/usr/bin/tar"),
+            arguments: ["-xzf", downloadedArchive.path, "-C", staging.path]
+        )
+        let stagedExecutable = staging.appendingPathComponent("python/bin/python3")
+        guard manager.isExecutableFile(atPath: stagedExecutable.path) else {
+            throw ManagedRuntimeError.executableMissing
+        }
+        try Data(version.utf8).write(
+            to: staging.appendingPathComponent("version.txt"),
+            options: .atomic
+        )
+        try? ManagedProcess.run(
+            executable: URL(fileURLWithPath: "/usr/bin/xattr"),
+            arguments: ["-dr", "com.apple.quarantine", staging.path]
+        )
+
+        try manager.createDirectory(at: parent, withIntermediateDirectories: true)
+        let hadExisting = manager.fileExists(atPath: installRoot.path)
+        if hadExisting { try manager.moveItem(at: installRoot, to: backup) }
+        do {
+            try manager.moveItem(at: staging, to: installRoot)
+            if hadExisting { try? manager.removeItem(at: backup) }
+        } catch {
+            if hadExisting, !manager.fileExists(atPath: installRoot.path) {
+                try? manager.moveItem(at: backup, to: installRoot)
+            }
+            throw error
+        }
+        try ManagedRuntimePaths.prepareCacheDirectories()
+        return executable
+    }
+}
+
+actor ManagedPythonRuntimeInstaller {
+    static let shared = ManagedPythonRuntimeInstaller()
+    private var activeTask: Task<URL, Error>?
+
+    func ensureInstalled(session: URLSession = .shared) async throws -> URL {
+        if ManagedPythonRuntime.isInstalled { return ManagedPythonRuntime.executable }
+        if let activeTask { return try await activeTask.value }
+        guard let artifact = ManagedPythonRuntime.artifact() else {
+            throw ManagedRuntimeError.unsupportedArchitecture
+        }
+        let task = Task<URL, Error> {
+            let (archive, response) = try await session.download(from: artifact.downloadURL)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else {
+                throw ManagedRuntimeError.downloadFailed
+            }
+            return try ManagedPythonRuntime.install(downloadedArchive: archive)
+        }
+        activeTask = task
+        defer { activeTask = nil }
+        return try await task.value
+    }
+}
+
+enum ManagedProcess {
+    nonisolated static func run(
+        executable: URL,
+        arguments: [String],
+        environment: [String: String]? = nil
+    ) throws {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.environment = environment ?? ManagedRuntimePaths.managedEnvironment()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw ManagedRuntimeError.commandFailed }
+    }
+}
+
+private enum ManagedRuntimeError: LocalizedError {
+    case unsupportedArchitecture
+    case downloadFailed
+    case checksumMismatch
+    case executableMissing
+    case commandFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedArchitecture:
+            return "This Mac architecture is not supported by the FileNest runtime."
+        case .downloadFailed:
+            return "The managed runtime download failed."
+        case .checksumMismatch:
+            return "The managed runtime checksum did not match the trusted release."
+        case .executableMissing:
+            return "The managed runtime executable was not found after installation."
+        case .commandFailed:
+            return "A managed runtime command failed."
+        }
+    }
+}
+
+private extension ProcessInfo {
+    nonisolated var machineHardwareName: String {
+        var size = 0
+        sysctlbyname("hw.machine", nil, &size, nil, 0)
+        var machine = [CChar](repeating: 0, count: size)
+        sysctlbyname("hw.machine", &machine, &size, nil, 0)
+        return String(cString: machine)
+    }
+}
 
 enum DoclingServiceState: Equatable {
     case unavailable
@@ -90,23 +368,19 @@ final class DoclingServiceManager: ObservableObject {
 
     private func install(targetVersion: String, isUpdate: Bool) async {
         guard !isInstalling else { return }
-        guard let python = Self.resolvePython() else {
-            let message = "Python 3.10 or later is required to install Docling."
-            state = .failed(message)
-            lastError = message
-            if isUpdate { updateStatus = .failed(message) }
-            return
-        }
 
         isInstalling = true
         state = .installing
         if isUpdate { updateStatus = .updating }
         installProgress = 0.05
-        installStatus = "Creating an isolated Docling environment…"
+        installStatus = "Installing the FileNest Python runtime…"
         lastError = nil
         defer { isInstalling = false }
 
         do {
+            let python = try await ManagedPythonRuntimeInstaller.shared.ensureInstalled(session: session)
+            installProgress = 0.15
+            installStatus = "Creating an isolated Docling environment…"
             let stagingRoot = Self.stagingRoot()
             defer { try? FileManager.default.removeItem(at: stagingRoot) }
             let venv = try await Task.detached(priority: .userInitiated) {
@@ -122,6 +396,11 @@ final class DoclingServiceManager: ObservableObject {
             try await Task.detached(priority: .userInitiated) {
                 try Self.verifyInstallation(in: venv)
                 try Self.writeInstalledVersion(targetVersion, root: stagingRoot)
+                try ManagedPythonRuntime.relocateVirtualEnvironment(
+                    at: venv,
+                    from: stagingRoot,
+                    to: Self.installRoot
+                )
                 try Self.commitEnvironment(from: stagingRoot)
             }.value
             installProgress = 1
@@ -147,26 +426,11 @@ final class DoclingServiceManager: ObservableObject {
     }
 
     nonisolated static func resolveExecutable() -> URL? {
-        let local = installRoot.appendingPathComponent("venv/bin/docling").path
-        var candidates = [local, "/opt/homebrew/bin/docling", "/usr/local/bin/docling"]
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/docling" })
-        }
-        return candidates.first(where: FileManager.default.isExecutableFile(atPath:))
-            .map(URL.init(fileURLWithPath:))
-    }
-
-    nonisolated private static func resolvePython() -> URL? {
-        var candidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/python3" })
-        }
-        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
-            let url = URL(fileURLWithPath: path)
-            if let version = commandOutput(executable: url, arguments: ["--version"]),
-               supportsPython(version) { return url }
-        }
-        return nil
+        let venv = installRoot.appendingPathComponent("venv", isDirectory: true)
+        let local = venv.appendingPathComponent("bin/docling")
+        guard ManagedPythonRuntime.virtualEnvironmentUsesManagedPython(at: venv),
+              FileManager.default.isExecutableFile(atPath: local.path) else { return nil }
+        return local
     }
 
     nonisolated private static func stagingRoot() -> URL {
@@ -241,6 +505,7 @@ final class DoclingServiceManager: ObservableObject {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        process.environment = ManagedRuntimePaths.managedEnvironment()
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
@@ -261,14 +526,6 @@ final class DoclingServiceManager: ObservableObject {
         return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
     }
 
-    nonisolated private static func supportsPython(_ output: String) -> Bool {
-        let components = output.split(whereSeparator: { !$0.isNumber && $0 != "." })
-            .first(where: { $0.contains(".") })?
-            .split(separator: ".") ?? []
-        guard components.count >= 2,
-              let major = Int(components[0]), let minor = Int(components[1]) else { return false }
-        return major > 3 || (major == 3 && minor >= 10)
-    }
 }
 
 private enum DoclingManagerError: LocalizedError {
@@ -320,6 +577,8 @@ enum ManagedMediaServiceState: Equatable {
 
 @MainActor
 final class FFmpegServiceManager: ObservableObject {
+    nonisolated static let pinnedVersion = "6.1.1"
+
     @Published private(set) var state: ManagedMediaServiceState = .unavailable
     @Published private(set) var executablePath: String?
     @Published private(set) var version: String?
@@ -368,23 +627,21 @@ final class FFmpegServiceManager: ObservableObject {
         defer { isInstalling = false }
 
         do {
-            if let brew = Self.resolveHomebrew() {
-                installProgress = nil
-                installStatus = "Installing FFmpeg with Homebrew…"
-                try await Task.detached(priority: .userInitiated) {
-                    try Self.run(executable: brew, arguments: ["install", "ffmpeg"])
-                }.value
-            } else {
-                installProgress = nil
-                installStatus = "Downloading FFmpeg…"
-                let source = URL(string: "https://evermeet.cx/ffmpeg/getrelease/zip")!
-                let (downloaded, _) = try await session.download(from: source)
-                installProgress = 0.75
-                installStatus = "Installing FFmpeg…"
-                try await Task.detached(priority: .userInitiated) {
-                    try Self.installManagedArchive(downloaded)
-                }.value
+            guard let artifact = Self.artifact() else {
+                throw MediaServiceError.unsupportedArchitecture
             }
+            installProgress = nil
+            installStatus = "Downloading the FileNest-managed FFmpeg runtime…"
+            let (downloaded, response) = try await session.download(from: artifact.downloadURL)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else {
+                throw MediaServiceError.downloadFailed
+            }
+            installProgress = 0.75
+            installStatus = "Verifying and installing FFmpeg…"
+            try await Task.detached(priority: .userInitiated) {
+                try Self.installManagedBinary(downloaded, artifact: artifact)
+            }.value
             installProgress = 1
             installStatus = "FFmpeg installation complete"
             refresh()
@@ -397,18 +654,9 @@ final class FFmpegServiceManager: ObservableObject {
     }
 
     nonisolated static func resolveExecutable() -> URL? {
-        var candidates = [managedExecutable.path, "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/ffmpeg" })
-        }
-        return candidates.first(where: FileManager.default.isExecutableFile(atPath:))
-            .map(URL.init(fileURLWithPath:))
-    }
-
-    nonisolated private static func resolveHomebrew() -> URL? {
-        ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
-            .first(where: FileManager.default.isExecutableFile(atPath:))
-            .map(URL.init(fileURLWithPath:))
+        FileManager.default.isExecutableFile(atPath: managedExecutable.path)
+            ? managedExecutable
+            : nil
     }
 
     nonisolated private static func version(at executable: URL) -> String? {
@@ -419,16 +667,54 @@ final class FFmpegServiceManager: ObservableObject {
         return firstLine[range.upperBound...].split(separator: " ").first.map(String.init)
     }
 
-    nonisolated private static func installManagedArchive(_ archive: URL) throws {
+    nonisolated static func artifact(
+        machine: String = ProcessInfo.processInfo.machineHardwareName
+    ) -> ManagedRuntimeArtifact? {
+        switch machine {
+        case "arm64":
+            return ManagedRuntimeArtifact(
+                version: pinnedVersion,
+                downloadURL: URL(string:
+                    "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/" +
+                    "ffmpeg-darwin-arm64"
+                )!,
+                sha256: "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584"
+            )
+        case "x86_64":
+            return ManagedRuntimeArtifact(
+                version: pinnedVersion,
+                downloadURL: URL(string:
+                    "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/" +
+                    "ffmpeg-darwin-x64"
+                )!,
+                sha256: "ebdddc936f61e14049a2d4b549a412b8a40deeff6540e58a9f2a2da9e6b18894"
+            )
+        default:
+            return nil
+        }
+    }
+
+    nonisolated private static func installManagedBinary(
+        _ downloadedBinary: URL,
+        artifact: ManagedRuntimeArtifact
+    ) throws {
+        let actualHash = try FileContentHasher.sha256(of: downloadedBinary)
+        guard actualHash.caseInsensitiveCompare(artifact.sha256) == .orderedSame else {
+            throw MediaServiceError.checksumMismatch
+        }
         let manager = FileManager.default
         let staging = installRoot.deletingLastPathComponent()
             .appendingPathComponent("MediaTools.installing-\(UUID().uuidString)", isDirectory: true)
         defer { try? manager.removeItem(at: staging) }
         try manager.createDirectory(at: staging, withIntermediateDirectories: true)
-        try run(executable: URL(fileURLWithPath: "/usr/bin/ditto"),
-                arguments: ["-x", "-k", archive.path, staging.path])
-        let files = (try? manager.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil)) ?? []
-        guard let binary = files.first(where: { $0.lastPathComponent == "ffmpeg" }) else {
+        let binary = staging.appendingPathComponent("ffmpeg")
+        try manager.copyItem(at: downloadedBinary, to: binary)
+        try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try? run(
+            executable: URL(fileURLWithPath: "/usr/bin/xattr"),
+            arguments: ["-d", "com.apple.quarantine", binary.path]
+        )
+        guard manager.isExecutableFile(atPath: binary.path) else {
             throw MediaServiceError.executableMissing
         }
         try manager.createDirectory(at: installRoot, withIntermediateDirectories: true)
@@ -436,14 +722,17 @@ final class FFmpegServiceManager: ObservableObject {
             try manager.removeItem(at: managedExecutable)
         }
         try manager.moveItem(at: binary, to: managedExecutable)
-        try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: managedExecutable.path)
+        try Data(artifact.version.utf8).write(
+            to: installRoot.appendingPathComponent("version.txt"),
+            options: .atomic
+        )
     }
 
     nonisolated fileprivate static func run(executable: URL, arguments: [String], environment: [String: String]? = nil) throws {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
-        process.environment = environment
+        process.environment = environment ?? ManagedRuntimePaths.managedEnvironment()
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
@@ -489,7 +778,8 @@ final class WhisperServiceManager: ObservableObject {
     nonisolated static var pythonExecutable: URL { installRoot.appendingPathComponent("venv/bin/python") }
     nonisolated static var modelRoot: URL { installRoot.appendingPathComponent("models", isDirectory: true) }
     nonisolated static var installedPackageVersion: String? {
-        guard FileManager.default.isExecutableFile(atPath: pythonExecutable.path) else { return nil }
+        let venv = installRoot.appendingPathComponent("venv", isDirectory: true)
+        guard ManagedPythonRuntime.virtualEnvironmentUsesManagedPython(at: venv) else { return nil }
         let url = installRoot.appendingPathComponent("version.txt")
         return (try? String(contentsOf: url, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -508,24 +798,19 @@ final class WhisperServiceManager: ObservableObject {
 
     func installRuntime() async {
         guard !isInstalling else { return }
-        guard let python = Self.resolvePython() else {
-            let message = "Python 3.10 or later is required to install Whisper."
-            state = .failed(message)
-            lastError = message
-            return
-        }
         isInstalling = true
         state = .installing
         installProgress = 0.05
-        installStatus = "Creating an isolated Whisper environment…"
+        installStatus = "Installing the FileNest Python runtime…"
         lastError = nil
         defer { isInstalling = false }
 
         do {
+            let python = try await ManagedPythonRuntimeInstaller.shared.ensureInstalled()
             let staging = Self.installRoot.deletingLastPathComponent()
                 .appendingPathComponent("Whisper.installing-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: staging) }
-            installProgress = 0.2
+            installProgress = 0.15
             installStatus = "Downloading and installing OpenAI Whisper…"
             try await Task.detached(priority: .userInitiated) {
                 try Self.prepareRuntime(using: python, at: staging)
@@ -533,6 +818,12 @@ final class WhisperServiceManager: ObservableObject {
             installProgress = 0.9
             installStatus = "Verifying the Whisper installation…"
             try await Task.detached(priority: .userInitiated) {
+                try Self.preserveInstalledModels(in: staging)
+                try ManagedPythonRuntime.relocateVirtualEnvironment(
+                    at: staging.appendingPathComponent("venv", isDirectory: true),
+                    from: staging,
+                    to: Self.installRoot
+                )
                 try Self.commitRuntime(from: staging)
             }.value
             installProgress = 1
@@ -562,7 +853,7 @@ final class WhisperServiceManager: ObservableObject {
         do {
             try await Task.detached(priority: .userInitiated) {
                 try FileManager.default.createDirectory(at: Self.modelRoot, withIntermediateDirectories: true)
-                var environment = ProcessInfo.processInfo.environment
+                var environment = ManagedRuntimePaths.managedEnvironment()
                 if let ffmpeg = FFmpegServiceManager.resolveExecutable() {
                     let path = environment["PATH"] ?? ""
                     environment["PATH"] = "\(ffmpeg.deletingLastPathComponent().path):\(path)"
@@ -612,15 +903,6 @@ final class WhisperServiceManager: ObservableObject {
         return result
     }
 
-    nonisolated private static func resolvePython() -> URL? {
-        var candidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/python3" })
-        }
-        return candidates.first(where: FileManager.default.isExecutableFile(atPath:))
-            .map(URL.init(fileURLWithPath:))
-    }
-
     nonisolated private static func prepareRuntime(using python: URL, at root: URL) throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let venv = root.appendingPathComponent("venv", isDirectory: true)
@@ -634,6 +916,15 @@ final class WhisperServiceManager: ObservableObject {
         try Data(pinnedVersion.utf8).write(to: root.appendingPathComponent("version.txt"), options: .atomic)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("models"),
                                                 withIntermediateDirectories: true)
+    }
+
+    nonisolated private static func preserveInstalledModels(in staging: URL) throws {
+        guard FileManager.default.fileExists(atPath: modelRoot.path) else { return }
+        let destination = staging.appendingPathComponent("models", isDirectory: true)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.copyItem(at: modelRoot, to: destination)
     }
 
     nonisolated private static func commitRuntime(from staging: URL) throws {
@@ -657,11 +948,17 @@ final class WhisperServiceManager: ObservableObject {
 private enum MediaServiceError: LocalizedError {
     case commandFailed
     case executableMissing
+    case unsupportedArchitecture
+    case downloadFailed
+    case checksumMismatch
 
     var errorDescription: String? {
         switch self {
         case .commandFailed: return "The installation command failed"
         case .executableMissing: return "The expected executable was not found after installation"
+        case .unsupportedArchitecture: return "This Mac architecture is not supported"
+        case .downloadFailed: return "The runtime download failed"
+        case .checksumMismatch: return "The downloaded runtime failed checksum verification"
         }
     }
 }

@@ -46,7 +46,9 @@ final class PaddleOCRServiceManager: ObservableObject {
     /// validation remains in `refresh()` so normal indexing never launches Python just
     /// to decide whether its configuration changed.
     nonisolated static var hasManagedEnvironment: Bool {
-        FileManager.default.isExecutableFile(atPath: pythonExecutable.path)
+        ManagedPythonRuntime.virtualEnvironmentUsesManagedPython(
+            at: installRoot.appendingPathComponent("venv", isDirectory: true)
+        )
     }
 
     nonisolated static var installedPackageVersion: String? {
@@ -156,23 +158,18 @@ final class PaddleOCRServiceManager: ObservableObject {
         if isUpdate { updateStatus = .failed(message) }
         return
 #else
-        guard let systemPython = Self.resolveSystemPython() else {
-            let message = "Python 3.10 or later is required to install PaddleOCR."
-            state = .failed(message)
-            lastError = message
-            if isUpdate { updateStatus = .failed(message) }
-            return
-        }
-
         isInstalling = true
         state = .installing
         if isUpdate { updateStatus = .updating }
         installProgress = 0.05
-        installStatus = "Creating an isolated PaddleOCR environment…"
+        installStatus = "Installing the FileNest Python runtime…"
         lastError = nil
         defer { isInstalling = false }
 
         do {
+            let systemPython = try await ManagedPythonRuntimeInstaller.shared.ensureInstalled(session: session)
+            installProgress = 0.14
+            installStatus = "Creating an isolated PaddleOCR environment…"
             let stagingRoot = Self.stagingRoot()
             defer { try? FileManager.default.removeItem(at: stagingRoot) }
             let venv = try await Task.detached(priority: .userInitiated) {
@@ -199,6 +196,11 @@ final class PaddleOCRServiceManager: ObservableObject {
                     ),
                     root: stagingRoot
                 )
+                try ManagedPythonRuntime.relocateVirtualEnvironment(
+                    at: venv,
+                    from: stagingRoot,
+                    to: Self.installRoot
+                )
                 try Self.commitEnvironment(from: stagingRoot)
             }.value
             installProgress = 1
@@ -211,7 +213,7 @@ final class PaddleOCRServiceManager: ObservableObject {
         } catch {
             let message = isUpdate
                 ? "PaddleOCR update failed: \(error.localizedDescription)"
-                : "PaddleOCR Installation Failed：\(error.localizedDescription)"
+                : "PaddleOCR installation failed: \(error.localizedDescription)"
             if isUpdate {
                 await refresh()
             } else {
@@ -230,19 +232,6 @@ final class PaddleOCRServiceManager: ObservableObject {
             executable: pythonExecutable,
             arguments: ["-c", "import paddle, paddleocr"]
         )
-    }
-
-    nonisolated private static func resolveSystemPython() -> URL? {
-        var candidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/python3" })
-        }
-        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
-            let url = URL(fileURLWithPath: path)
-            if let output = commandOutput(executable: url, arguments: ["--version"]),
-               supportsPython(output) { return url }
-        }
-        return nil
     }
 
     nonisolated private static func stagingRoot() -> URL {
@@ -311,6 +300,7 @@ final class PaddleOCRServiceManager: ObservableObject {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        process.environment = ManagedRuntimePaths.managedEnvironment()
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
@@ -333,14 +323,6 @@ final class PaddleOCRServiceManager: ObservableObject {
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { return nil }
         return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
-    }
-
-    nonisolated private static func supportsPython(_ output: String) -> Bool {
-        let components = output.split(whereSeparator: { !$0.isNumber && $0 != "." })
-            .first(where: { $0.contains(".") })?.split(separator: ".") ?? []
-        guard components.count >= 2,
-              let major = Int(components[0]), let minor = Int(components[1]) else { return false }
-        return major > 3 || (major == 3 && minor >= 10)
     }
 
     private struct ManagedVersions: Codable {
@@ -594,6 +576,7 @@ final class PaddleOCRProvider: OCRProvider, ManagedOCRProviderLifecycle, @unchec
         let output = Pipe()
         process.executableURL = python
         process.arguments = ["-u", "-c", workerSource]
+        process.environment = ManagedRuntimePaths.managedEnvironment()
         process.standardInput = input
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice

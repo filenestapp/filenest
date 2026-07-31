@@ -1062,6 +1062,7 @@
 "Reranking improves the final order of fused search candidates. If the service is unavailable, FileNest automatically keeps the original retrieval order." = "Reranking improves the final order of fused search candidates. If the service is unavailable, FileNest automatically keeps the original retrieval order.";
 "Evidence note: this answer did not include a verifiable source citation. Review the matched files before relying on specific details." = "Evidence note: this answer did not include a verifiable source citation. Review the matched files before relying on specific details.";
 "Reranking the strongest matches" = "Reranking the strongest matches";
+"Navigating relevant document sections" = "Navigating relevant document sections";
 "Verifying answer citations" = "Verifying answer citations";
 "Retrieval Reranker" = "Retrieval Reranker";
 "Local Status" = "Local Status";

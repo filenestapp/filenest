@@ -290,6 +290,44 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertFalse(OllamaServiceManager.isLocalServiceHost("not a URL"))
     }
 
+    func testOllamaFallbackCandidatesAdvanceFromTheConfiguredPort() {
+        XCTAssertEqual(
+            OllamaServiceManager.localHostCandidates(
+                startingAt: "http://127.0.0.1:11434",
+                maximumAttempts: 3
+            ),
+            [
+                "http://127.0.0.1:11434",
+                "http://127.0.0.1:11435",
+                "http://127.0.0.1:11436"
+            ]
+        )
+        XCTAssertEqual(
+            OllamaServiceManager.localHostCandidates(
+                startingAt: "http://[::1]:22468",
+                maximumAttempts: 2
+            ),
+            ["http://[::1]:22468", "http://[::1]:22469"]
+        )
+        XCTAssertTrue(
+            OllamaServiceManager.localHostCandidates(
+                startingAt: "https://ollama.example.com",
+                maximumAttempts: 3
+            ).isEmpty
+        )
+    }
+
+    func testOllamaFallbackSelectsTheFirstAvailablePort() {
+        let selected = OllamaServiceManager.firstAvailableLocalHost(
+            startingAt: "http://localhost:11434",
+            maximumAttempts: 5
+        ) { _, port in
+            port == 11_436
+        }
+
+        XCTAssertEqual(selected, "http://localhost:11436")
+    }
+
     func testOnboardingIsIncompleteUntilExplicitlyFinished() {
         let settings = AppSettings(store: store)
         XCTAssertFalse(settings.onboardingCompleted)
@@ -798,5 +836,51 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(ordered.first?.id, "memory-32")
         XCTAssertEqual(ordered.count, OllamaModelRecommendation.profiles.count)
         XCTAssertEqual(Set(ordered.map(\.id)).count, ordered.count)
+    }
+
+    func testManagedPythonArtifactsAreArchitectureSpecificAndPinned() {
+        let arm = ManagedPythonRuntime.artifact(machine: "arm64")
+        let intel = ManagedPythonRuntime.artifact(machine: "x86_64")
+
+        XCTAssertEqual(arm?.version, ManagedPythonRuntime.version)
+        XCTAssertTrue(arm?.downloadURL.lastPathComponent.contains("aarch64-apple-darwin") == true)
+        XCTAssertEqual(arm?.sha256.count, 64)
+        XCTAssertTrue(intel?.downloadURL.lastPathComponent.contains("x86_64-apple-darwin") == true)
+        XCTAssertEqual(intel?.sha256.count, 64)
+        XCTAssertNil(ManagedPythonRuntime.artifact(machine: "unsupported"))
+    }
+
+    func testManagedFFmpegArtifactsAreArchitectureSpecificAndPinned() {
+        let arm = FFmpegServiceManager.artifact(machine: "arm64")
+        let intel = FFmpegServiceManager.artifact(machine: "x86_64")
+
+        XCTAssertEqual(arm?.version, FFmpegServiceManager.pinnedVersion)
+        XCTAssertEqual(arm?.downloadURL.lastPathComponent, "ffmpeg-darwin-arm64")
+        XCTAssertEqual(arm?.sha256.count, 64)
+        XCTAssertEqual(intel?.downloadURL.lastPathComponent, "ffmpeg-darwin-x64")
+        XCTAssertEqual(intel?.sha256.count, 64)
+        XCTAssertNil(FFmpegServiceManager.artifact(machine: "unsupported"))
+    }
+
+    func testManagedRuntimeEnvironmentKeepsCachesInsideFileNest() {
+        let environment = ManagedRuntimePaths.managedEnvironment()
+        let root = ManagedRuntimePaths.applicationSupportRoot.path
+
+        XCTAssertEqual(environment["PYTHONNOUSERSITE"], "1")
+        XCTAssertNil(environment["PYTHONHOME"])
+        XCTAssertNil(environment["PYTHONPATH"])
+        XCTAssertEqual(
+            environment["PATH"],
+            [
+                ManagedPythonRuntime.executable.deletingLastPathComponent().path,
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin"
+            ].joined(separator: ":")
+        )
+        XCTAssertTrue(environment["HF_HOME"]?.hasPrefix(root) == true)
+        XCTAssertTrue(environment["PADDLE_HOME"]?.hasPrefix(root) == true)
+        XCTAssertTrue(environment["PADDLEX_HOME"]?.hasPrefix(root) == true)
     }
 }

@@ -1881,10 +1881,7 @@ struct SettingsView: View {
                     onCheck: { Task { await appState.refreshModelServicesIfNeeded(force: true) } },
                     onUpdate: {
                         Task {
-                            await appState.ollama.update(
-                                host: appState.settings.ollamaHost,
-                                flashAttentionEnabled: appState.settings.ollamaFlashAttentionEnabled
-                            )
+                            await appState.updateConfiguredOllama()
                         }
                     }
                 )
@@ -1904,10 +1901,7 @@ struct SettingsView: View {
                 if appState.ollama.executablePath == nil {
                     Button {
                         Task {
-                            await appState.ollama.installAndStart(
-                                host: appState.settings.ollamaHost,
-                                flashAttentionEnabled: appState.settings.ollamaFlashAttentionEnabled
-                            )
+                            await appState.startConfiguredOllama(installIfNeeded: true)
                         }
                     } label: {
                         Label("Download, Install & Start", systemImage: "arrow.down.app.fill")
@@ -1916,16 +1910,13 @@ struct SettingsView: View {
                 } else {
                     Button {
                         Task {
-                            await appState.ollama.start(
-                                host: appState.settings.ollamaHost,
-                                flashAttentionEnabled: appState.settings.ollamaFlashAttentionEnabled
-                            )
+                            await appState.startConfiguredOllama()
                         }
                     } label: {
                         Label("Start Service", systemImage: "play.fill")
                     }
                     .disabled(
-                        appState.ollama.state == .running ||
+                        (appState.ollama.state == .running && appState.ollama.canStopManagedService) ||
                         appState.ollama.state == .starting ||
                         appState.ollama.isInstalling
                     )

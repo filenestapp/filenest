@@ -294,6 +294,7 @@ final class OllamaServiceManager: ObservableObject {
     @Published private(set) var installedVersion: String?
     @Published private(set) var latestVersion: String?
     @Published private(set) var updateStatus: ManagedServiceUpdateStatus = .idle
+    @Published private(set) var activeHost: String?
 
     private let session: URLSession
     private var launchedProcess: Process?
@@ -377,6 +378,7 @@ final class OllamaServiceManager: ObservableObject {
             let listedModels = try await fetchModels(host: host)
             models = await hydrateModelDetails(listedModels, host: host)
             state = .running
+            activeHost = host
             lastError = nil
         } catch {
             models = []
@@ -384,6 +386,7 @@ final class OllamaServiceManager: ObservableObject {
                 state = .starting
             } else {
                 state = .stopped
+                activeHost = nil
             }
         }
     }
@@ -504,7 +507,7 @@ final class OllamaServiceManager: ObservableObject {
                 installStatus = "Ollama is installed and running"
             }
         } catch {
-            let message = "Ollama Installation Failed：\(error.localizedDescription)"
+            let message = "Ollama installation failed: \(error.localizedDescription)"
             installStatus = "Installation Failed"
             state = .failed(message)
             lastError = message
@@ -542,19 +545,50 @@ final class OllamaServiceManager: ObservableObject {
 
     func start(host: String, flashAttentionEnabled: Bool = true) async {
         if !isInstalling { installProgress = nil }
-        if (try? await fetchModels(host: host)) != nil {
+        guard Self.isLocalServiceHost(host) else {
+            await refresh(host: host)
+            guard state == .running else {
+                let message = "The configured remote Ollama service is unavailable."
+                state = .failed(message)
+                lastError = message
+                Self.log(message, level: .error)
+                return
+            }
+            return
+        }
+
+        let managedProcesses = await Self.discoverManagedServiceProcessIDs()
+        if !managedProcesses.isEmpty,
+           (try? await fetchModels(host: host)) != nil {
+            managedServiceProcessIDs = managedProcesses
             await refresh(host: host)
             return
+        }
+
+        guard let launchHost = Self.firstAvailableLocalHost(startingAt: host) else {
+            let message = "No available local port was found for Ollama."
+            state = .failed(message)
+            lastError = message
+            Self.log(message, level: .error)
+            return
+        }
+        if launchHost != host {
+            Self.log(
+                "Ollama port unavailable; selected fallback host",
+                level: .notice,
+                metadata: ["requestedHost": host, "activeHost": launchHost]
+            )
         }
 
         if let process = launchedProcess, process.isRunning {
             state = .starting
             lastError = nil
-            if await waitUntilReady(host: host, process: process) {
-                await refresh(host: host)
+            let runningHost = activeHost ?? launchHost
+            if await waitUntilReady(host: runningHost, process: process) {
+                await refresh(host: runningHost)
                 Self.log("Ollama became ready pid=\(process.processIdentifier)")
             } else {
-                markStartupFailure(host: host)
+                markStartupFailure(host: runningHost)
             }
             return
         }
@@ -563,6 +597,15 @@ final class OllamaServiceManager: ObservableObject {
             let message = "Ollama was not found. Install Ollama first."
             state = .failed(message)
             lastError = message
+            return
+        }
+        do {
+            try Self.prepareManagedModelDirectory()
+        } catch {
+            let message = "Unable to prepare the FileNest Ollama model directory: \(error.localizedDescription)"
+            state = .failed(message)
+            lastError = message
+            Self.log(message, level: .error)
             return
         }
 
@@ -574,16 +617,21 @@ final class OllamaServiceManager: ObservableObject {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         var environment = ProcessInfo.processInfo.environment
-        if let serviceHost = Self.ollamaHostEnvironment(from: host) {
+        if let serviceHost = Self.ollamaHostEnvironment(from: launchHost) {
             environment["OLLAMA_HOST"] = serviceHost
         }
+        environment["OLLAMA_MODELS"] = ManagedRuntimePaths.ollamaModelsRoot.path
         environment["OLLAMA_FLASH_ATTENTION"] = flashAttentionEnabled ? "true" : "false"
         process.environment = environment
 
         do {
-            Self.log("Ollama start requested flashAttention=\(flashAttentionEnabled)")
+            Self.log(
+                "Ollama start requested flashAttention=\(flashAttentionEnabled)",
+                metadata: ["host": launchHost]
+            )
             try process.run()
             launchedProcess = process
+            activeHost = launchHost
             if Self.isFileNestManagedExecutable(executable) {
                 managedServiceProcessIDs = [process.processIdentifier]
             }
@@ -599,18 +647,20 @@ final class OllamaServiceManager: ObservableObject {
                     } else {
                         self.state = .stopped
                     }
+                    self.activeHost = nil
                 }
             }
 
-            if await waitUntilReady(host: host, process: process) {
-                await refresh(host: host)
+            if await waitUntilReady(host: launchHost, process: process) {
+                await refresh(host: launchHost)
                 Self.log("Ollama started pid=\(process.processIdentifier)")
                 return
             }
-            markStartupFailure(host: host)
+            markStartupFailure(host: launchHost)
         } catch {
             let message = "Unable to start Ollama: \(error.localizedDescription)"
             state = .failed(message)
+            activeHost = nil
             lastError = message
             Self.log(message, level: .error)
         }
@@ -662,6 +712,7 @@ final class OllamaServiceManager: ObservableObject {
         if remaining.isEmpty {
             state = .stopped
             models = []
+            activeHost = nil
             lastError = nil
             Self.log("Ollama stopped")
         } else {
@@ -709,7 +760,7 @@ final class OllamaServiceManager: ObservableObject {
             pullStatus = "Download Complete"
             await refresh(host: host)
         } catch {
-            lastError = "ModelDownload Failed：\(error.localizedDescription)"
+            lastError = "Model download failed: \(error.localizedDescription)"
             pullStatus = "Download Failed"
         }
     }
@@ -805,17 +856,27 @@ final class OllamaServiceManager: ObservableObject {
     }
 
     private static func resolveExecutable() -> URL? {
-        let fileManager = FileManager.default
-        var candidates = [
-            localApplicationURL.appendingPathComponent("Contents/Resources/ollama").path,
-            "/opt/homebrew/bin/ollama",
-            "/usr/local/bin/ollama",
-            "/Applications/Ollama.app/Contents/Resources/ollama",
-        ]
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/ollama" })
+        let executable = localApplicationURL.appendingPathComponent("Contents/Resources/ollama")
+        return FileManager.default.isExecutableFile(atPath: executable.path) ? executable : nil
+    }
+
+    nonisolated private static func prepareManagedModelDirectory() throws {
+        let manager = FileManager.default
+        let managed = ManagedRuntimePaths.ollamaModelsRoot
+        if manager.fileExists(atPath: managed.path) { return }
+
+        let legacy = manager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ollama/models", isDirectory: true)
+        try manager.createDirectory(
+            at: managed.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if manager.fileExists(atPath: legacy.path) {
+            try manager.moveItem(at: legacy, to: managed)
+            log("Migrated Ollama models into the FileNest-managed directory")
+        } else {
+            try manager.createDirectory(at: managed, withIntermediateDirectories: true)
         }
-        return candidates.first(where: fileManager.isExecutableFile(atPath:)).map(URL.init(fileURLWithPath:))
     }
 
     nonisolated private static func installedVersion(for executable: URL) -> String? {
@@ -886,8 +947,17 @@ final class OllamaServiceManager: ObservableObject {
         Darwin.kill(pid, 0) == 0 || errno == EPERM
     }
 
-    nonisolated private static func log(_ message: String, level: AppLogLevel = .info) {
-        AppLogService.shared.write(message, category: .appLifecycle, level: level)
+    nonisolated private static func log(
+        _ message: String,
+        level: AppLogLevel = .info,
+        metadata: [String: String] = [:]
+    ) {
+        AppLogService.shared.write(
+            message,
+            category: .appLifecycle,
+            level: level,
+            metadata: metadata
+        )
     }
 
     nonisolated private static func installDownloadedDMG(at dmgURL: URL) throws -> URL {
@@ -996,6 +1066,91 @@ final class OllamaServiceManager: ObservableObject {
             || hostname == "127.0.0.1"
             || hostname == "::1"
             || hostname == "0.0.0.0"
+    }
+
+    nonisolated static func localHostCandidates(
+        startingAt host: String,
+        maximumAttempts: Int = 20
+    ) -> [String] {
+        guard maximumAttempts > 0,
+              let components = URLComponents(string: host),
+              let rawHostname = components.host,
+              isLocalServiceHost(host) else { return [] }
+        let scheme = components.scheme ?? "http"
+        let hostname = rawHostname.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        let formattedHostname = hostname.contains(":") ? "[\(hostname)]" : hostname
+        let startingPort = components.port ?? 11_434
+        return (0..<maximumAttempts).compactMap { offset in
+            let port = startingPort + offset
+            guard port <= Int(UInt16.max) else { return nil }
+            return "\(scheme)://\(formattedHostname):\(port)"
+        }
+    }
+
+    nonisolated static func firstAvailableLocalHost(
+        startingAt host: String,
+        maximumAttempts: Int = 20,
+        portIsAvailable: (String, UInt16) -> Bool = localPortIsAvailable
+    ) -> String? {
+        localHostCandidates(startingAt: host, maximumAttempts: maximumAttempts).first { candidate in
+            guard let components = URLComponents(string: candidate),
+                  let hostname = components.host,
+                  let port = components.port.flatMap(UInt16.init(exactly:)) else { return false }
+            return portIsAvailable(hostname, port)
+        }
+    }
+
+    nonisolated private static func localPortIsAvailable(hostname: String, port: UInt16) -> Bool {
+        let normalized = hostname.lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        switch normalized {
+        case "::1":
+            return canBindIPv6Loopback(port: port)
+        case "localhost":
+            return canBindIPv4(address: in_addr(s_addr: inet_addr("127.0.0.1")), port: port)
+                && canBindIPv6Loopback(port: port)
+        case "0.0.0.0":
+            return canBindIPv4(address: in_addr(s_addr: INADDR_ANY), port: port)
+        default:
+            return canBindIPv4(address: in_addr(s_addr: inet_addr("127.0.0.1")), port: port)
+        }
+    }
+
+    nonisolated private static func canBindIPv4(address: in_addr, port: UInt16) -> Bool {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { Darwin.close(descriptor) }
+        var socketAddress = sockaddr_in(
+            sin_len: UInt8(MemoryLayout<sockaddr_in>.size),
+            sin_family: sa_family_t(AF_INET),
+            sin_port: port.bigEndian,
+            sin_addr: address,
+            sin_zero: (0, 0, 0, 0, 0, 0, 0, 0)
+        )
+        return withUnsafePointer(to: &socketAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+    }
+
+    nonisolated private static func canBindIPv6Loopback(port: UInt16) -> Bool {
+        let descriptor = socket(AF_INET6, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { Darwin.close(descriptor) }
+        var socketAddress = sockaddr_in6(
+            sin6_len: UInt8(MemoryLayout<sockaddr_in6>.size),
+            sin6_family: sa_family_t(AF_INET6),
+            sin6_port: port.bigEndian,
+            sin6_flowinfo: 0,
+            sin6_addr: in6addr_loopback,
+            sin6_scope_id: 0
+        )
+        return withUnsafePointer(to: &socketAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in6>.size)) == 0
+            }
+        }
     }
 }
 

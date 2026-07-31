@@ -2546,7 +2546,7 @@ final class AppState: ObservableObject {
             )
             return
         }
-        guard ollama.state != .running else { return }
+        if ollama.state == .running, ollama.canStopManagedService { return }
         guard ollama.executablePath != nil else {
             AppLogService.shared.write(
                 "Ollama automatic startup could not find an installed executable",
@@ -2562,9 +2562,44 @@ final class AppState: ObservableObject {
             level: .notice,
             metadata: ["host": host]
         )
-        await ollama.start(
-            host: host,
+        await startConfiguredOllama()
+    }
+
+    func startConfiguredOllama(installIfNeeded: Bool = false) async {
+        let requestedHost = settings.ollamaHost
+        if installIfNeeded, ollama.executablePath == nil {
+            await ollama.installAndStart(
+                host: requestedHost,
+                flashAttentionEnabled: settings.ollamaFlashAttentionEnabled
+            )
+        } else {
+            await ollama.start(
+                host: requestedHost,
+                flashAttentionEnabled: settings.ollamaFlashAttentionEnabled
+            )
+        }
+        synchronizeActiveOllamaHost(requestedHost: requestedHost)
+    }
+
+    func updateConfiguredOllama() async {
+        let requestedHost = settings.ollamaHost
+        await ollama.update(
+            host: requestedHost,
             flashAttentionEnabled: settings.ollamaFlashAttentionEnabled
+        )
+        synchronizeActiveOllamaHost(requestedHost: requestedHost)
+    }
+
+    private func synchronizeActiveOllamaHost(requestedHost: String) {
+        guard let activeHost = ollama.activeHost,
+              activeHost != requestedHost,
+              OllamaServiceManager.isLocalServiceHost(activeHost) else { return }
+        settings.setOllamaHost(activeHost)
+        AppLogService.shared.write(
+            "Persisted the FileNest-managed Ollama fallback host",
+            category: .appLifecycle,
+            level: .notice,
+            metadata: ["requestedHost": requestedHost, "activeHost": activeHost]
         )
     }
 

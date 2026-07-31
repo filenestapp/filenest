@@ -27,6 +27,11 @@ targets:
     platform: macOS
     sources:
       - path: FileNest
+        excludes:
+          - Skills
+      - path: FileNest/Skills
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.local.filenest
@@ -59,6 +64,17 @@ targets:
           /usr/bin/plutil -replace BuildDate -string "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${INFO_FILE}"
           /usr/bin/plutil -replace MarketingVersion -string "${MARKETING_VERSION}" "${INFO_FILE}"
           /usr/bin/plutil -replace BuildNumber -string "${CURRENT_PROJECT_VERSION}" "${INFO_FILE}"
+
+  FileNestSkillCLI:
+    type: tool
+    platform: macOS
+    sources:
+      - path: FileNestCLI/FileNestSkillCLI.swift
+      - path: FileNest/Services/SkillToolRuntime.swift
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: "NO"
+        PRODUCT_NAME: filenest
 
   FileNestTests:
     type: bundle.unit-test

@@ -456,7 +456,7 @@ actor MediaTranscriptionProcessor {
         with open(sys.argv[4], "w", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False)
         """
-        var environment = ProcessInfo.processInfo.environment
+        var environment = ManagedRuntimePaths.managedEnvironment()
         environment["PATH"] = "\(ffmpeg.deletingLastPathComponent().path):\(environment["PATH"] ?? "")"
         let process = Process()
         process.executableURL = WhisperServiceManager.pythonExecutable

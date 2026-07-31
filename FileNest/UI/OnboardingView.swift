@@ -1226,18 +1226,12 @@ struct OnboardingView: View {
     }
 
     private func ensureOllamaRunning() async {
-        if appState.ollama.state == .running { return }
-        if appState.ollama.executablePath == nil {
-            await appState.ollama.installAndStart(
-                host: appState.settings.ollamaHost,
-                flashAttentionEnabled: appState.settings.ollamaFlashAttentionEnabled
-            )
-        } else {
-            await appState.ollama.start(
-                host: appState.settings.ollamaHost,
-                flashAttentionEnabled: appState.settings.ollamaFlashAttentionEnabled
-            )
+        if appState.ollama.state == .running,
+           (!OllamaServiceManager.isLocalServiceHost(appState.settings.ollamaHost)
+               || appState.ollama.canStopManagedService) {
+            return
         }
+        await appState.startConfiguredOllama(installIfNeeded: true)
     }
 
     private func downloadModel(_ model: String) async {

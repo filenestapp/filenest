@@ -27,6 +27,7 @@ struct ChatProgress: Equatable {
         case planningSearch
         case queryingIndex
         case reranking
+        case navigatingSections
         case matchesFound
         case readingFile
         case fileReady
@@ -606,6 +607,7 @@ final class ChatService {
     private let attachedFilePreparationCache = AttachedFilePreparationCache()
     private let rerankResultCache = RerankResultCache()
     private let rerankerCircuitBreaker = RerankerCircuitBreaker()
+    private let documentTreeNavigator = DocumentTreeNavigator()
     private let embedderLock = NSLock()
     private var cachedEmbedder: (signature: String, provider: EmbeddingProvider)?
     private let ocrProviderLock = NSLock()
@@ -891,10 +893,23 @@ final class ChatService {
                     attachedFilePath: attachedFilePath,
                     smartSearchPlan: smartSearchPlan,
                     skillContext: skillActivation.context,
+                    providerMode: providerMode,
+                    modelOverride: modelOverride,
                     onReranking: {
                         continuation.yield(.progress(ChatProgress(
                             phase: .reranking,
                             scope: .library,
+                            searchIntent: searchIntent
+                        )))
+                    },
+                    onTreeNavigation: { matchedFiles in
+                        continuation.yield(.progress(ChatProgress(
+                            phase: .navigatingSections,
+                            scope: isFileChat ? .attachedFile : .library,
+                            matchedFileCount: matchedFiles.count,
+                            matchedFiles: matchedFiles,
+                            usesExistingIndex: usesExistingIndex,
+                            usesPreparedFileCache: usesPreparedFileCache,
                             searchIntent: searchIntent
                         )))
                     }
@@ -1558,7 +1573,7 @@ final class ChatService {
             let prompt = """
             Classify the scope of a request about one attached document. Do not answer the request.
             Choose whole_document only when it requires translating, summarizing, outlining, or analyzing most or all of the document. Choose focused for a question about a topic, fact, section, table, page, or field. When uncertain, choose focused.
-            (routingSkillContext)
+            \(routingSkillContext)
             Return strict JSON only: {"scope":"whole_document|focused","confidence":0.0}
             """
             do {
@@ -2025,7 +2040,14 @@ final class ChatService {
         var embeddingMilliseconds = 0
         var vectorMilliseconds = 0
         var rerankerMilliseconds = 0
+        let vectorStore = providedVectorStore ?? AppStateIndexerProxy.shared.vectorStore
+        // Do not start an embedding provider when the local retrieval index is empty.
+        // Keyword, note, metadata, and entity lanes can still return complete results,
+        // while a cold local model launch would add latency without any vectors to search.
+        // Explicitly injected embedders are retained for isolated retrieval tests.
+        let hasSemanticIndex = vectorStore.count > 0 || providedEmbedder != nil
         if shouldSearchSemantic,
+           hasSemanticIndex,
            allowedFileIDs?.isEmpty != true,
            !effectiveSemanticQuery.isEmpty,
            !Task.isCancelled {
@@ -2038,7 +2060,6 @@ final class ChatService {
                     return LibrarySearchExecution(results: [], semanticHitsByFile: [:])
                 }
                 onStage?(.searchingVectors)
-                let vectorStore = providedVectorStore ?? AppStateIndexerProxy.shared.vectorStore
                 let vectorStartedAt = Date()
                 let vectorLimit = max(40, min(limit * 6, 120))
                 let hits: [VectorSearchHit]
@@ -2393,7 +2414,10 @@ final class ChatService {
                               attachedFilePath: String?,
                               smartSearchPlan: SmartLibrarySearchPlan?,
                               skillContext: String,
-                              onReranking: (() -> Void)? = nil) async -> (
+                              providerMode: ChatProviderMode,
+                              modelOverride: String?,
+                              onReranking: (() -> Void)? = nil,
+                              onTreeNavigation: (([FileRecord]) -> Void)? = nil) async -> (
                                   files: [FileRecord],
                                   matches: [ChatRelatedFileMatch],
                                   context: String
@@ -2410,7 +2434,10 @@ final class ChatService {
                 let context = await indexedAttachedFileContext(
                     question: question,
                     file: indexedFile,
-                    skillContext: skillContext
+                    skillContext: skillContext,
+                    providerMode: providerMode,
+                    modelOverride: modelOverride,
+                    onTreeNavigation: onTreeNavigation
                 )
                 return ([indexedFile], [], context)
             }
@@ -2544,6 +2571,14 @@ final class ChatService {
                 }
             }
         }
+        matchedChunks = await treeEnhancedHits(
+            question: question,
+            files: files,
+            seedHitsByFile: matchedChunks,
+            providerMode: providerMode,
+            modelOverride: modelOverride,
+            onTreeNavigation: onTreeNavigation
+        )
         contextParts.append(buildLibraryContext(
             from: execution.results,
             matchedChunks: matchedChunks,
@@ -2668,10 +2703,124 @@ final class ChatService {
         return units
     }
 
+    private func treeNavigationProvider(
+        for providerMode: ChatProviderMode,
+        modelOverride: String?
+    ) -> LLMProvider? {
+        switch providerMode {
+        case .configured:
+            guard settings.llmChoice != AppSettings.LLMChoice.none.rawValue else { return nil }
+            return providedLLMProvider ?? settings.makeLLMProvider(modelOverride: modelOverride)
+        case let .local(model):
+            return settings.makeLocalLLMProvider(modelOverride: modelOverride ?? model)
+        case .vectorOnly:
+            return nil
+        }
+    }
+
+    private func treeEnhancedHits(
+        question: String,
+        files: [FileRecord],
+        seedHitsByFile: [Int64: [VectorSearchHit]],
+        providerMode: ChatProviderMode,
+        modelOverride: String?,
+        onTreeNavigation: (([FileRecord]) -> Void)?
+    ) async -> [Int64: [VectorSearchHit]] {
+        guard DocumentTreeNavigator.shouldInspectTree(
+            question: question,
+            files: files,
+            seedHitsByFile: seedHitsByFile
+        ) else {
+            return seedHitsByFile
+        }
+
+        var navigableFiles = [FileRecord]()
+        var sections = [DocumentTreeSection]()
+        for file in files.prefix(3) {
+            guard let fileID = file.id,
+                  let storedSections = try? store.documentParentSections(
+                      fileID: fileID,
+                      limit: 120
+                  ) else {
+                continue
+            }
+            let fileSections = storedSections.map {
+                DocumentTreeSection(file: file, chunk: $0)
+            }
+            guard DocumentTreeNavigator.supportsNavigation(sections: fileSections) else {
+                continue
+            }
+            navigableFiles.append(file)
+            sections.append(contentsOf: fileSections)
+        }
+        guard !navigableFiles.isEmpty, !sections.isEmpty else {
+            return seedHitsByFile
+        }
+
+        onTreeNavigation?(navigableFiles)
+        let provider = treeNavigationProvider(
+            for: providerMode,
+            modelOverride: modelOverride
+        )
+        let outcome = await documentTreeNavigator.navigate(
+            question: question,
+            files: navigableFiles,
+            sections: sections,
+            seedHitsByFile: seedHitsByFile,
+            provider: provider,
+            promptVersion: PromptCatalog.version
+        )
+        guard !outcome.allSections.isEmpty else {
+            return seedHitsByFile
+        }
+
+        var enhanced = seedHitsByFile
+        let primaryNodeIDs = Set(outcome.primarySections.map(\.nodeID))
+        let selectedByFile = Dictionary(grouping: outcome.allSections, by: \.fileID)
+        for (fileID, selectedSections) in selectedByFile {
+            var seenParents = Set<Int>()
+            var merged = [VectorSearchHit]()
+            for section in selectedSections {
+                guard seenParents.insert(section.parentIndex).inserted else { continue }
+                merged.append(section.vectorHit(
+                    score: primaryNodeIDs.contains(section.nodeID) ? 1 : 0.99
+                ))
+            }
+            for hit in seedHitsByFile[fileID] ?? [] {
+                if let parentIndex = hit.parentIndex ?? hit.chunkIndex,
+                   !seenParents.insert(parentIndex).inserted {
+                    continue
+                }
+                merged.append(hit)
+            }
+            enhanced[fileID] = merged
+        }
+
+        AppLogService.shared.write(
+            "Document tree navigation completed",
+            category: .searchPerformance,
+            metadata: [
+                "cacheHit": "\(outcome.cacheHit)",
+                "candidates": "\(outcome.candidateCount)",
+                "durationMs": "\(outcome.durationMilliseconds)",
+                "files": "\(navigableFiles.count)",
+                "modelCalls": "\(outcome.modelCalls)",
+                "primary": "\(outcome.primarySections.count)",
+                "provider": provider?.name ?? "deterministic",
+                "supplemental": "\(outcome.supplementalSections.count)",
+                "usedFallback": "\(outcome.usedDeterministicFallback)",
+            ]
+        )
+        return enhanced
+    }
+
     private func indexedAttachedFileContext(
         question: String,
         file: FileRecord,
-        skillContext: String
+        skillContext: String,
+        providerMode: ChatProviderMode,
+        modelOverride: String?,
+        onTreeNavigation: (([FileRecord]) -> Void)?
     ) async -> String {
         var selectedChunks = [VectorSearchHit]()
         if let fileID = file.id,
@@ -2696,6 +2845,18 @@ final class ChatService {
                     appendUnique(neighbor, to: &selectedChunks, seen: &seen)
                 }
             }
+        }
+
+        if let fileID = file.id {
+            let enhanced = await treeEnhancedHits(
+                question: question,
+                files: [file],
+                seedHitsByFile: [fileID: selectedChunks],
+                providerMode: providerMode,
+                modelOverride: modelOverride,
+                onTreeNavigation: onTreeNavigation
+            )
+            selectedChunks = enhanced[fileID] ?? selectedChunks
         }
 
         if !selectedChunks.isEmpty {

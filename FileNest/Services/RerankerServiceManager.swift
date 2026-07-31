@@ -59,7 +59,9 @@ final class RerankerServiceManager: ObservableObject {
 
     nonisolated static var isModelInstalled: Bool {
         FileManager.default.fileExists(atPath: modelRoot.appendingPathComponent("config.json").path)
-            && FileManager.default.isExecutableFile(atPath: pythonExecutable.path)
+            && ManagedPythonRuntime.virtualEnvironmentUsesManagedPython(
+                at: installRoot.appendingPathComponent("venv", isDirectory: true)
+            )
     }
 
     var isRunning: Bool { state == .running }
@@ -83,19 +85,18 @@ final class RerankerServiceManager: ObservableObject {
 
     func install() async {
         guard !isInstalling else { return }
-        guard let systemPython = Self.resolveSystemPython() else {
-            fail("Python 3.10 or later is required to install the local reranker.")
-            return
-        }
 
         isInstalling = true
         lastError = nil
         installProgress = 0.03
-        installStatus = "Preparing the isolated reranker environment…"
+        installStatus = "Installing the FileNest Python runtime…"
         defer { isInstalling = false }
 
         do {
+            let systemPython = try await ManagedPythonRuntimeInstaller.shared.ensureInstalled(session: session)
             if !Self.runtimeIsReady {
+                installProgress = 0.12
+                installStatus = "Preparing the isolated reranker environment…"
                 try await Task.detached(priority: .userInitiated) {
                     try Self.createEnvironment(using: systemPython)
                 }.value
@@ -161,10 +162,10 @@ final class RerankerServiceManager: ObservableObject {
                 "--model", Self.modelRoot.path,
                 "--port", String(Self.servicePort),
             ]
-            process.environment = ProcessInfo.processInfo.environment.merging([
+            process.environment = ManagedRuntimePaths.managedEnvironment(merging: [
                 "HF_HUB_DISABLE_TELEMETRY": "1",
                 "TOKENIZERS_PARALLELISM": "false",
-            ]) { _, new in new }
+            ])
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             process.terminationHandler = { [weak self] process in
@@ -286,7 +287,11 @@ final class RerankerServiceManager: ObservableObject {
 
     nonisolated private static func createEnvironment(using python: URL) throws {
         try FileManager.default.createDirectory(at: installRoot, withIntermediateDirectories: true)
-        try run(executable: python, arguments: ["-m", "venv", installRoot.appendingPathComponent("venv").path])
+        let venv = installRoot.appendingPathComponent("venv", isDirectory: true)
+        if FileManager.default.fileExists(atPath: venv.path) {
+            try FileManager.default.removeItem(at: venv)
+        }
+        try run(executable: python, arguments: ["-m", "venv", venv.path])
     }
 
     nonisolated private static func installRuntime() throws {
@@ -298,7 +303,9 @@ final class RerankerServiceManager: ObservableObject {
     }
 
     nonisolated private static var runtimeIsReady: Bool {
-        guard FileManager.default.isExecutableFile(atPath: pythonExecutable.path) else { return false }
+        guard ManagedPythonRuntime.virtualEnvironmentUsesManagedPython(
+            at: installRoot.appendingPathComponent("venv", isDirectory: true)
+        ) else { return false }
         let process = Process()
         process.executableURL = pythonExecutable
         process.arguments = ["-c", "import fastapi, sentence_transformers, uvicorn"]
@@ -450,27 +457,11 @@ def rerank(request: RerankRequest):
 uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 """#
 
-    nonisolated private static func resolveSystemPython() -> URL? {
-        var candidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/python3" })
-        }
-        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
-            let url = URL(fileURLWithPath: path)
-            guard let output = commandOutput(executable: url, arguments: ["--version"]) else { continue }
-            let parts = output.split(whereSeparator: { !$0.isNumber && $0 != "." })
-                .first(where: { $0.contains(".") })?.split(separator: ".") ?? []
-            if parts.count >= 2,
-               let major = Int(parts[0]), let minor = Int(parts[1]),
-               major > 3 || (major == 3 && minor >= 10) { return url }
-        }
-        return nil
-    }
-
     nonisolated private static func run(executable: URL, arguments: [String]) throws {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        process.environment = ManagedRuntimePaths.managedEnvironment()
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()

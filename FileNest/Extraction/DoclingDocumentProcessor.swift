@@ -251,6 +251,7 @@ final class DoclingDocumentProcessor: @unchecked Sendable {
         let output = Pipe()
         process.executableURL = python
         process.arguments = ["-u", "-c", workerSource]
+        process.environment = ManagedRuntimePaths.managedEnvironment()
         process.standardInput = input
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice

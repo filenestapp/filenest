@@ -1591,6 +1591,70 @@ final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    /// Reads bounded natural parent sections for hierarchical document navigation.
+    /// Retrieval children remain in `document_chunks`; this query avoids decoding every
+    /// child vector when a reasoning request needs only the compact section structure.
+    func documentParentSections(
+        fileID: Int64,
+        limit: Int = 120
+    ) throws -> [IndexedDocumentChunk] {
+        guard limit > 0 else { return [] }
+        return try dbPool.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT parent_idx, text, contextual_text, section_path,
+                           page_start, page_end, kind, token_count,
+                           tokenizer_profile, tokenizer_version, token_count_accuracy
+                    FROM document_parents
+                    WHERE file_id = ?
+                      AND kind NOT IN (?, ?, ?)
+                      AND length(trim(text)) > 0
+                    ORDER BY parent_idx
+                    LIMIT ?
+                    """,
+                arguments: [
+                    fileID,
+                    DocumentChunkKind.note.rawValue,
+                    DocumentChunkKind.title.rawValue,
+                    DocumentChunkKind.metadata.rawValue,
+                    max(1, limit),
+                ]
+            )
+            return rows.map { row in
+                let sectionJSON = (row["section_path"] as String?) ?? "[]"
+                let sectionPath = (try? JSONDecoder().decode(
+                    [String].self,
+                    from: Data(sectionJSON.utf8)
+                )) ?? []
+                let parentIndex = (row["parent_idx"] as Int?) ?? 0
+                let text = (row["text"] as String?) ?? ""
+                let contextualText = (row["contextual_text"] as String?) ?? text
+                return IndexedDocumentChunk(
+                    index: parentIndex,
+                    text: text,
+                    contextualText: contextualText,
+                    sectionPath: sectionPath,
+                    pageStart: row["page_start"],
+                    pageEnd: row["page_end"],
+                    kind: DocumentChunkKind(
+                        rawValue: (row["kind"] as String?) ?? ""
+                    ) ?? .text,
+                    parentIndex: parentIndex,
+                    parentText: text,
+                    tokenCount: row["token_count"],
+                    tokenizerProfile: (row["tokenizer_profile"] as String?)
+                        ?? TokenCounter.canonicalProfile,
+                    tokenizerVersion: (row["tokenizer_version"] as String?)
+                        ?? TokenCounter.canonicalVersion,
+                    tokenCountAccuracy: TokenCountAccuracy(
+                        rawValue: (row["token_count_accuracy"] as String?) ?? ""
+                    ) ?? .estimated
+                )
+            }
+        }
+    }
+
     /// Reads only the number of chunks. Inspector opening must not decode every
     /// chunk's text merely to render a count.
     func documentChunkCount(fileID: Int64) throws -> Int {
