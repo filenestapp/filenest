@@ -268,25 +268,22 @@
 
   .github-link {
     min-width: 40px;
-    width: auto;
+    width: 40px;
     height: 40px;
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    justify-content: center;
     flex: none;
-    padding: 0 9px 0 10px;
+    padding: 0;
     border: 1px solid transparent;
     border-radius: var(--radius-sm);
     color: var(--ink-soft);
     transition: transform 180ms var(--ease-out), border-color 180ms ease, background 180ms ease, color 180ms ease;
   }
 
-  .github-mark { width: 19px; height: 19px; flex: none; fill: currentColor; }
-  .github-star-meta { min-height: 22px; display: inline-flex; align-items: center; gap: 4px; padding-left: 8px; border-left: 1px solid var(--line); }
-  .github-star-icon { width: 13px; height: 13px; flex: none; fill: oklch(0.76 0.17 82); filter: drop-shadow(0 1px 1px oklch(0.48 0.12 82 / 0.18)); transition: transform 180ms var(--ease-out), fill 180ms ease; }
-  .github-star-count { min-width: 3.4ch; color: var(--ink); font-size: 12px; font-weight: 760; font-variant-numeric: tabular-nums; line-height: 1; text-align: right; }
+  .github-mark { width: 19px; height: 19px; flex: none; fill: currentColor; transition: transform 180ms var(--ease-out); }
   .github-link:hover { transform: translateY(-1px); border-color: var(--line); background: var(--surface-soft); color: var(--ink); }
-  .github-link:hover .github-star-icon { transform: rotate(-7deg) scale(1.08); fill: oklch(0.82 0.18 82); }
+  .github-link:hover .github-mark { transform: scale(1.06); }
   .github-link:active { transform: translateY(0) scale(0.98); }
 
   .header-cta {
@@ -901,7 +898,7 @@
   @media (max-width: 880px) {
     :root { --page: min(100% - 36px, 720px); }
     .site-header { grid-template-columns: auto 1fr auto; padding-inline: 18px; }
-    .github-link { height: 44px; }
+    .github-link { width: 44px; height: 44px; }
     .menu-button { display: flex; width: 40px; height: 40px; grid-column: 2; justify-self: end; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border: 0; border-radius: var(--radius-sm); background: transparent; cursor: pointer; }
     .menu-button__line { width: 20px; height: 2px; background: var(--ink); transition: transform 220ms var(--ease-out); }
     .menu-button[aria-expanded="true"] .menu-button__line:first-child { transform: translateY(3.5px) rotate(45deg); }
