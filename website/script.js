@@ -6,6 +6,8 @@ const menuButton = document.querySelector("[data-menu-button]");
 const navigation = document.querySelector("[data-nav]");
 const localeSwitch = document.querySelector("[data-locale-switch]");
 const localeLabel = document.querySelector("[data-locale-label]");
+const githubLinks = [...document.querySelectorAll(".github-link")];
+const githubStarValues = [...document.querySelectorAll("[data-github-stars]")];
 const platformButtons = [...document.querySelectorAll("[data-platform]")];
 const platformPanels = [...document.querySelectorAll("[data-platform-panel]")];
 const demoLab = document.querySelector("[data-demo-lab]");
@@ -28,6 +30,7 @@ const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 let currentLocale = localStorage.getItem("filenest-locale") || DEFAULT_LOCALE;
 if (!SUPPORTED_LOCALES.includes(currentLocale)) currentLocale = DEFAULT_LOCALE;
 let currentMessages = null;
+let githubStarCount = Number.parseInt(githubStarValues[0]?.textContent || "", 10);
 let activeDemoIndex = 0;
 let demoTimer = null;
 let demoVisible = false;
@@ -37,6 +40,38 @@ const DEMO_INTERVAL = 5200;
 
 function getNestedValue(object, path) {
   return path.split(".").reduce((value, key) => value?.[key], object);
+}
+
+function updateGitHubStarDisplay() {
+  if (!Number.isInteger(githubStarCount) || githubStarCount < 0) return;
+  const formattedCount = new Intl.NumberFormat(currentLocale, {
+    notation: githubStarCount >= 1000 ? "compact" : "standard",
+    maximumFractionDigits: 1,
+  }).format(githubStarCount);
+
+  githubStarValues.forEach((element) => {
+    element.textContent = formattedCount;
+  });
+
+  const template = currentMessages?.nav.githubStarsLabel || "FileNest on GitHub, {count} stars";
+  githubLinks.forEach((link) => {
+    link.setAttribute("aria-label", template.replace("{count}", formattedCount));
+  });
+}
+
+async function loadGitHubStarCount() {
+  try {
+    const response = await fetch("https://api.github.com/repos/filenestapp/filenest", {
+      headers: { Accept: "application/vnd.github+json" },
+    });
+    if (!response.ok) return;
+    const repository = await response.json();
+    if (!Number.isInteger(repository.stargazers_count) || repository.stargazers_count < 0) return;
+    githubStarCount = repository.stargazers_count;
+    updateGitHubStarDisplay();
+  } catch {
+    // Keep the server-rendered count when GitHub is unavailable.
+  }
 }
 
 async function applyLocale(locale) {
@@ -67,6 +102,7 @@ async function applyLocale(locale) {
     localStorage.setItem("filenest-locale", locale);
     currentLocale = locale;
     currentMessages = messages;
+    updateGitHubStarDisplay();
     updateDemoLabels();
     updateProductVideoLabel();
   } catch (error) {
@@ -274,3 +310,4 @@ if (tiltTarget && canTilt.matches) {
 
 document.querySelector("[data-year]").textContent = new Date().getFullYear();
 applyLocale(currentLocale);
+loadGitHubStarCount();

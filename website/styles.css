@@ -267,11 +267,16 @@
   .locale-switch:hover { background: var(--surface-soft); }
 
   .github-link {
-    width: 40px;
+    min-width: 40px;
+    width: auto;
     height: 40px;
     display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
     place-items: center;
+    gap: 7px;
     flex: none;
+    padding-inline: 10px;
     border: 1px solid transparent;
     border-radius: var(--radius-sm);
     color: var(--ink-soft);
@@ -279,6 +284,7 @@
   }
 
   .github-link svg { width: 20px; height: 20px; fill: currentColor; }
+  .github-star-count { min-width: 1ch; font-size: 12px; font-weight: 750; font-variant-numeric: tabular-nums; line-height: 1; }
   .github-link:hover { transform: translateY(-1px); border-color: var(--line); background: var(--surface-soft); color: var(--ink); }
 
   .header-cta {
