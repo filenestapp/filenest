@@ -4,7 +4,7 @@
     "description": "FileNest is a local-first intelligent file manager for macOS and Windows. Search, organize, and chat with your files without sending them away by default."
   },
   "a11y": { "skip": "Skip to content", "menu": "Open navigation" },
-  "nav": { "video": "Product film", "demo": "Live demo", "privacy": "Privacy", "platforms": "Platforms", "openSource": "Open source", "questions": "Questions", "cta": "Download" },
+  "nav": { "video": "Product film", "demo": "Live demo", "privacy": "Privacy", "platforms": "Platforms", "openSource": "Open source", "questions": "Questions", "githubLabel": "FileNest on GitHub", "cta": "Download" },
   "hero": {
     "status": "Local AI · Built for macOS 13+ and Windows 11",
     "titleLine1": "Your files,",

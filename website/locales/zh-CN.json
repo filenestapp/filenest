@@ -4,7 +4,7 @@
     "description": "FileNest 是面向 macOS 和 Windows 的本地优先智能文件管理器。在默认不上传文件的前提下，搜索、整理并与文件对话。"
   },
   "a11y": { "skip": "跳到主要内容", "menu": "打开导航" },
-  "nav": { "video": "产品短片", "demo": "交互演示", "privacy": "隐私", "platforms": "平台", "openSource": "开源", "questions": "常见问题", "cta": "下载" },
+  "nav": { "video": "产品短片", "demo": "交互演示", "privacy": "隐私", "platforms": "平台", "openSource": "开源", "questions": "常见问题", "githubLabel": "在 GitHub 查看 FileNest", "cta": "下载" },
   "hero": {
     "status": "本地 AI · 适用于 macOS 13+ 与 Windows 11",
     "titleLine1": "你的文件，",
