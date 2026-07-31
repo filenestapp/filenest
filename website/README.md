@@ -25,4 +25,17 @@ Then open `http://localhost:4173`.
 
 The interactive demos use a fictional Northstar Studio workspace. They cover local indexing, direct search, Smart Search, chat-based file discovery, and grounded chat with a selected file. Autoplay pauses when the demo leaves the viewport, and reduced-motion preferences disable the sequence animations.
 
-The homepage presents the public GitHub repository, MIT license, contribution guide, issue tracker, and release assets. Installer packages are hosted in GitHub Releases and are not committed to the source repository. Update the version, asset URLs, file sizes, and checksums together for each future release.
+The homepage presents the public GitHub repository, MIT license, contribution guide, issue tracker, and release assets. Installer packages are hosted in GitHub Releases and are not committed to the source repository. The download page asks the GitHub Releases API for the latest stable release at runtime, with a versioned fallback for offline or rate-limited requests.
+
+## Publish a release
+
+Use the repository script after updating both platform versions and committing the release changes:
+
+```bash
+scripts/publish-release.sh 0.2.6
+```
+
+It validates version parity and creates or checks the matching tag. A newly
+pushed tag starts the release workflow automatically; an existing tag at `HEAD`
+is dispatched manually. GitHub Actions then builds, signs, notarizes, uploads
+the release assets, and publishes the Sparkle update metadata.
