@@ -25,7 +25,7 @@
     <meta name="twitter:image" content="https://filenestapp.com/assets/filenest-og.png" />
     <link rel="canonical" href="https://filenestapp.com/" />
     <link rel="icon" href="assets/app-icon.png" />
-    <link rel="stylesheet" href="styles.css?v=20260730-4" />
+    <link rel="stylesheet" href="styles.css?v=20260731-1" />
     <title>FileNest — Your files, understood</title>
     <script type="application/ld+json">
       {
@@ -66,6 +66,7 @@
         <a href="#demo" data-i18n="nav.demo">Live demo</a>
         <a href="#privacy" data-i18n="nav.privacy">Privacy</a>
         <a href="#platforms" data-i18n="nav.platforms">Platforms</a>
+        <a href="#open-source" data-i18n="nav.openSource">Open source</a>
         <a href="#questions" data-i18n="nav.questions">Questions</a>
       </nav>
 
@@ -73,7 +74,7 @@
         <button class="locale-switch" type="button" data-locale-switch aria-label="Switch language">
           <span data-locale-label>ZH</span>
         </button>
-        <a class="header-cta" href="downloads/FileNest-0.2.0-macOS.dmg" download data-i18n="nav.cta">Download</a>
+        <a class="header-cta" href="download.html" data-i18n="nav.cta">Download</a>
       </div>
     </header>
 
@@ -92,10 +93,10 @@
             Index, search, and chat with the files already on your computer using local AI. In local mode, content, indexes, notes, and conversations stay on this device.
           </p>
           <div class="hero__actions">
-            <a class="button button--primary" href="downloads/FileNest-0.2.0-macOS.dmg" download data-i18n="hero.primaryCta">Download for macOS</a>
+            <a class="button button--primary" href="download.html" data-i18n="hero.primaryCta">Download for macOS</a>
             <a class="button button--quiet" href="#demo" data-i18n="hero.secondaryCta">Explore the live demo</a>
           </div>
-          <p class="hero__download-note" data-i18n="hero.downloadNote">Version 0.2.0 · 13.7 MB · macOS 13 or later</p>
+          <p class="hero__download-note" data-i18n="hero.downloadNote">Version 0.2.4 · 15.1 MB · macOS 13 or later</p>
           <div class="hero__trust-grid" aria-label="Local AI, privacy, and security guarantees">
             <span><strong data-i18n="hero.localAiTitle">Local AI</strong><small data-i18n="hero.localAiBody">Ollama, OCR, and embeddings</small></span>
             <span><strong data-i18n="hero.privateIndexTitle">Private index</strong><small data-i18n="hero.privateIndexBody">Stored on this device</small></span>
@@ -457,12 +458,40 @@
             <div class="platform-panel" id="windows-panel" role="tabpanel" aria-labelledby="windows-tab" data-platform-panel="windows" hidden>
               <h3 data-i18n="platforms.windowsTitle">Parity without impersonation.</h3>
               <p data-i18n="platforms.windowsBody">A Windows 11 implementation with tray workflows, native shell actions, secure credential storage, and matching search, chat, indexing, and rules.</p>
-              <span class="release-state" data-i18n="platforms.windowsState">Native release validation in progress</span>
+              <span class="release-state release-state--active" data-i18n="platforms.windowsState">Public preview available for Windows</span>
             </div>
           </div>
           <figure class="platform-preview media-frame">
             <img src="assets/filenest-chat-current.webp" alt="FileNest desktop application on macOS" data-i18n-alt="images.platform" width="2584" height="1500" loading="lazy" data-platform-image />
           </figure>
+        </div>
+      </section>
+
+      <section class="open-source section" id="open-source" aria-labelledby="open-source-title">
+        <div class="open-source__copy">
+          <p class="section-intro" data-i18n="openSource.intro">Open source, in the open</p>
+          <h2 id="open-source-title" data-i18n="openSource.title">Inspect it. Improve it. Make FileNest yours.</h2>
+          <p data-i18n="openSource.body">FileNest is released under the MIT License. The macOS and Windows source, automated tests, issue tracker, and contribution guide are all public on GitHub.</p>
+          <div class="open-source__actions">
+            <a class="button button--primary" href="https://github.com/filenestapp/filenest" target="_blank" rel="noreferrer" data-i18n="openSource.repositoryCta">View repository on GitHub</a>
+            <a class="button button--quiet" href="https://github.com/filenestapp/filenest/blob/main/CONTRIBUTING.md" target="_blank" rel="noreferrer" data-i18n="openSource.contributeCta">Contribute</a>
+          </div>
+        </div>
+        <div class="open-source__repository">
+          <div class="open-source__repo-heading">
+            <span aria-hidden="true">GH</span>
+            <div>
+              <small data-i18n="openSource.repositoryLabel">Public repository</small>
+              <strong>filenestapp/filenest</strong>
+            </div>
+          </div>
+          <ul>
+            <li><span data-i18n="openSource.licenseLabel">License</span><strong>MIT</strong></li>
+            <li><span data-i18n="openSource.platformsLabel">Source</span><strong>macOS + Windows</strong></li>
+            <li><span data-i18n="openSource.releasesLabel">Installers</span><a href="https://github.com/filenestapp/filenest/releases" target="_blank" rel="noreferrer" data-i18n="openSource.releasesValue">GitHub Releases ↗</a></li>
+            <li><span data-i18n="openSource.issuesLabel">Feedback</span><a href="https://github.com/filenestapp/filenest/issues" target="_blank" rel="noreferrer" data-i18n="openSource.issuesValue">Issues ↗</a></li>
+          </ul>
+          <p data-i18n="openSource.note">Release installers are published as GitHub Release assets and are not committed to the source repository.</p>
         </div>
       </section>
 
@@ -496,11 +525,11 @@
           <img src="assets/app-icon.png" alt="FileNest app icon" width="128" height="128" loading="lazy" />
         </div>
         <div class="availability__copy">
-          <p data-i18n="availability.intro">Available now for macOS</p>
+          <p data-i18n="availability.intro">Available for macOS and Windows</p>
           <h2 data-i18n="availability.title">Make room for the work. Not the file hunt.</h2>
-          <p data-i18n="availability.body">Download the notarized FileNest app for macOS 13 or later. Windows 11 is completing native release validation for x64 and ARM64.</p>
+          <p data-i18n="availability.body">Download the notarized macOS app or get the Windows 11 installer from the public GitHub release.</p>
         </div>
-        <a class="button button--primary" href="downloads/FileNest-0.2.0-macOS.dmg" download data-i18n="availability.cta">Download for macOS</a>
+        <a class="button button--primary" href="download.html" data-i18n="availability.cta">View downloads</a>
       </section>
     </main>
 
@@ -515,6 +544,7 @@
       <nav class="footer-nav" aria-label="Footer navigation" data-i18n-aria-label="footer.navLabel">
         <a href="#demo" data-i18n="footer.demo">Live demo</a>
         <a href="#privacy" data-i18n="footer.privacy">Privacy</a>
+        <a href="https://github.com/filenestapp/filenest" target="_blank" rel="noreferrer" data-i18n="footer.github">GitHub</a>
         <a href="#questions" data-i18n="footer.questions">Questions</a>
         <a href="download.html" data-i18n="footer.release">Download</a>
       </nav>
@@ -524,6 +554,6 @@
       </div>
     </footer>
 
-    <script src="script.js?v=20260730-4" defer></script>
+    <script src="script.js?v=20260731-1" defer></script>
   </body>
 </html>

@@ -15,8 +15,7 @@ Then open `http://localhost:4173`.
 ## Structure
 
 - `index.html` contains the main marketing site, semantic page structure, and English fallback copy.
-- `download.html` is the public download page for the current signed and notarized macOS release.
-- `downloads/FileNest-0.2.0-macOS.dmg` is the current public macOS release artifact.
+- `download.html` links to the signed macOS and Windows packages published with the current GitHub Release.
 - `styles.css` contains the responsive visual system and motion behavior.
 - `script.js` manages localization, the mobile menu, platform tabs, the hero interaction, and five replayable product demos.
 - `media/filenest-homepage-loop.mp4` is the silent, 32-second product film embedded on the homepage; `media/filenest-homepage-poster.jpg` is its poster image.
@@ -26,4 +25,4 @@ Then open `http://localhost:4173`.
 
 The interactive demos use a fictional Northstar Studio workspace. They cover local indexing, direct search, Smart Search, chat-based file discovery, and grounded chat with a selected file. Autoplay pauses when the demo leaves the viewport, and reduced-motion preferences disable the sequence animations.
 
-The homepage and download page link directly to the current macOS DMG. Update both the release asset and checksum together for each future release.
+The homepage presents the public GitHub repository, MIT license, contribution guide, issue tracker, and release assets. Installer packages are hosted in GitHub Releases and are not committed to the source repository. Update the version, asset URLs, file sizes, and checksums together for each future release.

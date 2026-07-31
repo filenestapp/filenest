@@ -4,7 +4,7 @@
     "description": "FileNest 是面向 macOS 和 Windows 的本地优先智能文件管理器。在默认不上传文件的前提下，搜索、整理并与文件对话。"
   },
   "a11y": { "skip": "跳到主要内容", "menu": "打开导航" },
-  "nav": { "video": "产品短片", "demo": "交互演示", "privacy": "隐私", "platforms": "平台", "questions": "常见问题", "cta": "下载" },
+  "nav": { "video": "产品短片", "demo": "交互演示", "privacy": "隐私", "platforms": "平台", "openSource": "开源", "questions": "常见问题", "cta": "下载" },
   "hero": {
     "status": "本地 AI · 适用于 macOS 13+ 与 Windows 11",
     "titleLine1": "你的文件，",
@@ -12,7 +12,7 @@
     "lede": "使用本地 AI，为电脑上的文件建立索引、搜索和对话。在本地模式下，内容、索引、笔记和会话都会留在这台设备上。",
     "primaryCta": "下载 macOS 版",
     "secondaryCta": "体验交互演示",
-    "downloadNote": "0.2.0 版本 · 13.7 MB · 支持 macOS 13 及以上版本",
+    "downloadNote": "0.2.4 版本 · 15.1 MB · 支持 macOS 13 及以上版本",
     "trust1": "默认本地处理",
     "trust2": "无需注册账号",
     "trust3": "是否使用云端由你决定",
@@ -147,7 +147,22 @@
     "macState": "macOS 版现已可下载",
     "windowsTitle": "功能对齐，也尊重 Windows。",
     "windowsBody": "面向 Windows 11，提供系统托盘、原生 Shell 操作、安全凭据存储，以及对齐的搜索、聊天、索引和规则体验。",
-    "windowsState": "正在完成原生发布验证"
+    "windowsState": "Windows 公开预览版现已提供"
+  },
+  "openSource": {
+    "intro": "开放源码，公开共建",
+    "title": "查看、改进，打造属于你的 FileNest。",
+    "body": "FileNest 基于 MIT License 开源。macOS 与 Windows 源码、自动化测试、问题追踪和贡献指南均已在 GitHub 公开。",
+    "repositoryCta": "在 GitHub 查看仓库",
+    "contributeCta": "参与贡献",
+    "repositoryLabel": "公开仓库",
+    "licenseLabel": "许可证",
+    "platformsLabel": "源码",
+    "releasesLabel": "安装包",
+    "releasesValue": "GitHub Releases ↗",
+    "issuesLabel": "反馈",
+    "issuesValue": "Issues ↗",
+    "note": "安装包仅作为 GitHub Release Assets 发布，不提交到源码仓库。"
   },
   "faq": {
     "title": "使用前，先把实际问题说清楚。",
@@ -162,10 +177,10 @@
     "a4": "可以。你既可以通过 Ollama 使用兼容的本地模型，也可以分别为聊天、Embedding 和 OCR 配置 OpenAI-compatible 或 Anthropic 云端服务。"
   },
   "availability": {
-    "intro": "macOS 版现已可下载",
+    "intro": "macOS 与 Windows 版现已提供",
     "title": "把空间留给工作，不要留给找文件。",
-    "body": "下载经过公证的 FileNest macOS 版，支持 macOS 13 及以上版本。Windows 11 正在完成 x64 与 ARM64 的原生发布验证。",
-    "cta": "下载 macOS 版"
+    "body": "下载经过公证的 macOS 版，或从公开的 GitHub Release 获取 Windows 11 安装包。",
+    "cta": "查看下载"
   },
   "footer": {
     "tagline": "本地优先的智能文件管理。",
@@ -173,6 +188,7 @@
     "navLabel": "页脚导航",
     "demo": "交互演示",
     "privacy": "隐私",
+    "github": "GitHub",
     "questions": "常见问题",
     "release": "下载"
   },

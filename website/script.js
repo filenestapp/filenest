@@ -41,7 +41,7 @@ function getNestedValue(object, path) {
 
 async function applyLocale(locale) {
   try {
-    const response = await fetch(`locales/${locale}.json?v=20260730-4`);
+    const response = await fetch(`locales/${locale}.json?v=20260731-1`);
     if (!response.ok) throw new Error(`Locale request failed with status ${response.status}`);
     const messages = await response.json();
 
