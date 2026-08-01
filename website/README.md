@@ -32,7 +32,7 @@ The homepage presents the public GitHub repository, MIT license, contribution gu
 Use the repository script after updating both platform versions and committing the release changes:
 
 ```bash
-scripts/publish-release.sh 0.2.6
+scripts/publish-release.sh 0.2.7
 ```
 
 It validates version parity and creates or checks the matching tag. A newly
