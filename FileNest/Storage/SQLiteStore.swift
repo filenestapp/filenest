@@ -1388,10 +1388,11 @@ final class SQLiteStore: @unchecked Sendable {
             // instead of LIKE so wildcard characters remain literal across SQLite
             // versions. Keep this fallback metadata-only to avoid body table scans.
             let normalizedKeyword = keyword.lowercased()
+            let searchPath = containsSearchToken ? 1 : 0
             return try FileRecord.fetchAll(
                 db,
-                sql: "SELECT * FROM files WHERE instr(LOWER(name), ?) > 0 OR instr(LOWER(title), ?) > 0 OR instr(LOWER(note), ?) > 0 OR instr(LOWER(path), ?) > 0 ORDER BY COALESCE(discovered_at, organized_at, indexed_at, mtime) DESC, name COLLATE NOCASE ASC LIMIT 200",
-                arguments: [normalizedKeyword, normalizedKeyword, normalizedKeyword, normalizedKeyword]
+                sql: "SELECT * FROM files WHERE instr(LOWER(name), ?) > 0 OR instr(LOWER(title), ?) > 0 OR instr(LOWER(note), ?) > 0 OR (? = 1 AND instr(LOWER(path), ?) > 0) ORDER BY COALESCE(discovered_at, organized_at, indexed_at, mtime) DESC, name COLLATE NOCASE ASC LIMIT 200",
+                arguments: [normalizedKeyword, normalizedKeyword, normalizedKeyword, searchPath, normalizedKeyword]
             )
         }
     }
