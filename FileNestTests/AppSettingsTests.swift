@@ -610,6 +610,7 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertTrue(settings.shouldVectorize(extension: "pptx"))
         XCTAssertTrue(settings.shouldVectorize(extension: "epub"))
         XCTAssertTrue(settings.shouldVectorize(extension: "odt"))
+        settings.setMediaTranscriptionEnabled(false)
         XCTAssertFalse(settings.shouldVectorize(extension: "mp4"))
         settings.setMediaTranscriptionEnabled(true)
         XCTAssertTrue(settings.shouldTranscribeMedia(extension: "MP4"))

@@ -1347,7 +1347,10 @@ final class SQLiteStore: @unchecked Sendable {
             let containsSearchToken = keyword.unicodeScalars.contains {
                 CharacterSet.alphanumerics.contains($0)
             }
-            if containsSearchToken, keyword.unicodeScalars.count >= 3 {
+            // SQL wildcard-only queries must bypass FTS. Tokenizers can treat `_`
+            // as a separator and turn a literal filename query into a broad match.
+            let containsLikeMetacharacter = keyword.contains { $0 == "%" || $0 == "_" || $0 == "\\" }
+            if containsSearchToken, !containsLikeMetacharacter, keyword.unicodeScalars.count >= 3 {
                 if let records = try? FileRecord.fetchAll(
                     db,
                     sql: """
@@ -1365,7 +1368,7 @@ final class SQLiteStore: @unchecked Sendable {
                 }
             }
 
-            if containsSearchToken, let records = try? FileRecord.fetchAll(
+            if containsSearchToken, !containsLikeMetacharacter, let records = try? FileRecord.fetchAll(
                 db,
                 sql: """
                     SELECT files.*
