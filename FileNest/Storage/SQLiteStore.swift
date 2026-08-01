@@ -1387,10 +1387,11 @@ final class SQLiteStore: @unchecked Sendable {
             // Punctuation and partial metadata terms may not be tokens. Use `instr`
             // instead of LIKE so wildcard characters remain literal across SQLite
             // versions. Keep this fallback metadata-only to avoid body table scans.
+            let normalizedKeyword = keyword.lowercased()
             return try FileRecord.fetchAll(
                 db,
-                sql: "SELECT * FROM files WHERE instr(LOWER(name), LOWER(?)) > 0 OR instr(LOWER(title), LOWER(?)) > 0 OR instr(LOWER(note), LOWER(?)) > 0 OR instr(LOWER(path), LOWER(?)) > 0 ORDER BY COALESCE(discovered_at, organized_at, indexed_at, mtime) DESC, name COLLATE NOCASE ASC LIMIT 200",
-                arguments: [keyword, keyword, keyword, keyword]
+                sql: "SELECT * FROM files WHERE instr(LOWER(name), ?) > 0 OR instr(LOWER(title), ?) > 0 OR instr(LOWER(note), ?) > 0 OR instr(LOWER(path), ?) > 0 ORDER BY COALESCE(discovered_at, organized_at, indexed_at, mtime) DESC, name COLLATE NOCASE ASC LIMIT 200",
+                arguments: [normalizedKeyword, normalizedKeyword, normalizedKeyword, normalizedKeyword]
             )
         }
     }
@@ -1515,8 +1516,9 @@ final class SQLiteStore: @unchecked Sendable {
             var clauses = [String]()
             var arguments = StatementArguments()
             for keyword in fallbackKeywords {
-                clauses.append("(instr(LOWER(name), LOWER(?)) > 0 OR instr(LOWER(title), LOWER(?)) > 0 OR instr(LOWER(note), LOWER(?)) > 0 OR instr(LOWER(path), LOWER(?)) > 0)")
-                arguments += [keyword, keyword, keyword, keyword]
+                let normalizedKeyword = keyword.lowercased()
+                clauses.append("(instr(LOWER(name), ?) > 0 OR instr(LOWER(title), ?) > 0 OR instr(LOWER(note), ?) > 0 OR instr(LOWER(path), ?) > 0)")
+                arguments += [normalizedKeyword, normalizedKeyword, normalizedKeyword, normalizedKeyword]
             }
             arguments += filtered.1
             arguments += [safeLimit - records.count]
