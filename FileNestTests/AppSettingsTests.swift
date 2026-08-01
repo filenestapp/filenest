@@ -398,6 +398,7 @@ final class AppSettingsTests: XCTestCase {
     func testOnboardingIsIncompleteUntilExplicitlyFinished() {
         let settings = AppSettings(store: store)
         XCTAssertFalse(settings.onboardingCompleted)
+        XCTAssertTrue(settings.mediaTranscriptionEnabled)
 
         settings.setOnboardingCompleted(true)
 

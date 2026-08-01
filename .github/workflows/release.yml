@@ -254,7 +254,9 @@ jobs:
           output="$RUNNER_TEMP/release-assets"
           staging="$RUNNER_TEMP/dmg-staging"
 
-          mkdir -p "$output" "$staging"
+          mkdir -p "$output"
+          rm -rf "$staging"
+          mkdir -p "$staging"
           codesign --verify --deep --strict --verbose=2 "$app"
 
           if [[ "$DISTRIBUTION_READY" == "true" ]]; then
@@ -315,6 +317,9 @@ jobs:
             fi
 
             ditto "$app" "$staging/FileNest.app"
+            # A standard installer DMG must expose an Applications alias so Finder
+            # offers the expected drag-to-install destination.
+            ln -s /Applications "$staging/Applications"
             hdiutil create \
               -volname "FileNest" \
               -srcfolder "$staging" \
@@ -367,6 +372,7 @@ jobs:
             dmg_path="$output/FileNest-${version}-macOS-unsigned.dmg"
             ditto -c -k --sequesterRsrc --keepParent "$app" "$zip_path"
             ditto "$app" "$staging/FileNest.app"
+            ln -s /Applications "$staging/Applications"
             hdiutil create \
               -volname "FileNest" \
               -srcfolder "$staging" \

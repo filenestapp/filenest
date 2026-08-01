@@ -91,6 +91,10 @@ signed with Developer ID, notarized, stapled, and validated. The workflow then:
 5. verifies the public download URL;
 6. publishes the signed metadata to the update API.
 
+Each DMG includes `FileNest.app` and an `Applications` Finder alias. This is
+the standard drag-to-install layout: open the DMG, then drag FileNest onto the
+Applications alias before launching it.
+
 The application checks the appcast at startup and on Sparkle's normal
 background schedule. When automatic installation is enabled, FileNest
 downloads the signed archive, safely stops its managed services, installs the

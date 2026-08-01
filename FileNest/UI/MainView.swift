@@ -4,7 +4,6 @@ import SwiftUI
 /// Main window with a stable global sidebar shared by the library and chat.
 struct MainView: View {
     @EnvironmentObject private var appState: AppState
-    @Environment(\.openWindow) private var openWindow
     @SceneStorage("FileNest.mainSelection") private var selectionRawValue = (FileNestEnvironment.isLibraryPreview ||
         FileNestEnvironment.isIndexingPreview || FileNestEnvironment.isSearchPreview)
         ? SidebarItem.library.rawValue
@@ -93,11 +92,7 @@ struct MainView: View {
             if appState.settings.onboardingCompleted && !appState.isWatching {
                 appState.startWatching()
             }
-            presentOnboardingIfNeeded()
             routePendingLibrarySearch()
-        }
-        .onChange(of: appState.isOnboardingPresented) { isPresented in
-            if isPresented { presentOnboardingIfNeeded() }
         }
         .onChange(of: appState.previewedFile?.path) { previewPath in
             coordinateSidebar(withPreviewPath: previewPath)
@@ -290,12 +285,6 @@ struct MainView: View {
                 isSidebarCollapsed = false
             }
         }
-    }
-
-    private func presentOnboardingIfNeeded() {
-        guard appState.isOnboardingPresented else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "onboarding")
     }
 
     private func routePendingLibrarySearch() {

@@ -101,7 +101,9 @@ final class AppSettings: ObservableObject {
     @Published var rerankerModel: String = "Qwen/Qwen3-Reranker-0.6B"
     @Published var rerankerReuseChatCredentials: Bool = true
     @Published var doclingEnabled: Bool = true
-    @Published var mediaTranscriptionEnabled: Bool = false
+    /// Audio and video transcription is part of the recommended first-run setup.
+    /// Users can opt out explicitly in the setup assistant or Settings.
+    @Published var mediaTranscriptionEnabled: Bool = true
     @Published var whisperModel: String = WhisperModelCatalog.defaultModel
     @Published var embeddingSource: String = EmbeddingSource.ollama.rawValue
     @Published var ollamaEmbeddingModel: String = OllamaModelRecommendation.defaultEmbeddingModel
@@ -303,7 +305,8 @@ final class AppSettings: ObservableObject {
         rerankerModel = load(.rerankerModel) ?? "Qwen/Qwen3-Reranker-0.6B"
         rerankerReuseChatCredentials = load(.rerankerReuseChatCredentials) != "0"
         doclingEnabled = load(.doclingEnabled) != "0"
-        mediaTranscriptionEnabled = load(.mediaTranscriptionEnabled) == "1"
+        // Default to enabled for first-run setup while preserving an explicit opt-out.
+        mediaTranscriptionEnabled = load(.mediaTranscriptionEnabled) != "0"
         whisperModel = WhisperModelCatalog.normalizedModel(load(.whisperModel))
         embeddingSource = EmbeddingSource(rawValue: load(.embeddingSource) ?? "")?.rawValue
             ?? EmbeddingSource.ollama.rawValue

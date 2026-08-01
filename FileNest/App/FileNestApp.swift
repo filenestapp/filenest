@@ -308,6 +308,24 @@ struct FileNestApp: App {
                     .environmentObject(appState)
                     .fileNestEnvironment(appState.settings)
             }
+            .sheet(
+                isPresented: Binding(
+                    get: { appState.isOnboardingPresented },
+                    set: { isPresented in
+                        // Initial setup must remain in front until it is explicitly finished.
+                        // Reopened setup may be dismissed normally after first-run completion.
+                        if !isPresented, !appState.settings.onboardingCompleted {
+                            appState.presentOnboarding()
+                        }
+                    }
+                )
+            ) {
+                OnboardingView()
+                    .environmentObject(appState)
+                    .fileNestEnvironment(appState.settings)
+                    .fileNestOverlayScrollStyle()
+                    .interactiveDismissDisabled(!appState.settings.onboardingCompleted)
+            }
         }
         .defaultSize(
             width: FileNestEnvironment.isSettingsPreview || FileNestEnvironment.isStatisticsPreview || FileNestEnvironment.isSettingsModelsPreview || FileNestEnvironment.isSettingsRulesPreview ? 1040 : (FileNestEnvironment.isRulePreview ? 520 : (FileNestEnvironment.isMenuPreview ? 380 : 1180)),
@@ -364,15 +382,6 @@ struct FileNestApp: App {
                 .keyboardShortcut(.delete, modifiers: [.command, .shift])
             }
         }
-
-        Window("FileNest Setup", id: "onboarding") {
-            OnboardingView()
-                .environmentObject(appState)
-                .fileNestEnvironment(appState.settings)
-                .fileNestOverlayScrollStyle()
-        }
-        .defaultSize(width: 920, height: 700)
-        .windowResizability(.contentSize)
 
         Window("Duplicate Files", id: "duplicates") {
             DuplicateFilesWindow()

@@ -4,7 +4,6 @@ import SwiftUI
 /// Settings workspace embedded in the primary FileNest window.
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
-    @Environment(\.openWindow) private var openWindow
     private let onBack: (() -> Void)?
     @State private var newDir = ""
     @State private var selectedSection: SettingsSection = .general
@@ -408,8 +407,6 @@ struct SettingsView: View {
 
                 Button {
                     appState.presentOnboarding()
-                    NSApp.activate(ignoringOtherApps: true)
-                    openWindow(id: "onboarding")
                 } label: {
                     Label("Open Setup Assistant Again", systemImage: "wand.and.stars")
                 }
