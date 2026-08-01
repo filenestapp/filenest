@@ -1384,17 +1384,13 @@ final class SQLiteStore: @unchecked Sendable {
                 return records
             }
 
-            // Punctuation and partial metadata terms may not be tokens. Keep the final
-            // fallback metadata-only so large extracted bodies are never table-scanned.
-            let escapedKeyword = keyword
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "%", with: "\\%")
-                .replacingOccurrences(of: "_", with: "\\_")
-            let pattern = "%\(escapedKeyword)%"
+            // Punctuation and partial metadata terms may not be tokens. Use `instr`
+            // instead of LIKE so wildcard characters remain literal across SQLite
+            // versions. Keep this fallback metadata-only to avoid body table scans.
             return try FileRecord.fetchAll(
                 db,
-                sql: "SELECT * FROM files WHERE name LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' ORDER BY COALESCE(discovered_at, organized_at, indexed_at, mtime) DESC, name COLLATE NOCASE ASC LIMIT 200",
-                arguments: [pattern, pattern, pattern, pattern]
+                sql: "SELECT * FROM files WHERE instr(LOWER(name), LOWER(?)) > 0 OR instr(LOWER(title), LOWER(?)) > 0 OR instr(LOWER(note), LOWER(?)) > 0 OR instr(LOWER(path), LOWER(?)) > 0 ORDER BY COALESCE(discovered_at, organized_at, indexed_at, mtime) DESC, name COLLATE NOCASE ASC LIMIT 200",
+                arguments: [keyword, keyword, keyword, keyword]
             )
         }
     }
@@ -1519,13 +1515,8 @@ final class SQLiteStore: @unchecked Sendable {
             var clauses = [String]()
             var arguments = StatementArguments()
             for keyword in fallbackKeywords {
-                let escapedKeyword = keyword
-                    .replacingOccurrences(of: "\\", with: "\\\\")
-                    .replacingOccurrences(of: "%", with: "\\%")
-                    .replacingOccurrences(of: "_", with: "\\_")
-                let pattern = "%\(escapedKeyword)%"
-                clauses.append("(name LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')")
-                arguments += [pattern, pattern, pattern, pattern]
+                clauses.append("(instr(LOWER(name), LOWER(?)) > 0 OR instr(LOWER(title), LOWER(?)) > 0 OR instr(LOWER(note), LOWER(?)) > 0 OR instr(LOWER(path), LOWER(?)) > 0)")
+                arguments += [keyword, keyword, keyword, keyword]
             }
             arguments += filtered.1
             arguments += [safeLimit - records.count]
