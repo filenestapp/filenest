@@ -7,6 +7,8 @@ export type Appearance = 'system' | 'light' | 'dark'
 export type AppLanguage = 'system' | 'zh-Hans' | 'en'
 export type AutoOrganizeMode = 'immediate' | 'batched'
 export type ReindexMode = 'all' | 'unindexed' | 'embeddings' | 'media'
+export type ReindexJobStatus = 'running' | 'paused' | 'stopping' | 'stopped' | 'completed' | 'completedWithErrors' | 'interrupted'
+export type ReindexJobFileState = 'queued' | 'processing' | 'completed' | 'failed'
 export type CloudApiFormat = 'openai' | 'anthropic'
 export type AgentSkillOrigin = 'bundled' | 'sharedUser' | 'managed'
 export type AgentSkillCapability = 'search' | 'library-answer' | 'attached-file-answer' | 'feedback-learning'
@@ -60,6 +62,58 @@ export interface ChatRelatedFileMatch {
 }
 
 export type ChatFeedback = 'helpful' | 'notHelpful'
+export type RagFeedbackRating = 'accurate' | 'inaccurate'
+export type RagFeedbackAnalysisStatus = 'pending' | 'analyzing' | 'applied' | 'failed'
+export type RagFeedbackSourceKind = 'chat' | 'search' | 'smartSearch'
+
+export interface RagFeedbackRecord {
+  id: number
+  sourceKey: string
+  sourceKind: RagFeedbackSourceKind
+  messageId: number | null
+  sessionId: number | null
+  searchQuery: string | null
+  resultFileIds: number[]
+  rating: RagFeedbackRating
+  reason: string | null
+  bestFileId: number | null
+  bestFileReason: string | null
+  analysisStatus: RagFeedbackAnalysisStatus
+  analysisSummary: string | null
+  analysisError: string | null
+  createdAt: string
+  updatedAt: string
+  analyzedAt: string | null
+}
+
+export interface RagFeedbackDraft {
+  rating: RagFeedbackRating
+  reason?: string | null
+  bestFileId?: number | null
+  bestFileReason?: string | null
+}
+
+export interface ReindexJobFileItem {
+  fileId: number
+  name: string
+  ext: string
+  state: ReindexJobFileState
+  error: string | null
+  updatedAt: string
+}
+
+export interface ReindexJobSummary {
+  id: number
+  status: ReindexJobStatus
+  mode: ReindexMode
+  total: number
+  completed: number
+  failed: number
+  currentFileName: string | null
+  createdAt: string
+  updatedAt: string
+  files: ReindexJobFileItem[]
+}
 
 export type DocumentChunkKind = 'title' | 'text' | 'table' | 'list' | 'picture' | 'transcript' | 'note' | 'metadata'
 
@@ -239,6 +293,7 @@ export type LibraryDateField = 'created' | 'modified'
 export interface LibrarySearchRequest {
   query: string
   smart?: boolean
+  recordHistory?: boolean
   includeSemantic?: boolean
   requestId?: string
   category?: FileCategory | null
@@ -266,6 +321,14 @@ export interface LibrarySearchResponse {
   interpretedQuery: string
   intent: string | null
   usedAi: boolean
+}
+
+export interface LibrarySearchHistoryEntry {
+  id: number
+  query: string
+  smart: boolean
+  resultCount: number
+  updatedAt: string
 }
 
 export interface LibrarySearchProgressEvent {
@@ -306,6 +369,9 @@ export interface AppSnapshot {
   reranker: { state: 'unavailable' | 'installed' | 'starting' | 'running' | 'failed'; installing: boolean; progress: number | null; message: string; error: string | null; modelDiskBytes: number }
   agentSkills: AgentSkill[]
   agentSkillDiagnostics: AgentSkillDiagnostic[]
+  librarySearchHistory: LibrarySearchHistoryEntry[]
+  ragFeedbackRecords: RagFeedbackRecord[]
+  reindexJobSummary: ReindexJobSummary | null
 }
 
 export interface SendChatRequest {
@@ -339,6 +405,7 @@ export interface FileNestApi {
   getSnapshot(): Promise<AppSnapshot>
   refresh(): Promise<AppSnapshot>
   updateSettings(patch: Partial<Settings>): Promise<Settings>
+  defaultWatchDirectories(): Promise<string[]>
   chooseWatchDirectories(): Promise<string[]>
   chooseOrganizedRoot(): Promise<string | null>
   chooseOrganizationDirectories(): Promise<string[]>
@@ -356,11 +423,14 @@ export interface FileNestApi {
   cancelOrganization(): Promise<void>
   reindexAll(mode?: ReindexMode, categories?: FileCategory[]): Promise<void>
   reindexFile(id: number): Promise<void>
+  retryReindexFiles(fileIds: number[]): Promise<void>
   pauseIndexing(): Promise<void>
   resumeIndexing(): Promise<void>
   cancelIndexing(): Promise<void>
   searchFiles(query: string, category?: FileCategory | null): Promise<FileRecord[]>
   searchLibrary(request: LibrarySearchRequest): Promise<LibrarySearchResponse>
+  deleteLibrarySearchHistory(id: number): Promise<void>
+  clearLibrarySearchHistory(): Promise<void>
   submitQuickSearch(query: string): Promise<void>
   consumeLibrarySearch(id: string): Promise<void>
   openFile(path: string): Promise<string>
@@ -381,7 +451,9 @@ export interface FileNestApi {
   beginChat(attachedFilePath?: string | null): Promise<void>
   selectChat(id: number): Promise<ChatMessage[]>
   loadEarlierChatMessages(): Promise<void>
-  saveChatFeedback(messageId: number, feedback: ChatFeedback | null): Promise<void>
+  saveChatFeedback(messageId: number, feedback: ChatFeedback | null, draft?: Partial<RagFeedbackDraft>): Promise<void>
+  saveLibrarySearchFeedback(query: string, smart: boolean, fileIds: number[], draft: RagFeedbackDraft): Promise<void>
+  analyzeRagFeedback(id: number): Promise<void>
   markChatSeen(id: number): Promise<void>
   deleteChat(id: number): Promise<void>
   clearChats(): Promise<void>

@@ -931,6 +931,14 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertNil(FFmpegServiceManager.artifact(machine: "unsupported"))
     }
 
+    func testFFmpegManagedArtifactVersionUsesVerifiedPackageManifest() throws {
+        let root = temporaryDirectory.appendingPathComponent("MediaTools", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("6.1.1\n".utf8).write(to: root.appendingPathComponent("version.txt"))
+
+        XCTAssertEqual(FFmpegServiceManager.installedArtifactVersion(at: root), "6.1.1")
+    }
+
     func testManagedRuntimeEnvironmentKeepsCachesInsideFileNest() {
         let environment = ManagedRuntimePaths.managedEnvironment()
         let root = ManagedRuntimePaths.applicationSupportRoot.path

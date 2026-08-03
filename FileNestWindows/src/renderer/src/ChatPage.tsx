@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  CheckCircle2,
   Check,
+  ChevronLeft,
   ChevronUp,
   Clipboard,
-  FilePlus2,
   FolderOpen,
   MessageCircle,
   Mic,
-  MoreHorizontal,
   Paperclip,
+  Plus,
   RotateCcw,
   Send,
   ShieldCheck,
@@ -28,6 +27,7 @@ import type {
   ChatMessage,
   ChatStreamEvent,
   FileRecord,
+  RagFeedbackDraft,
 } from "../../shared/types";
 import {
   FileTypeIcon,
@@ -42,11 +42,13 @@ export function ChatPage({
   active,
   onRefresh,
   onInspect,
+  onReturnFromFileChat,
 }: {
   snapshot: AppSnapshot;
   active: boolean;
   onRefresh(): Promise<void>;
   onInspect(file: FileRecord): void;
+  onReturnFromFileChat(): void;
 }): React.JSX.Element {
   const t = (value: string): string =>
     translate(value, snapshot.settings.appLanguage);
@@ -205,12 +207,14 @@ export function ChatPage({
   };
   const chooseFile = async (): Promise<void> => {
     const path = await window.fileNest.chooseChatFile();
-    if (path) setAttachment(path);
+    if (!path) return;
+    setAttachment(path);
+    await onRefresh();
   };
   const heading = attachment ? t("Chat with File") : t("Find with Chat");
   const subtitle = attachment
     ? t("Analyze only the current file without searching or mixing in content from the library.")
-    : t("Find files with natural language. The index remains on this PC.");
+    : t("Find files naturally, or attach one file and chat with it directly.");
   const usesCloud =
     snapshot.settings.llmChoice === "cloud" ||
     snapshot.settings.embeddingSource === "cloud" ||
@@ -231,37 +235,28 @@ export function ChatPage({
         }
       }}
     >
-      <header className="page-header">
+      <header className="page-header chat-page-header">
         <div>
-          <h1>{heading}</h1>
+          <div className="chat-header-title"><h1>{heading}</h1>{attachedFile && <button className="header-file-context" onClick={() => onInspect(attachedFile)}><FileTypeIcon file={attachedFile} size={15} /><span>{attachedFile.name}</span></button>}</div>
           <p>{subtitle}</p>
         </div>
         <div className="page-actions">
+          {attachment && <button className="secondary-button chat-return-button" onClick={onReturnFromFileChat}><ChevronLeft size={16} />{t("Back")}</button>}
           <button
             className="secondary-button"
-            onClick={() =>
-              void window.fileNest.beginChat().then(() => onRefresh())
-            }
+            onClick={() => {
+              setAttachment(null);
+              void window.fileNest.beginChat().then(onRefresh);
+            }}
           >
             <PlusSquareIcon />
             {t("New Chat")}
           </button>
-          <span className="mode-control">
-            <CheckCircle2 size={16} />
-            {snapshot.settings.llmChoice === "ollama"
-              ? t("Local Mode")
-              : snapshot.settings.llmChoice === "cloud"
-                ? t("Cloud Mode")
-                : t("Search Only")}
-          </span>
-          <IconButton label="More">
-            <MoreHorizontal size={18} />
-          </IconButton>
         </div>
       </header>
       <div className="chat-scroll">
         {snapshot.messages.length === 0 && !pendingQuestion ? (
-          <EmptyChat t={t} onChoose={() => void chooseFile()} />
+          attachment ? <EmptyFileChat t={t} file={attachedFile} path={attachment} onPrompt={(value) => void sendQuestion(value)} /> : <EmptyChat t={t} onChoose={() => void chooseFile()} onPrompt={(value) => void sendQuestion(value)} />
         ) : (
           <div className="conversation">
             {snapshot.hasEarlierChatMessages && (
@@ -277,6 +272,7 @@ export function ChatPage({
                 language={snapshot.settings.appLanguage}
                 onInspect={onInspect}
                 onRetry={retryMessage}
+                showRelatedFiles={!attachment}
               />
             ))}
             {pendingQuestion && (
@@ -294,6 +290,7 @@ export function ChatPage({
                 language={snapshot.settings.appLanguage}
                 onInspect={onInspect}
                 onRetry={() => undefined}
+                showRelatedFiles={!attachment}
               />
             )}
             {(streaming || requestId) && (
@@ -347,7 +344,7 @@ export function ChatPage({
           <div className="attachment-chip">
             <button className="attachment-preview-button" aria-label={t("Show file details")} onClick={() => onInspect(attachedFile)}>
               <FileTypeIcon file={attachedFile} size={16} />
-              <span>{attachedFile.name}</span>
+              <span><strong>{attachedFile.name}</strong><small>{t("Chat with this file only")}</small></span>
             </button>
             <IconButton label={t("Cancel")} onClick={() => setAttachment(null)}>
               <X size={14} />
@@ -377,7 +374,7 @@ export function ChatPage({
                 label={t("Choose File")}
                 onClick={() => void chooseFile()}
               >
-                <Paperclip size={19} />
+                <Plus size={19} />
               </IconButton>
               <span className="privacy-badge">
                 <ShieldCheck size={15} />
@@ -396,7 +393,7 @@ export function ChatPage({
                 }
               >
                 <Sparkles size={15} />
-                {t(snapshot.settings.thinkingMode ? "Thinking" : "Fast")}⌄
+                {t("Thinking")}
               </button>
               <select
                 className="model-button model-select"
@@ -463,16 +460,6 @@ export function ChatPage({
             </div>
           </div>
         </div>
-        <div className="composer-foot">
-          <span className="active-green">●</span>
-          {snapshot.settings.embeddingSource === "local"
-            ? t("Local Lightweight Index")
-            : snapshot.settings.embeddingSource === "ollama"
-              ? t("Local Semantic Search")
-              : t("Cloud Semantic Search")}
-          <span>·</span>
-          {usesCloud ? t("Cloud features send the content they need") : t("File contents are not uploaded")}
-        </div>
       </div>
     </main>
   );
@@ -484,23 +471,31 @@ function Message({
   language,
   onInspect,
   onRetry,
+  showRelatedFiles,
 }: {
   message: ChatMessage;
   files: FileRecord[];
   language: AppSnapshot["settings"]["appLanguage"];
   onInspect(file: FileRecord): void;
   onRetry(message: ChatMessage): void;
+  showRelatedFiles: boolean;
 }): React.JSX.Element {
   const t = (value: string): string => translate(value, language);
   const [feedback, setFeedback] = useState<ChatFeedback | null>(message.feedback ?? null);
+  const [feedbackEditor, setFeedbackEditor] = useState<ChatFeedback | null>(null);
   const [isCopied, setIsCopied] = useState(false);
   useEffect(() => {
     setFeedback(message.feedback ?? null);
   }, [message.feedback, message.id]);
-  const saveFeedback = (value: ChatFeedback): void => {
+  const removeFeedback = (value: ChatFeedback): void => {
     const next = feedback === value ? null : value;
     setFeedback(next);
     void window.fileNest.saveChatFeedback(message.id, next).catch(() => setFeedback(message.feedback ?? null));
+  };
+  const saveFeedback = (value: ChatFeedback, draft: Partial<RagFeedbackDraft>): void => {
+    setFeedback(value);
+    setFeedbackEditor(null);
+    void window.fileNest.saveChatFeedback(message.id, value, draft).catch(() => setFeedback(message.feedback ?? null));
   };
   const copyMessage = (): void => {
     void navigator.clipboard.writeText(message.content).then(() => {
@@ -540,7 +535,7 @@ function Message({
             {message.content}
           </ReactMarkdown>
         </div>
-        {related.map((file, index) => (
+        {showRelatedFiles && related.map((file, index) => (
           <button
             key={file.id}
             className="matched-file"
@@ -598,43 +593,93 @@ function Message({
           <IconButton
             label={t(feedback === "helpful" ? "Remove helpful feedback" : "Mark this answer as helpful (saved locally)")}
             className={feedback === "helpful" ? "active" : ""}
-            onClick={() => saveFeedback("helpful")}
+            onClick={() => feedback === "helpful" ? removeFeedback("helpful") : setFeedbackEditor("helpful")}
           >
             <ThumbsUp size={15} />
           </IconButton>
           <IconButton
             label={t(feedback === "notHelpful" ? "Remove not helpful feedback" : "Mark this answer as not helpful (saved locally)")}
             className={feedback === "notHelpful" ? "active" : ""}
-            onClick={() => saveFeedback("notHelpful")}
+            onClick={() => feedback === "notHelpful" ? removeFeedback("notHelpful") : setFeedbackEditor("notHelpful")}
           >
             <ThumbsDown size={15} />
           </IconButton>
         </div>
+        {feedbackEditor && <FeedbackEditor initialFeedback={feedbackEditor} files={related} onCancel={() => setFeedbackEditor(null)} onSave={(draft) => saveFeedback(draft.rating === "accurate" ? "helpful" : "notHelpful", draft)} />}
       </div>
     </div>
   );
 }
 
+function FeedbackEditor({ initialFeedback, files, onCancel, onSave }: { initialFeedback: ChatFeedback; files: FileRecord[]; onCancel(): void; onSave(draft: RagFeedbackDraft): void }): React.JSX.Element {
+  const [rating, setRating] = useState<RagFeedbackDraft["rating"]>(initialFeedback === "helpful" ? "accurate" : "inaccurate");
+  const [reason, setReason] = useState("");
+  const [bestFileId, setBestFileId] = useState<number | null>(files[0]?.id ?? null);
+  const [bestFileReason, setBestFileReason] = useState("");
+  return <div className="modal-backdrop feedback-backdrop" role="presentation" onMouseDown={onCancel}><section className="feedback-editor" role="dialog" aria-modal="true" aria-label="Improve Future Results" onMouseDown={(event) => event.stopPropagation()}>
+    <header className="feedback-editor-header"><div><h2>Improve Future Results</h2><p>Your evaluation is saved with this result and used to refine FileNest skills.</p></div><button onClick={onCancel} aria-label="Close feedback editor"><X size={18} /></button></header>
+    <div className="feedback-editor-content"><section><strong>Result Accuracy</strong><div className="feedback-rating"><button className={rating === "accurate" ? "selected" : ""} onClick={() => setRating("accurate")}>Accurate</button><button className={rating === "inaccurate" ? "selected" : ""} onClick={() => setRating("inaccurate")}>Inaccurate</button></div><label>{rating === "inaccurate" ? "What was inaccurate or missing?" : "What made this result accurate? (Optional)"}<textarea value={reason} maxLength={2000} onChange={(event) => setReason(event.target.value)} /></label></section>
+    <section className="feedback-best-file"><div><strong>Most Accurate File</strong><small>Select the file that best answers the request.</small></div>{bestFileId != null && <button className="feedback-clear" onClick={() => { setBestFileId(null); setBestFileReason(""); }}>Clear Selection</button>}{files.length ? <div className="feedback-file-list">{files.slice(0, 30).map((file) => <button key={file.id} className={bestFileId === file.id ? "selected" : ""} onClick={() => setBestFileId(file.id)}><span>{bestFileId === file.id ? "●" : "○"}</span><FileTypeIcon file={file} size={22} /><div><b>{file.name}</b><small>{file.path}</small></div></button>)}</div> : <p className="empty-state">No retrieved files are available for annotation.</p>}{bestFileId != null && <label>Why is this the best match? (Optional)<input value={bestFileReason} maxLength={2000} placeholder="Add a concise reason" onChange={(event) => setBestFileReason(event.target.value)} /></label>}</section>
+    <p className="feedback-disclosure">FileNest uses the configured local or cloud AI source to analyze generalizable feedback in the background. It only updates FileNest-managed skills.</p></div>
+    <footer><button className="secondary-button" onClick={onCancel}>Cancel</button><button className="primary-button" onClick={() => onSave({ rating, reason, bestFileId, bestFileReason })}><Check size={16} />Save Feedback</button></footer>
+  </section></div>
+}
+
 function EmptyChat({
   t,
   onChoose,
+  onPrompt,
 }: {
   t(value: string): string;
   onChoose(): void;
+  onPrompt(value: string): void;
 }): React.JSX.Element {
+  const suggestions = [
+    "Find the final contract I downloaded last week",
+    "What PDF documents did I use recently?",
+    "Find files containing product requirements",
+  ];
   return (
     <div className="empty-chat">
-      <div className="empty-brand">
-        <img src="./brand-mark.png" alt="" />
+      <img className="empty-chat-brand" src="./brand-mark.png" alt="" />
+      <h2>{t("Describe What You Remember")}</h2>
+      <p>{t("FileNest searches the local index and returns files you can open directly.")}</p>
+      <div className="chat-suggestions" aria-label={t("Suggested questions")}>
+        {suggestions.map((suggestion) => (
+          <button key={suggestion} onClick={() => onPrompt(t(suggestion))}>
+            {t(suggestion)}
+          </button>
+        ))}
       </div>
-      <h2>{t("Find with Chat")}</h2>
-      <p>{t("Attach a file or describe what you want to find.")}</p>
-      <button className="secondary-button" onClick={onChoose}>
-        <FilePlus2 size={16} />
+      <button className="empty-chat-choose" onClick={onChoose}>
+        <Paperclip size={15} />
         {t("Choose File")}
       </button>
     </div>
   );
+}
+
+function EmptyFileChat({
+  t,
+  file,
+  path,
+  onPrompt,
+}: {
+  t(value: string): string;
+  file: FileRecord | null;
+  path: string;
+  onPrompt(value: string): void;
+}): React.JSX.Element {
+  const name = file?.name ?? path.split(/[\\/]/).pop() ?? path;
+  const suggestions = ["Summarize this file", "Extract key data", "List risks and action items"];
+  return <div className="empty-chat empty-file-chat">
+    <div className="empty-file-icon">{file ? <FileTypeIcon file={file} size={31} /> : <Paperclip size={28} />}</div>
+    <h2 title={name}>{name}</h2>
+    <p>{t("This chat analyzes only this file and does not search the library.")}</p>
+    <div className="chat-suggestions" aria-label={t("Suggested questions")}>
+      {suggestions.map((suggestion) => <button key={suggestion} onClick={() => onPrompt(t(suggestion))}>{t(suggestion)}</button>)}
+    </div>
+  </div>;
 }
 
 function PlusSquareIcon(): React.JSX.Element {

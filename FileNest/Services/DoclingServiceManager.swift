@@ -592,7 +592,10 @@ final class FFmpegServiceManager: ObservableObject {
 
     @Published private(set) var state: ManagedMediaServiceState = .unavailable
     @Published private(set) var executablePath: String?
+    /// FileNest package version recorded after checksum verification.
     @Published private(set) var version: String?
+    /// Version reported by the FFmpeg executable. It can differ from the package release tag.
+    @Published private(set) var engineVersion: String?
     @Published private(set) var latestVersion: String?
     @Published private(set) var updateStatus: ManagedServiceUpdateStatus = .idle
     @Published private(set) var isInstalling = false
@@ -618,15 +621,21 @@ final class FFmpegServiceManager: ObservableObject {
         installRoot.appendingPathComponent("ffmpeg")
     }
 
+    nonisolated static var versionManifest: URL {
+        installRoot.appendingPathComponent("version.txt")
+    }
+
     func refresh() {
         guard let executable = Self.resolveExecutable() else {
             executablePath = nil
             version = nil
+            engineVersion = nil
             state = .unavailable
             return
         }
         executablePath = executable.path
-        version = Self.version(at: executable)
+        engineVersion = Self.engineVersion(at: executable)
+        version = Self.installedArtifactVersion() ?? engineVersion
         state = .ready(version.map { "FFmpeg \($0)" } ?? "FFmpeg")
         lastError = nil
     }
@@ -657,18 +666,39 @@ final class FFmpegServiceManager: ObservableObject {
                 session: session
             )
             latestVersion = release.version
-            latestArtifact = ManagedRuntimeArtifact(
+            let artifact = ManagedRuntimeArtifact(
                 version: release.version,
                 downloadURL: release.downloadURL,
                 sha256: release.sha256
             )
-            guard let version else {
+            latestArtifact = artifact
+            guard let installedVersion = version else {
                 updateStatus = .failed("Could not read the installed FFmpeg version")
                 return
             }
-            updateStatus = ManagedServiceReleaseAPI.isNewer(release.version, than: version)
-                ? .updateAvailable(release.version)
-                : .upToDate
+            let latestArtifactIsInstalled = await Task.detached(priority: .utility) {
+                Self.matchesInstalledArtifact(artifact)
+            }.value
+            if latestArtifactIsInstalled {
+                try? Self.writeInstalledArtifactVersion(release.version)
+                version = release.version
+                state = .ready("FFmpeg \(release.version)")
+                updateStatus = .upToDate
+            } else {
+                updateStatus = ManagedServiceReleaseAPI.isNewer(release.version, than: installedVersion)
+                    ? .updateAvailable(release.version)
+                    : .upToDate
+            }
+            AppLogService.shared.write(
+                "FFmpeg update check completed",
+                category: .appLifecycle,
+                metadata: [
+                    "engine_version": engineVersion ?? "unknown",
+                    "installed_version": version ?? "unknown",
+                    "latest_version": release.version,
+                    "latest_artifact_installed": latestArtifactIsInstalled ? "true" : "false"
+                ]
+            )
         } catch {
             latestVersion = nil
             latestArtifact = nil
@@ -682,13 +712,33 @@ final class FFmpegServiceManager: ObservableObject {
         updateStatus = .updating
         await install(artifact: latestArtifact, isUpdate: true)
         if case .failed = updateStatus { return }
-        guard lastError == nil,
-              let installedVersion = version,
-              !ManagedServiceReleaseAPI.isNewer(targetVersion, than: installedVersion) else {
+        let installedArtifactIsVerified = await Task.detached(priority: .utility) {
+            Self.matchesInstalledArtifact(latestArtifact)
+                && Self.installedArtifactVersion() == targetVersion
+        }.value
+        guard lastError == nil, installedArtifactIsVerified else {
+            AppLogService.shared.write(
+                "FFmpeg update verification failed",
+                category: .appLifecycle,
+                level: .error,
+                metadata: [
+                    "target_version": targetVersion,
+                    "installed_version": Self.installedArtifactVersion() ?? "unknown",
+                    "engine_version": engineVersion ?? "unknown"
+                ]
+            )
             updateStatus = .failed(lastError ?? "FFmpeg update verification failed")
             return
         }
         updateStatus = .upToDate
+        AppLogService.shared.write(
+            "FFmpeg update verified",
+            category: .appLifecycle,
+            metadata: [
+                "target_version": targetVersion,
+                "engine_version": engineVersion ?? "unknown"
+            ]
+        )
     }
 
     private func install(artifact: ManagedRuntimeArtifact, isUpdate: Bool) async {
@@ -748,7 +798,28 @@ final class FFmpegServiceManager: ObservableObject {
             : nil
     }
 
-    nonisolated private static func version(at executable: URL) -> String? {
+    nonisolated static func installedArtifactVersion(at root: URL = installRoot) -> String? {
+        let manifest = root.appendingPathComponent("version.txt")
+        guard let value = try? String(contentsOf: manifest, encoding: .utf8) else { return nil }
+        let normalized = ManagedServiceReleaseAPI.normalized(value)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    nonisolated private static func writeInstalledArtifactVersion(_ version: String) throws {
+        try Data(version.utf8).write(to: versionManifest, options: .atomic)
+    }
+
+    nonisolated private static func matchesInstalledArtifact(
+        _ artifact: ManagedRuntimeArtifact
+    ) -> Bool {
+        guard let executable = resolveExecutable(),
+              let actualHash = try? FileContentHasher.sha256(of: executable) else {
+            return false
+        }
+        return actualHash.caseInsensitiveCompare(artifact.sha256) == .orderedSame
+    }
+
+    nonisolated private static func engineVersion(at executable: URL) -> String? {
         guard let output = commandOutput(executable: executable, arguments: ["-version"]) else { return nil }
         let firstLine = output.split(separator: "\n").first.map(String.init) ?? ""
         let prefix = "ffmpeg version "
@@ -811,10 +882,7 @@ final class FFmpegServiceManager: ObservableObject {
             try manager.removeItem(at: managedExecutable)
         }
         try manager.moveItem(at: binary, to: managedExecutable)
-        try Data(artifact.version.utf8).write(
-            to: installRoot.appendingPathComponent("version.txt"),
-            options: .atomic
-        )
+        try writeInstalledArtifactVersion(artifact.version)
     }
 
     nonisolated fileprivate static func run(executable: URL, arguments: [String], environment: [String: String]? = nil) throws {

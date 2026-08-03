@@ -1,9 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Archive,
+  Box,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CalendarDays,
+  Code2,
   Eye,
   Files,
+  Film,
+  FileText,
+  History,
+  Image,
+  Music,
   FolderOpen,
   FolderPlus,
   MessageCircle,
@@ -15,6 +25,7 @@ import {
   Square,
   Trash2,
   WandSparkles,
+  X,
 } from "lucide-react";
 import type {
   AppSnapshot,
@@ -22,6 +33,7 @@ import type {
   FileRecord,
   LibrarySearchResult,
   LibrarySortField,
+  RagFeedbackDraft,
   ReindexMode,
   SortDirection,
 } from "../../shared/types";
@@ -52,7 +64,7 @@ export function LibraryPage({
   const t = (value: string): string => translate(value, snapshot.settings.appLanguage);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<FileCategory | null>(null);
-  const [sortField, setSortField] = useState<LibrarySortField>("relevance");
+  const [sortField, setSortField] = useState<LibrarySortField>("created");
   const [sortDirection, setSortDirection] = useState<SortDirection>("descending");
   const [offset, setOffset] = useState(0);
   const [results, setResults] = useState<LibrarySearchResult[]>([]);
@@ -60,10 +72,18 @@ export function LibraryPage({
   const [interpretedQuery, setInterpretedQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [smartSearchEnabled, setSmartSearchEnabled] = useState(false);
+  const [useAi, setUseAi] = useState(false);
   const [smartIntent, setSmartIntent] = useState("");
   const [searchError, setSearchError] = useState("");
   const [includeSemantic, setIncludeSemantic] = useState(true);
+  const [dateField, setDateField] = useState<"created" | "modified">("created");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [dateOpen, setDateOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [duplicatesOpen, setDuplicatesOpen] = useState(false);
+  const [organizeMenuOpen, setOrganizeMenuOpen] = useState(false);
   const [selectedDuplicatePaths, setSelectedDuplicatePaths] = useState<Set<string>>(new Set());
   const [reindexOpen, setReindexOpen] = useState(false);
   const [reindexMode, setReindexMode] = useState<ReindexMode>("all");
@@ -71,7 +91,7 @@ export function LibraryPage({
   const activeSearchRequest = useRef<string | null>(null);
   const handledExternalSearch = useRef<string | null>(null);
 
-  const search = useCallback(async (smart = false): Promise<void> => {
+  const search = useCallback(async (smart = false, recordHistory = false): Promise<void> => {
     const requestId = crypto.randomUUID();
     activeSearchRequest.current = requestId;
     setBusy(true);
@@ -80,9 +100,13 @@ export function LibraryPage({
       const response = await window.fileNest.searchLibrary({
         query,
         smart,
+        recordHistory,
         includeSemantic: smart || includeSemantic,
         requestId,
         category,
+        dateField,
+        dateFrom: dateFrom || null,
+        dateTo: dateTo || null,
         sortField,
         sortDirection,
         offset,
@@ -100,7 +124,7 @@ export function LibraryPage({
     } finally {
       if (activeSearchRequest.current === requestId) setBusy(false);
     }
-  }, [category, includeSemantic, offset, query, sortDirection, sortField]);
+  }, [category, dateField, dateFrom, dateTo, includeSemantic, offset, query, sortDirection, sortField]);
 
   useEffect(() => {
     setSmartSearchEnabled(false);
@@ -157,28 +181,28 @@ export function LibraryPage({
           <p>{t("Search and manage organized files; all indexes stay on this PC.")}</p>
         </div>
         <div className="page-actions">
-          <button className="primary-button" disabled={busy || snapshot.organizing} onClick={() => void run(() => window.fileNest.organizeNow())}>
+          <div className="organize-menu-wrap">
+          <button className="primary-button" disabled={busy || snapshot.organizing} onClick={() => setOrganizeMenuOpen((value) => !value)}>
             <WandSparkles size={17} />
-            {t("Organize New Files")}
+            {t("Organize Now")}
+            <ChevronDown size={15} />
           </button>
-          <button className="secondary-button" disabled={busy || snapshot.organizing} onClick={() => void run(() => window.fileNest.organizeExisting())}>
-            <WandSparkles size={17} />
-            {t("Organize Existing Files Now")}
-          </button>
-          <button className="secondary-button" disabled={busy || snapshot.organizing} onClick={() => void organizeSelectedFolders()}>
-            <FolderPlus size={17} />
-            {t("Choose Folders to Organize…")}
-          </button>
+          {organizeMenuOpen && <div className="organize-menu" role="menu">
+            <button role="menuitem" onClick={() => { setOrganizeMenuOpen(false); void run(() => window.fileNest.organizeNow()); }}><WandSparkles size={16} />{t("Organize New Files")}</button>
+            <button role="menuitem" onClick={() => { setOrganizeMenuOpen(false); void run(() => window.fileNest.organizeExisting()); }}><WandSparkles size={16} />{t("Organize Existing Files Now")}</button>
+            <button role="menuitem" onClick={() => { setOrganizeMenuOpen(false); void organizeSelectedFolders(); }}><FolderPlus size={16} />{t("Choose Folders to Organize…")}</button>
+          </div>}
+          </div>
           {snapshot.organizing && <>
             <IconButton label={snapshot.organizationPaused ? t("Resume Organization") : t("Pause Organization")} onClick={() => void (snapshot.organizationPaused ? window.fileNest.resumeOrganization() : window.fileNest.pauseOrganization()).then(onRefresh)}>{snapshot.organizationPaused ? <Play size={17} /> : <Pause size={17} />}</IconButton>
             <IconButton label={t("Stop Organization")} onClick={() => void window.fileNest.cancelOrganization().then(onRefresh)}><Square size={15} /></IconButton>
           </>}
+          <button className="secondary-button" disabled={busy || snapshot.duplicateScanProgress != null || snapshot.duplicateTrashProgress != null} onClick={() => setDuplicatesOpen(true)}>
+            <Files size={17} /> {t("Find Duplicates")}
+          </button>
           <button className="secondary-button" disabled={busy || snapshot.indexing} onClick={() => setReindexOpen(true)}>
             <RefreshCw className={snapshot.indexing ? "spin" : ""} size={17} />
             {t("Reindex")}
-          </button>
-          <button className="secondary-button" disabled={busy || snapshot.duplicateScanProgress != null || snapshot.duplicateTrashProgress != null} onClick={() => setDuplicatesOpen(true)}>
-            <Files size={17} /> {t("Find Duplicates")}
           </button>
           {snapshot.indexing && (
             <>
@@ -205,23 +229,32 @@ export function LibraryPage({
         </div>
       )}
       <div className="library-toolbar">
-        <div className="search-box">
-          <Search size={17} />
-          <input
-            value={query}
-            onChange={(event) => { setIncludeSemantic(true); setQuery(event.target.value); }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") { setOffset(0); void search(false); }
-            }}
-            placeholder={t("Search names, contents, notes, or dates such as 'last week'…")}
-          />
-          <button onClick={() => { setOffset(0); void search(false); }}>{t("Search")}</button>
+        <div className="library-search-row">
+          <div className="search-box">
+            <Search size={17} />
+            <input
+              value={query}
+              onChange={(event) => { setIncludeSemantic(true); setQuery(event.target.value); }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") { setOffset(0); void search(useAi, true); }
+              }}
+              placeholder={t("Search file names, titles, or contents…")}
+            />
+          </div>
+          <label className="ai-search-toggle">
+            <span>{t("Use AI")}</span>
+            <input type="checkbox" checked={useAi} onChange={(event) => setUseAi(event.target.checked)} />
+            <i />
+          </label>
+          <button className="secondary-button library-search-button" onClick={() => { setOffset(0); void search(useAi, true); }}>{t("Search")}</button>
+          <IconButton label={t("Search History")} className="library-history-button" onClick={() => { setHistoryOpen((value) => !value); setDateOpen(false); }}><History size={16} /></IconButton>
+          <button className={(dateFrom || dateTo || dateOpen) ? "date-filter-button selected" : "date-filter-button"} onClick={() => { setDateOpen((value) => !value); setHistoryOpen(false); }}><CalendarDays size={15} />{t("Filter by Date")}</button>
         </div>
         <div className="category-filters">
           <button className={category === null ? "selected" : ""} onClick={() => setFilterCategory(null)}>{t("All")}</button>
           {(Object.keys(categoryLabels) as FileCategory[]).map((item) => (
             <button key={item} className={category === item ? "selected" : ""} onClick={() => setFilterCategory(item)}>
-              {t(categoryLabels[item])}
+              <CategoryIcon category={item} />{t(categoryLabels[item])}
             </button>
           ))}
           <select
@@ -234,6 +267,7 @@ export function LibraryPage({
               setOffset(0);
             }}
           >
+            <option value="created:descending">{t("Date Added")}</option>
             <option value="relevance:descending">{t("Best match")}</option>
             <option value="modified:descending">{t("Newest modified")}</option>
             <option value="modified:ascending">{t("Oldest modified")}</option>
@@ -243,22 +277,20 @@ export function LibraryPage({
             <option value="name:descending">{t("Name Z–A")}</option>
           </select>
         </div>
-        {interpretedQuery && interpretedQuery !== query.trim() && (
+        {(dateOpen || historyOpen) && <div className="library-secondary-toolbar">
+          {dateOpen && <div className="date-filter"><select value={dateField} onChange={(event) => setDateField(event.target.value as "created" | "modified")}><option value="created">Date Added</option><option value="modified">Modified</option></select><label>From <input type="date" value={dateFrom} onChange={(event) => { setOffset(0); setDateFrom(event.target.value); }} /></label><label>To <input type="date" value={dateTo} onChange={(event) => { setOffset(0); setDateTo(event.target.value); }} /></label><button className="icon-button" aria-label="Clear date filter" onClick={() => { setDateFrom(""); setDateTo(""); }}><X size={14} /></button></div>}
+          {historyOpen && <div className="library-history"><header><strong>Recent Searches</strong>{snapshot.librarySearchHistory.length > 0 && <button onClick={() => void window.fileNest.clearLibrarySearchHistory().then(onRefresh)}>Clear</button>}</header>{snapshot.librarySearchHistory.length ? snapshot.librarySearchHistory.slice(0, 12).map((entry) => <div key={entry.id}><button onClick={() => { setQuery(entry.query); setUseAi(entry.smart); setHistoryOpen(false); setOffset(0); void search(entry.smart, false); }}><History size={14} /><span>{entry.query}</span><small>{entry.resultCount} results</small></button><button className="icon-button" aria-label={`Remove ${entry.query}`} onClick={() => void window.fileNest.deleteLibrarySearchHistory(entry.id).then(onRefresh)}><X size={13} /></button></div>) : <p>No saved searches yet.</p>}</div>}
+        </div>}
+        {query.trim() && interpretedQuery && interpretedQuery !== query.trim() && (
           <small className="query-interpretation">{t("Interpreted as")}: {interpretedQuery}</small>
         )}
+        {query.trim() && results.length > 0 && !busy && <div className="library-search-summary"><span><Sparkles size={14} />Found {total} related file{total === 1 ? "" : "s"} · {smartSearchEnabled ? "AI Search Plan + local retrieval" : "Keywords + local semantic ranking"}</span><button onClick={() => setFeedbackOpen(true)}>{snapshot.ragFeedbackRecords.some((item) => item.sourceKey === `${smartSearchEnabled ? "smart_search" : "search"}:${query.trim().normalize("NFKC").toLocaleLowerCase()}`) ? "Edit Evaluation" : "Evaluate Results"}</button></div>}
         {searchError && <small className="search-error">{searchError}</small>}
-        {query.trim() && !smartSearchEnabled && !busy && (
-          <div className="smart-search-suggestion">
-            <Sparkles size={16} />
-            <span><strong>{t("Not finding what you need?")}</strong><small>{t("Smart Search uses AI to understand your request more precisely and may take a little longer.")}</small></span>
-            <button onClick={() => void search(true)}>{t("Try Smart Search")}</button>
-          </div>
-        )}
         {smartSearchEnabled && smartIntent && <div className="smart-search-intent"><Sparkles size={14} /><span>{smartIntent}</span></div>}
       </div>
       <div className="file-table" role="table">
         <div className="file-table-header" role="row">
-          <span>{t("Name")}</span><span>{t("Category")}</span><span>{t("Size")}</span><span>{t("Modified")}</span><span>{t("Actions")}</span>
+          <span>{t("Name")}</span><span>{t("Category")}</span><span>{t("Size")}</span><span>{t("Date Added")}</span><span>{t("Actions")}</span>
         </div>
         <div className="file-table-body">
           {results.length === 0 ? (
@@ -266,23 +298,23 @@ export function LibraryPage({
               <FolderOpen size={38} /><strong>{t("No Files Found")}</strong><span>{t("Adjust the search criteria or place files in a watched folder.")}</span>
             </div>
           ) : results.map(({ file, matchKind, snippet, confidence }) => (
-            <div key={file.id} className="file-row" role="row" onDoubleClick={() => void window.fileNest.openFile(file.path)}>
+            <div key={file.id} className="file-row" role="row" onClick={() => onInspect(file)} onDoubleClick={() => void window.fileNest.openFile(file.path)}>
               <div className="file-name-cell">
                 <FileTypeIcon file={file} size={22} />
                 <div>
                   <strong>{file.name}</strong>
                   <span>{snippet || file.title || file.path}</span>
                 </div>
-                {file.indexedAt && <small>● {t(matchKind)} · {t("Confidence")} {Math.round(Math.min(1, Math.max(0, confidence)) * 100)}%</small>}
+                {query.trim() && file.indexedAt && <small>● {t(matchKind)} · {t("Confidence")} {Math.round(Math.min(1, Math.max(0, confidence)) * 100)}%</small>}
               </div>
               <span>{t(categoryLabels[file.category])}</span>
               <span>{formatBytes(file.size)}</span>
-              <span>{formatDate(file.mtime, snapshot.settings.appLanguage)}</span>
+              <span>{formatDate(file.discoveredAt, snapshot.settings.appLanguage)}</span>
               <div className="row-actions">
-                <IconButton label={t("File Preview")} onClick={() => onInspect(file)}><Eye size={16} /></IconButton>
-                {(file.category === "documents" || snapshot.settings.mediaTranscriptionEnabled && (file.category === "audio" || file.category === "videos")) && <IconButton label={t("Find with Chat")} onClick={() => onStartChat(file)}><MessageCircle size={16} /></IconButton>}
-                <IconButton label={t("Show in File Explorer")} onClick={() => void window.fileNest.showInExplorer(file.path)}><FolderOpen size={16} /></IconButton>
-                <IconButton label={t("Move to Recycle Bin")} onClick={() => { if (confirm(`${file.name}?`)) void window.fileNest.trashFile(file.id).then(onRefresh); }}><Trash2 size={16} /></IconButton>
+                <IconButton label={t("File Preview")} onClick={(event) => { event.stopPropagation(); onInspect(file); }}><Eye size={16} /></IconButton>
+                {(file.category === "documents" || snapshot.settings.mediaTranscriptionEnabled && (file.category === "audio" || file.category === "videos")) && <IconButton label={t("Find with Chat")} onClick={(event) => { event.stopPropagation(); onStartChat(file); }}><MessageCircle size={16} /></IconButton>}
+                <IconButton label={t("Show in File Explorer")} onClick={(event) => { event.stopPropagation(); void window.fileNest.showInExplorer(file.path); }}><FolderOpen size={16} /></IconButton>
+                <IconButton label={t("Move to Recycle Bin")} onClick={(event) => { event.stopPropagation(); if (confirm(`${file.name}?`)) void window.fileNest.trashFile(file.id).then(onRefresh); }}><Trash2 size={16} /></IconButton>
               </div>
             </div>
           ))}
@@ -297,8 +329,27 @@ export function LibraryPage({
       )}
       {reindexOpen && <ReindexDialog language={snapshot.settings.appLanguage} mode={reindexMode} categories={reindexCategories} onMode={setReindexMode} onCategories={setReindexCategories} onClose={() => setReindexOpen(false)} onStart={(mode, categories) => { setReindexOpen(false); void run(() => window.fileNest.reindexAll(mode, categories)); }} />}
       {duplicatesOpen && <DuplicateDialog snapshot={snapshot} selectedPaths={selectedDuplicatePaths} onSelectedPaths={setSelectedDuplicatePaths} onClose={() => setDuplicatesOpen(false)} onRefresh={onRefresh} />}
+      {feedbackOpen && <LibraryFeedbackEditor files={results.map((result) => result.file)} onCancel={() => setFeedbackOpen(false)} onSave={(draft) => { setFeedbackOpen(false); void window.fileNest.saveLibrarySearchFeedback(query, smartSearchEnabled, results.map((result) => result.file.id), draft).then(onRefresh); }} />}
     </main>
   );
+}
+
+function CategoryIcon({ category }: { category: FileCategory }): React.JSX.Element {
+  if (category === "documents") return <FileText size={14} />;
+  if (category === "images") return <Image size={14} />;
+  if (category === "videos") return <Film size={14} />;
+  if (category === "audio") return <Music size={14} />;
+  if (category === "code") return <Code2 size={14} />;
+  if (category === "archives") return <Archive size={14} />;
+  return <Box size={14} />;
+}
+
+function LibraryFeedbackEditor({ files, onCancel, onSave }: { files: FileRecord[]; onCancel(): void; onSave(draft: RagFeedbackDraft): void }): React.JSX.Element {
+  const [rating, setRating] = useState<RagFeedbackDraft["rating"]>("accurate");
+  const [reason, setReason] = useState("");
+  const [bestFileId, setBestFileId] = useState<number | null>(files[0]?.id ?? null);
+  const [bestFileReason, setBestFileReason] = useState("");
+  return <div className="modal-backdrop feedback-backdrop" role="presentation" onMouseDown={onCancel}><section className="feedback-editor" role="dialog" aria-modal="true" aria-label="Improve Future Results" onMouseDown={(event) => event.stopPropagation()}><header className="feedback-editor-header"><div><h2>Improve Future Results</h2><p>Your evaluation helps refine future local search results.</p></div><button onClick={onCancel} aria-label="Close feedback editor"><X size={18} /></button></header><div className="feedback-editor-content"><section><strong>Result Accuracy</strong><div className="feedback-rating"><button className={rating === "accurate" ? "selected" : ""} onClick={() => setRating("accurate")}>Accurate</button><button className={rating === "inaccurate" ? "selected" : ""} onClick={() => setRating("inaccurate")}>Inaccurate</button></div><label>{rating === "inaccurate" ? "What was inaccurate or missing?" : "What made these results accurate? (Optional)"}<textarea value={reason} maxLength={2000} onChange={(event) => setReason(event.target.value)} /></label></section><section className="feedback-best-file"><div><strong>Most Accurate File</strong><small>Select the file that best answers this search.</small></div>{bestFileId != null && <button className="feedback-clear" onClick={() => { setBestFileId(null); setBestFileReason(""); }}>Clear Selection</button>}<div className="feedback-file-list">{files.slice(0, 30).map((file) => <button key={file.id} className={bestFileId === file.id ? "selected" : ""} onClick={() => setBestFileId(file.id)}><span>{bestFileId === file.id ? "●" : "○"}</span><FileTypeIcon file={file} size={22} /><div><b>{file.name}</b><small>{file.path}</small></div></button>)}</div>{bestFileId != null && <label>Why is this the best match? (Optional)<input value={bestFileReason} maxLength={2000} placeholder="Add a concise reason" onChange={(event) => setBestFileReason(event.target.value)} /></label>}</section><p className="feedback-disclosure">FileNest analyzes only generalizable feedback. Built-in and shared skills are not modified.</p></div><footer><button className="secondary-button" onClick={onCancel}>Cancel</button><button className="primary-button" onClick={() => onSave({ rating, reason, bestFileId, bestFileReason })}>Save Feedback</button></footer></section></div>
 }
 
 function ReindexDialog({ language, mode, categories, onMode, onCategories, onClose, onStart }: {

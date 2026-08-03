@@ -549,7 +549,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\nINFO_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nINFO_FILE=\"${INFO_DIR}/FileNestBuildInfo.plist\"\nmkdir -p \"${INFO_DIR}\"\nrm -f \"${INFO_FILE}\"\n/usr/bin/plutil -create xml1 \"${INFO_FILE}\"\n/usr/bin/plutil -replace BuildDate -string \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"${INFO_FILE}\"\n/usr/bin/plutil -replace MarketingVersion -string \"${MARKETING_VERSION}\" \"${INFO_FILE}\"\n/usr/bin/plutil -replace BuildNumber -string \"${CURRENT_PROJECT_VERSION}\" \"${INFO_FILE}\"\n\nAPP_INFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\"\n/usr/bin/plutil -replace SUEnableAutomaticChecks -bool YES \"${APP_INFO_PLIST}\" 2>/dev/null \\\n  || /usr/bin/plutil -insert SUEnableAutomaticChecks -bool YES \"${APP_INFO_PLIST}\"\n/usr/bin/plutil -replace SUAllowsAutomaticUpdates -bool YES \"${APP_INFO_PLIST}\" 2>/dev/null \\\n  || /usr/bin/plutil -insert SUAllowsAutomaticUpdates -bool YES \"${APP_INFO_PLIST}\"\n/usr/bin/plutil -replace SUAutomaticallyUpdate -bool YES \"${APP_INFO_PLIST}\" 2>/dev/null \\\n  || /usr/bin/plutil -insert SUAutomaticallyUpdate -bool YES \"${APP_INFO_PLIST}\"\n\nif [[ -n \"${FILENEST_UPDATE_FEED_URL:-}\" ]]; then\n  /usr/bin/plutil -replace SUFeedURL -string \"${FILENEST_UPDATE_FEED_URL}\" \"${APP_INFO_PLIST}\" 2>/dev/null \\\n    || /usr/bin/plutil -insert SUFeedURL -string \"${FILENEST_UPDATE_FEED_URL}\" \"${APP_INFO_PLIST}\"\nelse\n  /usr/bin/plutil -remove SUFeedURL \"${APP_INFO_PLIST}\" 2>/dev/null || true\nfi\n\nif [[ -n \"${FILENEST_SPARKLE_PUBLIC_KEY:-}\" ]]; then\n  /usr/bin/plutil -replace SUPublicEDKey -string \"${FILENEST_SPARKLE_PUBLIC_KEY}\" \"${APP_INFO_PLIST}\" 2>/dev/null \\\n    || /usr/bin/plutil -insert SUPublicEDKey -string \"${FILENEST_SPARKLE_PUBLIC_KEY}\" \"${APP_INFO_PLIST}\"\nelse\n  /usr/bin/plutil -remove SUPublicEDKey \"${APP_INFO_PLIST}\" 2>/dev/null || true\nfi\n";
+			shellScript = "set -euo pipefail\nINFO_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nINFO_FILE=\"${INFO_DIR}/FileNestBuildInfo.plist\"\nmkdir -p \"${INFO_DIR}\"\nrm -f \"${INFO_FILE}\"\n/usr/bin/plutil -create xml1 \"${INFO_FILE}\"\n/usr/bin/plutil -replace BuildDate -string \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"${INFO_FILE}\"\n/usr/bin/plutil -replace MarketingVersion -string \"${MARKETING_VERSION}\" \"${INFO_FILE}\"\n/usr/bin/plutil -replace BuildNumber -string \"${CURRENT_PROJECT_VERSION}\" \"${INFO_FILE}\"\n\nAPP_INFO_PLIST=\"${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Info.plist\"\nif [[ ! -f \"${APP_INFO_PLIST}\" && -f \"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\" ]]; then\n  APP_INFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\"\nfi\nif [[ ! -f \"${APP_INFO_PLIST}\" ]]; then\n  exit 0\nfi\n/usr/bin/plutil -replace SUEnableAutomaticChecks -bool YES \"${APP_INFO_PLIST}\" 2>/dev/null \\\n  || /usr/bin/plutil -insert SUEnableAutomaticChecks -bool YES \"${APP_INFO_PLIST}\"\n/usr/bin/plutil -replace SUAllowsAutomaticUpdates -bool YES \"${APP_INFO_PLIST}\" 2>/dev/null \\\n  || /usr/bin/plutil -insert SUAllowsAutomaticUpdates -bool YES \"${APP_INFO_PLIST}\"\n/usr/bin/plutil -replace SUAutomaticallyUpdate -bool YES \"${APP_INFO_PLIST}\" 2>/dev/null \\\n  || /usr/bin/plutil -insert SUAutomaticallyUpdate -bool YES \"${APP_INFO_PLIST}\"\n\nif [[ -n \"${FILENEST_UPDATE_FEED_URL:-}\" ]]; then\n  /usr/bin/plutil -replace SUFeedURL -string \"${FILENEST_UPDATE_FEED_URL}\" \"${APP_INFO_PLIST}\" 2>/dev/null \\\n    || /usr/bin/plutil -insert SUFeedURL -string \"${FILENEST_UPDATE_FEED_URL}\" \"${APP_INFO_PLIST}\"\nelse\n  /usr/bin/plutil -remove SUFeedURL \"${APP_INFO_PLIST}\" 2>/dev/null || true\nfi\n\nif [[ -n \"${FILENEST_SPARKLE_PUBLIC_KEY:-}\" ]]; then\n  /usr/bin/plutil -replace SUPublicEDKey -string \"${FILENEST_SPARKLE_PUBLIC_KEY}\" \"${APP_INFO_PLIST}\" 2>/dev/null \\\n    || /usr/bin/plutil -insert SUPublicEDKey -string \"${FILENEST_SPARKLE_PUBLIC_KEY}\" \"${APP_INFO_PLIST}\"\nelse\n  /usr/bin/plutil -remove SUPublicEDKey \"${APP_INFO_PLIST}\" 2>/dev/null || true\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -784,7 +784,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright (c) 2026 FileNest";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 0.2.11;
+				MARKETING_VERSION = 0.2.12;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -872,7 +872,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright (c) 2026 FileNest";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 0.2.11;
+				MARKETING_VERSION = 0.2.12;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

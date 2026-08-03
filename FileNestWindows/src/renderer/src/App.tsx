@@ -15,6 +15,7 @@ export default function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [page, setPage] = useState<Page>("chat");
   const [inspectedFile, setInspectedFile] = useState<FileRecord | null>(null);
+  const [fileChatReturnPage, setFileChatReturnPage] = useState<Page>("library");
   const [dismissedProcessingIds, setDismissedProcessingIds] = useState<Set<number>>(new Set());
   const refresh = useCallback(
     async (): Promise<void> => setSnapshot(await window.fileNest.refresh()),
@@ -68,13 +69,8 @@ export default function App(): React.JSX.Element {
     await window.fileNest.deleteChat(id);
     await refresh();
   };
-  const clearChats = async (): Promise<void> => {
-    if (!confirm("Clear all chat history?")) return;
-    await window.fileNest.clearChats();
-    setInspectedFile(null);
-    await refresh();
-  };
   const startFileChat = async (file: FileRecord): Promise<void> => {
+    setFileChatReturnPage(page);
     await window.fileNest.beginChat(file.path);
     setPage("chat");
     setInspectedFile(file);
@@ -82,9 +78,10 @@ export default function App(): React.JSX.Element {
   };
   const visibleProcessingItems = snapshot.automaticProcessingItems.filter((item) => !dismissedProcessingIds.has(item.id));
   const t = (value: string): string => translate(value, snapshot.settings.appLanguage);
+  if (page === "settings") return <div className="settings-shell"><SettingsPage snapshot={snapshot} onRefresh={refresh} onClose={() => setPage("chat")} /></div>;
   return (
-    <div className={`app-shell ${inspectedFile ? "with-inspector" : ""}`}>
-      <Sidebar
+    <div className={`app-shell ${inspectedFile ? "with-inspector inspector-focus" : ""}`}>
+      {!inspectedFile && <Sidebar
         snapshot={snapshot}
         page={page}
         onPage={(next) => {
@@ -94,8 +91,7 @@ export default function App(): React.JSX.Element {
         onSelectChat={(id) => void selectChat(id)}
         onNewChat={() => void newChat()}
         onDeleteChat={(id) => void deleteChat(id)}
-        onClearChats={() => void clearChats()}
-      />
+      />}
       <div className="app-content">
         <div className={`persistent-page ${page === "chat" ? "active" : "hidden"}`}>
           <ChatPage
@@ -103,6 +99,10 @@ export default function App(): React.JSX.Element {
             active={page === "chat"}
             onRefresh={refresh}
             onInspect={setInspectedFile}
+            onReturnFromFileChat={() => {
+              setPage(fileChatReturnPage);
+              setInspectedFile(null);
+            }}
           />
         </div>
         {page === "library" && (
@@ -114,11 +114,8 @@ export default function App(): React.JSX.Element {
             onRefresh={refresh}
           />
         )}
-        {page === "settings" && (
-          <SettingsPage snapshot={snapshot} onRefresh={refresh} />
-        )}
       </div>
-      {inspectedFile && page !== "settings" && (
+      {inspectedFile && (
         <FileInspector
           file={
             snapshot.files.find((file) => file.id === inspectedFile.id) ??
@@ -126,6 +123,7 @@ export default function App(): React.JSX.Element {
           }
           language={snapshot.settings.appLanguage}
           onClose={() => setInspectedFile(null)}
+          onStartChat={(file) => void startFileChat(file)}
         />
       )}
       {visibleProcessingItems.length > 0 && (

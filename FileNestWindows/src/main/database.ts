@@ -4,7 +4,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import type { AppStatistics, ChatFeedback, ChatMessage, ChatRelatedFileMatch, ChatSession, DocumentChunk, FileCategory, FileRecord, Rule, Settings } from '../shared/types'
+import type { AppStatistics, ChatFeedback, ChatMessage, ChatRelatedFileMatch, ChatSession, DocumentChunk, FileCategory, FileRecord, LibrarySearchHistoryEntry, RagFeedbackDraft, RagFeedbackRecord, ReindexJobFileItem, ReindexJobSummary, ReindexMode, Rule, Settings } from '../shared/types'
 import { CANONICAL_TOKENIZER_PROFILE, CANONICAL_TOKENIZER_VERSION, estimateCanonicalTokens, GENERATION_FALLBACK_PROFILE } from './token-counter'
 import { CATEGORY_FOLDERS, createDefaultSettings } from './defaults'
 
@@ -93,6 +93,11 @@ export class FileNestDatabase {
         fused_candidates INTEGER NOT NULL, returned_results INTEGER NOT NULL,
         semantic_threshold REAL, reranker TEXT, duration_ms REAL NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS library_search_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, normalized_query TEXT NOT NULL, query TEXT NOT NULL,
+        smart INTEGER NOT NULL DEFAULT 0, result_count INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL, UNIQUE(normalized_query,smart)
+      );
       CREATE TABLE IF NOT EXISTS rules (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, pattern TEXT NOT NULL,
         target_folder TEXT NOT NULL, priority INTEGER NOT NULL, enabled INTEGER NOT NULL, action TEXT NOT NULL DEFAULT 'organize'
@@ -106,6 +111,23 @@ export class FileNestDatabase {
         role TEXT NOT NULL, content TEXT NOT NULL, ts TEXT NOT NULL, related_file_ids TEXT NOT NULL DEFAULT '[]',
         input_tokens INTEGER, output_tokens INTEGER, first_response_duration REAL, total_response_duration REAL,
         response_provider TEXT, response_model TEXT, related_file_matches TEXT NOT NULL DEFAULT '[]', feedback TEXT
+      );
+      CREATE TABLE IF NOT EXISTS rag_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, source_key TEXT NOT NULL UNIQUE, source_kind TEXT NOT NULL,
+        message_id INTEGER REFERENCES chat_messages(id) ON DELETE CASCADE, session_id INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE,
+        search_query TEXT, result_file_ids TEXT NOT NULL DEFAULT '[]', rating TEXT NOT NULL,
+        reason TEXT, best_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL, best_file_reason TEXT,
+        analysis_status TEXT NOT NULL DEFAULT 'pending', analysis_summary TEXT, analysis_error TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, analyzed_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS reindex_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, mode TEXT NOT NULL, categories TEXT NOT NULL DEFAULT '[]',
+        total INTEGER NOT NULL, completed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, current_file_name TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS reindex_job_files (
+        job_id INTEGER NOT NULL REFERENCES reindex_jobs(id) ON DELETE CASCADE, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        state TEXT NOT NULL DEFAULT 'queued', error TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(job_id,file_id)
       );
       CREATE TABLE IF NOT EXISTS token_usage (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
@@ -124,6 +146,9 @@ export class FileNestDatabase {
       CREATE INDEX IF NOT EXISTS idx_chunks_file ON document_chunks(file_id, chunk_index);
       CREATE INDEX IF NOT EXISTS idx_parents_file ON document_parents(file_id, parent_index);
       CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, ts);
+      CREATE INDEX IF NOT EXISTS idx_rag_feedback_updated ON rag_feedback(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_library_search_history_updated ON library_search_history(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_reindex_job_files_state ON reindex_job_files(job_id,state);
     `)
     const embeddingColumns = this.rows('PRAGMA table_info(embeddings)').map((row) => String(row.name))
     if (!embeddingColumns.includes('vector_text')) this.db.run('ALTER TABLE embeddings ADD COLUMN vector_text TEXT')
@@ -619,6 +644,128 @@ export class FileNestDatabase {
     await this.flush()
   }
 
+  listRagFeedback(limit = 30): RagFeedbackRecord[] {
+    return this.rows('SELECT * FROM rag_feedback ORDER BY updated_at DESC LIMIT ?', [Math.max(1, Math.min(200, limit))]).map(mapRagFeedback)
+  }
+
+  listLibrarySearchHistory(limit = 20): LibrarySearchHistoryEntry[] {
+    return this.rows('SELECT * FROM library_search_history ORDER BY updated_at DESC LIMIT ?', [Math.max(1, Math.min(100, limit))]).map((row) => ({ id: Number(row.id), query: String(row.query), smart: Boolean(row.smart), resultCount: Number(row.result_count), updatedAt: String(row.updated_at) }))
+  }
+
+  async saveLibrarySearchHistory(query: string, smart: boolean, resultCount: number): Promise<void> {
+    const trimmed = query.trim().slice(0, 500)
+    const normalized = trimmed.normalize('NFKC').toLocaleLowerCase()
+    if (!normalized) return
+    this.db.run(`INSERT INTO library_search_history(normalized_query,query,smart,result_count,updated_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(normalized_query,smart) DO UPDATE SET query=excluded.query,result_count=excluded.result_count,updated_at=excluded.updated_at`, [normalized, trimmed, smart ? 1 : 0, Math.max(0, Math.floor(resultCount)), new Date().toISOString()])
+    this.db.run('DELETE FROM library_search_history WHERE id NOT IN (SELECT id FROM library_search_history ORDER BY updated_at DESC LIMIT 50)')
+    await this.flush()
+  }
+
+  async deleteLibrarySearchHistory(id: number): Promise<void> { this.db.run('DELETE FROM library_search_history WHERE id=?', [id]); await this.flush() }
+  async clearLibrarySearchHistory(): Promise<void> { this.db.run('DELETE FROM library_search_history'); await this.flush() }
+
+  ragFeedback(id: number): RagFeedbackRecord | null {
+    const row = this.rows('SELECT * FROM rag_feedback WHERE id=?', [id])[0]
+    return row ? mapRagFeedback(row) : null
+  }
+
+  pendingRagFeedback(limit = 10): RagFeedbackRecord[] {
+    return this.rows("SELECT * FROM rag_feedback WHERE analysis_status IN ('pending','failed') ORDER BY updated_at ASC LIMIT ?", [Math.max(1, Math.min(100, limit))]).map(mapRagFeedback)
+  }
+
+  async updateRagFeedbackAnalysis(id: number, status: RagFeedbackRecord['analysisStatus'], summary: string | null = null, error: string | null = null): Promise<void> {
+    const now = new Date().toISOString()
+    this.db.run('UPDATE rag_feedback SET analysis_status=?,analysis_summary=?,analysis_error=?,analyzed_at=?,updated_at=? WHERE id=?', [
+      status,
+      normalizeFeedbackText(summary),
+      normalizeFeedbackText(error),
+      status === 'applied' ? now : null,
+      now,
+      id
+    ])
+    await this.flush()
+  }
+
+  async saveChatRagFeedback(messageId: number, feedback: ChatFeedback | null, draft: Partial<RagFeedbackDraft> = {}): Promise<void> {
+    this.db.run('BEGIN')
+    try {
+      this.db.run("UPDATE chat_messages SET feedback=? WHERE id=? AND role='assistant'", [feedback, messageId])
+      if (feedback == null) {
+        this.db.run('DELETE FROM rag_feedback WHERE source_key=?', [`chat:${messageId}`])
+      } else {
+        const message = this.rows("SELECT session_id,related_file_ids FROM chat_messages WHERE id=? AND role='assistant'", [messageId])[0]
+        if (!message) throw new Error('The assistant message no longer exists')
+        const now = new Date().toISOString()
+        const rating = draft.rating ?? (feedback === 'helpful' ? 'accurate' : 'inaccurate')
+        this.db.run(`INSERT INTO rag_feedback(source_key,source_kind,message_id,session_id,result_file_ids,rating,reason,best_file_id,best_file_reason,analysis_status,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?)
+          ON CONFLICT(source_key) DO UPDATE SET rating=excluded.rating,reason=excluded.reason,best_file_id=excluded.best_file_id,best_file_reason=excluded.best_file_reason,analysis_status='pending',analysis_summary=NULL,analysis_error=NULL,updated_at=excluded.updated_at,analyzed_at=NULL`, [
+          `chat:${messageId}`, 'chat', messageId, Number(message.session_id), String(message.related_file_ids ?? '[]'), rating,
+          normalizeFeedbackText(draft.reason), draft.bestFileId ?? null, normalizeFeedbackText(draft.bestFileReason), now, now
+        ])
+      }
+      this.db.run('COMMIT')
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
+    }
+    await this.flush()
+  }
+
+  async saveLibrarySearchRagFeedback(query: string, smart: boolean, resultFileIds: number[], draft: RagFeedbackDraft): Promise<void> {
+    const normalizedQuery = query.trim().normalize('NFKC').toLocaleLowerCase().slice(0, 500)
+    if (!normalizedQuery) throw new Error('A search query is required for feedback')
+    const sourceKind = smart ? 'smart_search' : 'search'
+    const now = new Date().toISOString()
+    this.db.run(`INSERT INTO rag_feedback(source_key,source_kind,search_query,result_file_ids,rating,reason,best_file_id,best_file_reason,analysis_status,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?, 'pending',?,?)
+      ON CONFLICT(source_key) DO UPDATE SET result_file_ids=excluded.result_file_ids,rating=excluded.rating,reason=excluded.reason,best_file_id=excluded.best_file_id,best_file_reason=excluded.best_file_reason,analysis_status='pending',analysis_summary=NULL,analysis_error=NULL,updated_at=excluded.updated_at,analyzed_at=NULL`, [
+      `${sourceKind}:${normalizedQuery}`, sourceKind, query.trim().slice(0, 500), JSON.stringify([...new Set(resultFileIds)].slice(0, 100)), draft.rating,
+      normalizeFeedbackText(draft.reason), draft.bestFileId ?? null, normalizeFeedbackText(draft.bestFileReason), now, now
+    ])
+    await this.flush()
+  }
+
+  async createReindexJob(mode: ReindexMode, categories: FileCategory[], fileIds: number[]): Promise<number> {
+    const now = new Date().toISOString()
+    this.db.run('BEGIN')
+    try {
+      this.db.run("UPDATE reindex_jobs SET status='interrupted',updated_at=? WHERE status IN ('running','paused','stopping')", [now])
+      this.db.run('INSERT INTO reindex_jobs(status,mode,categories,total,created_at,updated_at) VALUES(?,?,?,?,?,?)', ['running', mode, JSON.stringify(categories), fileIds.length, now, now])
+      const id = Number(this.scalar('SELECT last_insert_rowid()'))
+      for (const fileId of fileIds) this.db.run('INSERT INTO reindex_job_files(job_id,file_id,state,updated_at) VALUES(?,?,?,?)', [id, fileId, 'queued', now])
+      this.db.run('COMMIT')
+      await this.flush()
+      return id
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
+    }
+  }
+
+  async updateReindexJobFile(jobId: number, fileId: number, state: ReindexJobFileItem['state'], error: string | null = null): Promise<void> {
+    const now = new Date().toISOString()
+    this.db.run('UPDATE reindex_job_files SET state=?,error=?,updated_at=? WHERE job_id=? AND file_id=?', [state, error?.slice(0, 1_000) ?? null, now, jobId, fileId])
+    const counts = this.rows("SELECT SUM(state='completed') AS completed,SUM(state='failed') AS failed FROM reindex_job_files WHERE job_id=?", [jobId])[0]
+    this.db.run('UPDATE reindex_jobs SET completed=?,failed=?,updated_at=? WHERE id=?', [Number(counts?.completed ?? 0), Number(counts?.failed ?? 0), now, jobId])
+    await this.flush()
+  }
+
+  async updateReindexJob(jobId: number, status: ReindexJobSummary['status'], currentFileName: string | null = null): Promise<void> {
+    this.db.run('UPDATE reindex_jobs SET status=?,current_file_name=?,updated_at=? WHERE id=?', [status, currentFileName, new Date().toISOString(), jobId])
+    await this.flush()
+  }
+
+  latestReindexJob(): ReindexJobSummary | null {
+    const job = this.rows('SELECT * FROM reindex_jobs ORDER BY id DESC LIMIT 1')[0]
+    if (!job) return null
+    const files = this.rows(`SELECT queue.file_id,files.name,files.ext,queue.state,queue.error,queue.updated_at
+      FROM reindex_job_files queue JOIN files ON files.id=queue.file_id WHERE queue.job_id=? ORDER BY queue.updated_at DESC`, [Number(job.id)])
+      .map((row): ReindexJobFileItem => ({ fileId: Number(row.file_id), name: String(row.name), ext: String(row.ext), state: row.state === 'processing' || row.state === 'completed' || row.state === 'failed' ? row.state : 'queued', error: row.error == null ? null : String(row.error), updatedAt: String(row.updated_at) }))
+    return { id: Number(job.id), status: normalizeReindexStatus(String(job.status)), mode: normalizeReindexMode(String(job.mode)), total: Number(job.total), completed: Number(job.completed), failed: Number(job.failed), currentFileName: job.current_file_name == null ? null : String(job.current_file_name), createdAt: String(job.created_at), updatedAt: String(job.updated_at), files }
+  }
+
   async addMessage(
     sessionId: number,
     role: ChatMessage['role'],
@@ -769,6 +916,40 @@ function mapMessage(row: Record<string, unknown>): ChatMessage {
     responseModel: row.response_model == null ? null : String(row.response_model),
     feedback: row.feedback === 'helpful' || row.feedback === 'notHelpful' ? row.feedback : null
   }
+}
+
+function mapRagFeedback(row: Record<string, unknown>): RagFeedbackRecord {
+  const status = String(row.analysis_status)
+  return {
+    id: Number(row.id),
+    sourceKey: String(row.source_key),
+    sourceKind: row.source_kind === 'smart_search' ? 'smartSearch' : row.source_kind === 'search' ? 'search' : 'chat',
+    messageId: row.message_id == null ? null : Number(row.message_id),
+    sessionId: row.session_id == null ? null : Number(row.session_id),
+    searchQuery: row.search_query == null ? null : String(row.search_query),
+    resultFileIds: JSON.parse(String(row.result_file_ids || '[]')) as number[],
+    rating: row.rating === 'accurate' ? 'accurate' : 'inaccurate',
+    reason: row.reason == null ? null : String(row.reason),
+    bestFileId: row.best_file_id == null ? null : Number(row.best_file_id),
+    bestFileReason: row.best_file_reason == null ? null : String(row.best_file_reason),
+    analysisStatus: status === 'analyzing' || status === 'applied' || status === 'failed' ? status : 'pending',
+    analysisSummary: row.analysis_summary == null ? null : String(row.analysis_summary),
+    analysisError: row.analysis_error == null ? null : String(row.analysis_error),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at), analyzedAt: row.analyzed_at == null ? null : String(row.analyzed_at)
+  }
+}
+
+function normalizeFeedbackText(value: string | null | undefined): string | null {
+  const normalized = value?.trim().slice(0, 2_000) ?? ''
+  return normalized || null
+}
+
+function normalizeReindexStatus(value: string): ReindexJobSummary['status'] {
+  return value === 'paused' || value === 'stopping' || value === 'stopped' || value === 'completed' || value === 'completedWithErrors' || value === 'interrupted' ? value : 'running'
+}
+
+function normalizeReindexMode(value: string): ReindexMode {
+  return value === 'unindexed' || value === 'embeddings' || value === 'media' ? value : 'all'
 }
 
 async function directorySize(root: string): Promise<number> {

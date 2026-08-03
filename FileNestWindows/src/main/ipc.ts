@@ -1,11 +1,12 @@
 import { BrowserWindow, ipcMain } from 'electron'
-import type { ChatFeedback, FileCategory, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { ChatFeedback, FileCategory, LibrarySearchRequest, RagFeedbackDraft, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 import { AppController } from './app-controller'
 
 export function registerIpc(controller: AppController): void {
   ipcMain.handle('app:snapshot', () => controller.snapshot())
   ipcMain.handle('app:refresh', () => controller.snapshot())
   ipcMain.handle('settings:update', (_event, patch: Partial<Settings>) => controller.updateSettings(patch))
+  ipcMain.handle('settings:default-watch-directories', () => controller.defaultWatchDirectories())
   ipcMain.handle('dialog:watch-directories', () => controller.chooseWatchDirectories())
   ipcMain.handle('dialog:organized-root', () => controller.chooseOrganizedRoot())
   ipcMain.handle('dialog:organization-directories', () => controller.chooseOrganizationDirectories())
@@ -22,11 +23,14 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle('organizer:cancel', () => controller.cancelOrganization())
   ipcMain.handle('indexer:reindex-all', (_event, mode?: ReindexMode, categories?: FileCategory[]) => controller.reindexAll(mode, categories))
   ipcMain.handle('indexer:reindex-file', (_event, id: number) => controller.reindexFile(id))
+  ipcMain.handle('indexer:retry-files', (_event, fileIds: number[]) => controller.retryReindexFiles(fileIds))
   ipcMain.handle('indexer:pause', () => controller.pauseIndexing())
   ipcMain.handle('indexer:resume', () => controller.resumeIndexing())
   ipcMain.handle('indexer:cancel', () => controller.cancelIndexing())
   ipcMain.handle('files:search', (_event, query: string, category?: FileCategory | null) => controller.searchFiles(query, category))
   ipcMain.handle('files:smart-search', (event, request: LibrarySearchRequest) => controller.searchLibrary(request, event.sender))
+  ipcMain.handle('library:history-delete', (_event, id: number) => controller.deleteLibrarySearchHistory(id))
+  ipcMain.handle('library:history-clear', () => controller.clearLibrarySearchHistory())
   ipcMain.handle('quick-search:submit', (event, query: string) => {
     controller.requestLibrarySearch(query)
     BrowserWindow.fromWebContents(event.sender)?.hide()
@@ -50,7 +54,9 @@ export function registerIpc(controller: AppController): void {
   ipcMain.handle('chat:begin', (_event, path?: string | null) => controller.beginChat(path))
   ipcMain.handle('chat:select', (_event, id: number) => controller.selectChat(id))
   ipcMain.handle('chat:load-earlier', () => controller.loadEarlierChatMessages())
-  ipcMain.handle('chat:feedback', (_event, messageId: number, feedback: ChatFeedback | null) => controller.saveChatFeedback(messageId, feedback))
+  ipcMain.handle('chat:feedback', (_event, messageId: number, feedback: ChatFeedback | null, draft?: Partial<RagFeedbackDraft>) => controller.saveChatFeedback(messageId, feedback, draft))
+  ipcMain.handle('library:feedback', (_event, query: string, smart: boolean, fileIds: number[], draft: RagFeedbackDraft) => controller.saveLibrarySearchFeedback(query, smart, fileIds, draft))
+  ipcMain.handle('feedback:analyze', (_event, id: number) => controller.analyzeRagFeedback(id))
   ipcMain.handle('chat:seen', (_event, id: number) => controller.markChatSeen(id))
   ipcMain.handle('chat:delete', (_event, id: number) => controller.deleteChat(id))
   ipcMain.handle('chat:clear', () => controller.clearChats())

@@ -1,9 +1,8 @@
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Bot,
   Check,
-  ChevronRight,
   CircleAlert,
   Database,
   Download,
@@ -12,6 +11,7 @@ import {
   FolderPlus,
   Gauge,
   HardDrive,
+  ArrowLeft,
   Languages,
   ListChecks,
   LoaderCircle,
@@ -20,64 +20,73 @@ import {
   Plus,
   RotateCw,
   Save,
+  Search,
   Settings2,
   ShieldCheck,
+  Square,
   Sparkles,
   Trash2,
+  WandSparkles,
+  X,
 } from "lucide-react";
 import type { AiConnectivityCheck, AppLanguage, AppSnapshot, ReindexMode, Rule, Settings } from "../../shared/types";
 import { formatBytes, IconButton } from "./components";
 import { translate } from "./i18n";
 
-type Section = "general" | "indexing" | "ai" | "skills" | "statistics" | "rules";
+type Section = "general" | "indexing" | "reindex" | "ai" | "skills" | "statistics" | "rules";
 const SettingsLanguageContext = createContext<AppLanguage>("en");
 
 export function SettingsPage({
   snapshot,
   onRefresh,
+  onClose,
 }: {
   snapshot: AppSnapshot;
   onRefresh(): Promise<void>;
+  onClose?(): void;
 }): React.JSX.Element {
   const [section, setSection] = useState<Section>("general");
+  const [query, setQuery] = useState("");
   const t = (value: string): string =>
     translate(value, snapshot.settings.appLanguage);
-  const items: Array<{ id: Section; label: string; icon: React.JSX.Element }> =
+  const items: Array<{ id: Section; label: string; detail: string; group: string; icon: React.JSX.Element }> =
     [
-      { id: "general", label: "General", icon: <Settings2 size={17} /> },
-      { id: "indexing", label: "Index & Organize", icon: <FileCog size={17} /> },
-      { id: "ai", label: "AI Models", icon: <Bot size={17} /> },
-      { id: "skills", label: "Agent Skills", icon: <Sparkles size={17} /> },
-      { id: "statistics", label: "Statistics", icon: <Activity size={17} /> },
-      { id: "rules", label: "Organization Rules", icon: <ListChecks size={17} /> },
+      { id: "general", label: "General", detail: "General settings and application behavior", group: "File Management", icon: <Settings2 size={17} /> },
+      { id: "indexing", label: "Index & Organize", detail: "Control indexing, organization, and file processing", group: "File Management", icon: <FileCog size={17} /> },
+      ...(snapshot.reindexJobSummary ? [{ id: "reindex" as const, label: "Reindex Task", detail: "Monitor the active reindex queue and control its progress", group: "File Management", icon: <RotateCw size={17} /> }] : []),
+      { id: "ai", label: "AI Models", detail: "Configure chat, embedding, OCR, and local services", group: "Artificial Intelligence", icon: <Bot size={17} /> },
+      { id: "skills", label: "AI Skills", detail: "Review and manage learned AI skills", group: "Artificial Intelligence", icon: <Sparkles size={17} /> },
+      { id: "statistics", label: "Statistics", detail: "Review file, index, token, and storage activity", group: "Insights", icon: <Activity size={17} /> },
+      { id: "rules", label: "Organization Rules", detail: "Create and manage file organization rules", group: "Insights", icon: <ListChecks size={17} /> },
     ];
+  const visibleItems = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) return items;
+    return items.filter((item) => [item.label, item.detail, item.group].some((value) => value.toLowerCase().includes(normalizedQuery)));
+  }, [items, query]);
+  const groups = [...new Set(visibleItems.map((item) => item.group))];
+  const selectedItem = items.find((item) => item.id === section) ?? items[0];
   return (
     <SettingsLanguageContext.Provider value={snapshot.settings.appLanguage}>
-    <main className="settings-page">
-      <header className="page-header">
-        <div>
-          <h1>{t("Settings")}</h1>
-          <p>Manage file watching, organization rules, indexing, AI models, and statistics</p>
+    <main className="settings-page settings-workspace">
+      <aside className="settings-sidebar">
+        <div className="settings-sidebar-title">
+          {onClose ? <button className="settings-back" aria-label={t("Back to FileNest")} onClick={onClose}><ArrowLeft size={16} />{t("Back to FileNest")}</button> : <><img src="./brand-mark.png" alt="" /><strong>FileNest {t("Settings")}</strong></>}
         </div>
-        <span className="auto-save">
-          <Check size={15} />
-          Changes save automatically
-        </span>
-      </header>
-      <div className="settings-layout">
+        <label className="settings-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("Search Settings")} />{query && <button type="button" aria-label={t("Clear Search")} onClick={() => setQuery("")}><X size={14} /></button>}</label>
         <nav className="settings-nav">
-          {items.map((item) => (
-            <button
-              key={item.id}
-              className={section === item.id ? "selected" : ""}
-              onClick={() => setSection(item.id)}
-            >
-              {item.icon}
-              {t(item.label)}
-              <ChevronRight size={15} />
-            </button>
-          ))}
+          {groups.map((group) => <div className="settings-nav-group" key={group}><small>{group}</small>{visibleItems.filter((item) => item.group === group).map((item) => (
+            <button key={item.id} className={section === item.id ? "selected" : ""} onClick={() => setSection(item.id)}>{item.icon}{t(item.label)}</button>
+          ))}</div>)}
+          {!visibleItems.length && <p className="empty-state">No settings found.</p>}
         </nav>
+      </aside>
+      <section className="settings-detail">
+        <header className="settings-detail-header">
+          <span className="settings-detail-icon">{selectedItem.icon}</span>
+          <div><h1>{t(selectedItem.label)}</h1><p>{t(selectedItem.detail)}</p></div>
+          <span className="auto-save"><Check size={15} />{t("Changes save automatically")}</span>
+        </header>
         <div className="settings-content">
           {section === "general" && (
             <GeneralSettings snapshot={snapshot} t={t} onRefresh={onRefresh} />
@@ -85,6 +94,7 @@ export function SettingsPage({
           {section === "indexing" && (
             <IndexSettings snapshot={snapshot} t={t} onRefresh={onRefresh} />
           )}
+          {section === "reindex" && <ReindexActivity snapshot={snapshot} t={t} onRefresh={onRefresh} />}
           {section === "ai" && (
             <AiSettings snapshot={snapshot} t={t} onRefresh={onRefresh} />
           )}
@@ -96,10 +106,34 @@ export function SettingsPage({
             <RulesSettings snapshot={snapshot} t={t} onRefresh={onRefresh} />
           )}
         </div>
-      </div>
+      </section>
     </main>
     </SettingsLanguageContext.Provider>
   );
+}
+
+function ReindexActivity({ snapshot, t, onRefresh }: ChildProps): React.JSX.Element {
+  const summary = snapshot.reindexJobSummary;
+  const [filter, setFilter] = useState<"all" | "queued" | "processing" | "completed" | "failed">("all");
+  const [selectedFailedIds, setSelectedFailedIds] = useState<Set<number>>(new Set());
+  useEffect(() => {
+    setSelectedFailedIds(new Set(summary?.files.filter((file) => file.state === "failed").map((file) => file.fileId) ?? []));
+  }, [summary?.id, summary?.failed]);
+  if (!summary) return <div className="settings-sections"><SettingsSection title="Reindex Activity" subtitle="Durable indexing tasks and individual file recovery"><div className="reindex-empty"><Check size={30} /><strong>No Reindex Task</strong><span>There is no reindex task to monitor.</span></div></SettingsSection></div>;
+  const files = summary.files.filter((file) => filter === "all" || file.state === filter);
+  const processing = summary.files.filter((file) => file.state === "processing").length;
+  const queued = summary.files.filter((file) => file.state === "queued").length;
+  const settled = summary.completed + summary.failed;
+  const progress = summary.total ? Math.min(1, settled / summary.total) : 0;
+  const active = ["running", "paused", "stopping"].includes(summary.status);
+  const statusTitle = summary.status === "running" ? "Reindexing" : summary.status === "paused" ? "Reindex Paused" : summary.status === "completed" ? "Reindex Complete" : summary.status === "completedWithErrors" ? "Reindex Completed with Errors" : summary.status === "interrupted" ? "Reindex Interrupted" : "Reindex Ready to Resume";
+  const retryFailed = async (fileIds = [...selectedFailedIds]): Promise<void> => { await window.fileNest.retryReindexFiles(fileIds); await onRefresh(); };
+  return <div className="settings-sections"><SettingsSection title="Reindex Activity" subtitle="The task remains visible across restarts and failed files can be retried individually">
+    <section className="reindex-progress-card"><div className="reindex-progress-head"><div><span className={`reindex-status-icon ${summary.status}`}><RotateCw size={19} /></span><div><strong>{statusTitle}</strong><small>{summary.currentFileName || (active ? "Preparing the next file" : "The reindex task is retained locally")}</small></div></div><div className="button-row">{summary.status === "running" && <button className="secondary-button" onClick={() => void window.fileNest.pauseIndexing().then(onRefresh)}><Pause size={16} />Pause</button>}{summary.status === "paused" && <button className="primary-button" onClick={() => void window.fileNest.resumeIndexing().then(onRefresh)}><Play size={16} />Resume</button>}{active && <button className="secondary-button danger" onClick={() => void window.fileNest.cancelIndexing().then(onRefresh)}><Square size={16} />Stop</button>}{summary.failed > 0 && <button className="primary-button" disabled={!selectedFailedIds.size} onClick={() => void retryFailed()}><RotateCw size={16} />Retry Selected ({selectedFailedIds.size})</button>}</div></div><div className="reindex-progress-track"><span style={{ width: `${progress * 100}%` }} /></div><div className="reindex-progress-meta"><span>{settled} of {summary.total} files</span><span>{Math.round(progress * 100)}%</span></div>{summary.failed > 0 && <p className="reindex-warning">Select the failed files to retry from this queue.</p>}</section>
+    <div className="reindex-summary"><button onClick={() => setFilter("queued")}><strong>{queued + processing}</strong><small>Pending</small></button><button onClick={() => setFilter("completed")}><strong>{summary.completed}</strong><small>Completed</small></button><button onClick={() => setFilter("failed")}><strong>{summary.failed}</strong><small>Failed</small></button><button onClick={() => setFilter("all")}><strong>{summary.total}</strong><small>Total</small></button></div>
+    <div className="reindex-queue-header"><div><strong>Reindex Queue</strong><small>{files.length} visible file{files.length === 1 ? "" : "s"}</small></div><div className="reindex-filter">{(["all", "queued", "processing", "completed", "failed"] as const).map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{t(item === "all" ? "All" : item)}</button>)}</div></div>
+    <div className="reindex-file-list">{files.length ? files.map((file) => <div key={file.fileId}>{file.state === "failed" ? <label className="reindex-select"><input type="checkbox" checked={selectedFailedIds.has(file.fileId)} onChange={(event) => setSelectedFailedIds((current) => { const next = new Set(current); event.target.checked ? next.add(file.fileId) : next.delete(file.fileId); return next; })} /><span /></label> : <span className="reindex-select-placeholder" />}<span className={`reindex-state ${file.state}`}>{file.state}</span><div><b>{file.name}</b><small>{file.error || file.ext}</small></div>{file.state === "failed" && <button className="secondary-button" onClick={() => void retryFailed([file.fileId])}>Retry</button>}</div>) : <p className="empty-state">No files in this view.</p>}</div>
+  </SettingsSection></div>;
 }
 
 type ChildProps = {
@@ -109,6 +143,7 @@ type ChildProps = {
 };
 
 function AgentSkillsSettings({ snapshot, t, onRefresh }: ChildProps): React.JSX.Element {
+  const [sourceTab, setSourceTab] = useState<"bundled" | "managed" | "sharedUser">("bundled");
   const run = async (action: () => Promise<unknown>): Promise<void> => {
     try { await action(); await onRefresh(); }
     catch (error) { alert(error instanceof Error ? error.message : String(error)); }
@@ -118,24 +153,29 @@ function AgentSkillsSettings({ snapshot, t, onRefresh }: ChildProps): React.JSX.
     { origin: "managed", title: "FileNest Learning", hint: "Imported or feedback-created packages" },
     { origin: "sharedUser", title: "Shared Skills", hint: "Packages found in your shared Agent Skills folder" },
   ] as const;
+  const selectedGroup = groups.find((group) => group.origin === sourceTab)!;
+  const selectedSkills = snapshot.agentSkills.filter((skill) => skill.origin === selectedGroup.origin);
   return <div className="settings-sections">
-    <SettingsSection title="Agent Skills" subtitle="Reusable local AI instructions are discovered progressively and cannot execute arbitrary scripts">
+    <SettingsSection title="AI Skills" subtitle="Reusable local AI instructions are discovered progressively and cannot execute arbitrary scripts">
       <div className="button-row">
         <button className="secondary-button" onClick={() => void run(() => window.fileNest.openAgentSkillsFolder())}><FolderOpen size={16} />Open Skills Folder</button>
         <button className="secondary-button" onClick={() => void run(() => window.fileNest.importAgentSkill())}><Download size={16} />Import Skill…</button>
         <button className="secondary-button" onClick={() => void run(() => window.fileNest.refreshAgentSkills())}><RotateCw size={16} />Refresh Skills</button>
       </div>
-      {groups.map((group) => {
-        const skills = snapshot.agentSkills.filter((skill) => skill.origin === group.origin);
-        return <div className="skill-group" key={group.origin}>
-          <strong>{t(group.title)}</strong><small>{group.hint}</small>
-          {skills.length ? skills.map((skill) => <div className="skill-row" key={skill.skillFilePath}>
+      <div className="skill-source-tabs">{groups.map((group) => <button key={group.origin} className={sourceTab === group.origin ? "selected" : ""} onClick={() => setSourceTab(group.origin)}>{t(group.title)}</button>)}</div>
+      <div className="skill-tab-detail"><div><strong>{t(selectedGroup.title)}</strong><small>{selectedGroup.hint}</small></div><span>{selectedSkills.length} skills</span></div>
+      <div className="skill-group">
+          {selectedSkills.length ? selectedSkills.map((skill) => <div className="skill-row" key={skill.skillFilePath}>
             <div><b>{skill.name}</b><small>{skill.description}</small></div>
             {skill.origin === "bundled" ? <span className="success-text">Always On</span> : <div className="skill-actions"><label className="switch"><input type="checkbox" checked={skill.enabled} onChange={(event) => void run(() => window.fileNest.setAgentSkillEnabled(skill.skillFilePath, event.target.checked))} /><span /></label>{skill.origin === "managed" && <IconButton label={`Delete ${skill.name}`} onClick={() => { if (confirm(`Delete ${skill.name}?`)) void run(() => window.fileNest.deleteAgentSkill(skill.skillFilePath)); }}><Trash2 size={15} /></IconButton>}</div>}
-          </div>) : <p className="empty-state">No {group.title.toLowerCase()} skills found.</p>}
-        </div>;
-      })}
+          </div>) : <p className="empty-state">No {selectedGroup.title.toLowerCase()} skills found.</p>}
+      </div>
       {snapshot.agentSkillDiagnostics.length > 0 && <div className="connection-banner warning"><CircleAlert size={18} /><div>{snapshot.agentSkillDiagnostics.slice(0, 4).map((item) => <p key={`${item.path}:${item.message}`}>{item.message}</p>)}</div></div>}
+      <div className="skill-feedback-history">
+        <strong>Feedback Analysis</strong>
+        <small>Saved result evaluations are queued locally for FileNest Learning. Analysis only changes FileNest-managed skills.</small>
+        {snapshot.ragFeedbackRecords.length ? snapshot.ragFeedbackRecords.slice(0, 8).map((feedback) => <div className="feedback-history-row" key={feedback.id}><span className={`feedback-status ${feedback.analysisStatus}`}>{feedback.analysisStatus}</span><div><b>{feedback.rating === "accurate" ? "Accurate result" : "Needs improvement"}</b><small>{feedback.analysisError || feedback.analysisSummary || feedback.reason || "No explanation provided."}</small></div>{(feedback.analysisStatus === "pending" || feedback.analysisStatus === "failed") && <button className="secondary-button" onClick={() => void run(() => window.fileNest.analyzeRagFeedback(feedback.id))}>Analyze Again</button>}</div>) : <p className="empty-state">No answer or search feedback has been saved.</p>}
+      </div>
     </SettingsSection>
   </div>;
 }
@@ -149,21 +189,15 @@ function GeneralSettings({
     await window.fileNest.updateSettings(patch);
     await onRefresh();
   };
-  const addFolders = async (): Promise<void> => {
-    const dirs = await window.fileNest.chooseWatchDirectories();
-    const added = dirs.filter((path) => !snapshot.settings.watchDirs.includes(path));
-    if (!added.length) return;
-    await update({ watchDirs: [...snapshot.settings.watchDirs, ...added] });
-    const processExisting = confirm(t("Process files already in the newly added folders now? Choose Cancel to preserve them and watch only future changes."));
-    if (processExisting) await window.fileNest.scanExisting(added);
-    else await window.fileNest.preserveExisting(added);
-    await onRefresh();
+  const chooseOrganizedRoot = async (): Promise<void> => {
+    const path = await window.fileNest.chooseOrganizedRoot();
+    if (path) await update({ organizedRoot: path });
   };
   return (
     <div className="settings-sections">
       <SettingsSection
         title="Runtime Status"
-        subtitle="Control background watching and Windows sign-in behavior"
+        subtitle="Control background watching and its current state"
       >
         <SettingRow
           label={t("File Watching")}
@@ -184,60 +218,9 @@ function GeneralSettings({
             <span />
           </label>
         </SettingRow>
-        <SettingRow
-          label={t("Launch at Sign-in")}
-          hint="Run automatically in the system tray after Windows sign-in"
-        >
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={snapshot.settings.launchAtLogin}
-              onChange={(event) =>
-                void update({ launchAtLogin: event.target.checked })
-              }
-            />
-            <span />
-          </label>
+        <SettingRow label={t("Current Status")} hint={snapshot.watching ? t("FileNest is monitoring watched folders") : t("Start watching to monitor watched folders")}>
+          <span className={snapshot.watching ? "success-text" : "warning-text"}>{snapshot.watching ? t("Watching") : t("Paused")}</span>
         </SettingRow>
-      </SettingsSection>
-      <SettingsSection
-        title={t("Watched Folders")}
-        subtitle="FileNest waits for file writes to stabilize before indexing"
-      >
-        <div className="directory-list">
-          {snapshot.settings.watchDirs.map((path) => (
-            <div key={path}>
-              <HardDrive size={17} />
-              <span>{path}<small>{snapshot.watchDirectoryStatuses.find((status) => status.path === path)?.detail}</small></span>
-              <IconButton
-                label={t("Delete")}
-                onClick={() =>
-                  void update({
-                    watchDirs: snapshot.settings.watchDirs.filter(
-                      (item) => item !== path,
-                    ),
-                  })
-                }
-              >
-                <Trash2 size={15} />
-              </IconButton>
-            </div>
-          ))}
-          <button
-            className="secondary-button"
-            onClick={() => void addFolders()}
-          >
-            <FolderPlus size={16} />
-            {t("Add Folders")}
-          </button>
-          <button
-            className="secondary-button"
-            onClick={() => void window.fileNest.organizeExisting().then(onRefresh)}
-          >
-            <Play size={16} />
-            {t("Organize Existing Files Now")}
-          </button>
-        </div>
       </SettingsSection>
       <SettingsSection title="Interface" subtitle="Language and appearance changes apply immediately">
         <SettingRow label={t("Language")}>
@@ -268,6 +251,26 @@ function GeneralSettings({
             <option value="dark">{t("Dark")}</option>
           </select>
         </SettingRow>
+        <SettingRow
+          label={t("Setup Assistant")}
+          hint={t("Review watched folders and AI choices again")}
+        >
+          <button
+            className="secondary-button"
+            onClick={() => void update({ onboardingCompleted: false })}
+          >
+            <WandSparkles size={16} />
+            {t("Open Setup Assistant Again")}
+          </button>
+        </SettingRow>
+      </SettingsSection>
+      <SettingsSection title={t("Startup")} subtitle={t("Open FileNest automatically after you sign in to Windows.")}>
+        <SettingRow label={t("Launch at Sign-in")}>
+          <label className="switch">
+            <input type="checkbox" checked={snapshot.settings.launchAtLogin} onChange={(event) => void update({ launchAtLogin: event.target.checked })} />
+            <span />
+          </label>
+        </SettingRow>
       </SettingsSection>
       <SettingsSection title={t("Quick Search")} subtitle={t("Use this shortcut from any app to open a centered FileNest search box.")}>
         <SettingRow label={t("Quick Search Shortcut")} hint={snapshot.quickSearchShortcutError ?? undefined}>
@@ -275,6 +278,37 @@ function GeneralSettings({
             <ShortcutRecorder value={snapshot.settings.quickSearchShortcut} onChange={(value) => update({ quickSearchShortcut: value })} />
             <button className="secondary-button" onClick={() => void update({ quickSearchShortcut: "CommandOrControl+Alt+Space" })}>{t("Reset to Default")}</button>
           </div>
+        </SettingRow>
+      </SettingsSection>
+      <SettingsSection title={t("Automatic Organization")} subtitle={t("New files are indexed before they are organized.")}>
+        <SettingRow label={t("Automatically classify and move new files")} hint={t("When disabled, files remain in place after indexing")}>
+          <label className="switch"><input type="checkbox" checked={snapshot.settings.autoOrganize} onChange={(event) => void update({ autoOrganize: event.target.checked })} /><span /></label>
+        </SettingRow>
+        {snapshot.settings.autoOrganize && <>
+          <SettingRow label={t("Trigger")}>
+            <select value={snapshot.settings.autoOrganizeMode} onChange={(event) => void update({ autoOrganizeMode: event.target.value as Settings["autoOrganizeMode"] })}>
+              <option value="immediate">{t("Organize immediately after indexing")}</option>
+              <option value="batched">{t("Organize on timer or file threshold")}</option>
+            </select>
+          </SettingRow>
+          {snapshot.settings.autoOrganizeMode === "batched" && <>
+            <SettingRow label={t("Maximum wait")}><NumberField value={snapshot.settings.autoOrganizeIntervalSeconds} onCommit={(value) => update({ autoOrganizeIntervalSeconds: value })} /></SettingRow>
+            <SettingRow label={t("File threshold")}><NumberField value={snapshot.settings.autoOrganizeBatchSize} onCommit={(value) => update({ autoOrganizeBatchSize: value })} /></SettingRow>
+          </>}
+        </>}
+        <SettingRow label={t("Skip hidden files")}>
+          <label className="switch"><input type="checkbox" checked={snapshot.settings.excludeHidden} onChange={(event) => void update({ excludeHidden: event.target.checked })} /><span /></label>
+        </SettingRow>
+        <SettingRow label={t("Classification Strategy")} hint={snapshot.settings.classifyStrategy === "rule" ? t("Only matching enabled rules organize files") : t("Matching rules take priority; unmatched files use type and AI topic")}>
+          <select value={snapshot.settings.classifyStrategy} onChange={(event) => void update({ classifyStrategy: event.target.value as Settings["classifyStrategy"] })}>
+            <option value="hybrid">{t("Rules first, with automatic fallback")}</option>
+            <option value="rule">{t("Organization rules only")}</option>
+          </select>
+        </SettingRow>
+      </SettingsSection>
+      <SettingsSection title={t("Organization Location")}>
+        <SettingRow label={t("Destination Folder")} hint={snapshot.settings.organizedRoot}>
+          <button className="secondary-button" onClick={() => void chooseOrganizedRoot()}><FolderPlus size={16} />{t("Change Location")}</button>
         </SettingRow>
       </SettingsSection>
       <SettingsSection title="Version and Diagnostics">
@@ -380,13 +414,26 @@ function IndexSettings({
   const [reindexMode, setReindexMode] = useState<ReindexMode>("all");
   const [mediaBusy, setMediaBusy] = useState(false);
   const [customExtensionDraft, setCustomExtensionDraft] = useState("");
+  const [manualWatchDir, setManualWatchDir] = useState("");
   const update = async (patch: Partial<Settings>): Promise<void> => {
     await window.fileNest.updateSettings(patch);
     await onRefresh();
   };
-  const chooseOrganizedRoot = async (): Promise<void> => {
-    const path = await window.fileNest.chooseOrganizedRoot();
-    if (path) await update({ organizedRoot: path });
+  const addFolders = async (): Promise<void> => {
+    const dirs = await window.fileNest.chooseWatchDirectories();
+    const added = dirs.filter((path) => !s.watchDirs.includes(path));
+    if (!added.length) return;
+    await update({ watchDirs: [...s.watchDirs, ...added] });
+    const processExisting = confirm(t("Process files already in the newly added folders now? Choose Cancel to preserve them and watch only future changes."));
+    if (processExisting) await window.fileNest.scanExisting(added);
+    else await window.fileNest.preserveExisting(added);
+    await onRefresh();
+  };
+  const addManualFolder = async (): Promise<void> => {
+    const path = manualWatchDir.trim();
+    if (!path || s.watchDirs.includes(path)) return;
+    await update({ watchDirs: [...s.watchDirs, path] });
+    setManualWatchDir("");
   };
   const runMediaAction = async (action: () => Promise<void>): Promise<void> => {
     setMediaBusy(true);
@@ -413,75 +460,23 @@ function IndexSettings({
   };
   return (
     <div className="settings-sections">
-      <SettingsSection
-        title={t("Index & Organize")}
-        subtitle="Files move only after indexing completes"
-      >
-        <SettingRow label="Organization Folder" hint={s.organizedRoot}>
-          <button
-            className="secondary-button"
-            onClick={() => void chooseOrganizedRoot()}
-          >
-            <FolderPlus size={16} />
-            Change Location
-          </button>
-        </SettingRow>
-        <SettingRow label="Classification Strategy" hint="Hybrid mode matches rules first, then uses AI to generate a stable topic subfolder">
-          <select
-            value={s.classifyStrategy}
-            onChange={(e) =>
-              void update({
-                classifyStrategy: e.target.value as Settings["classifyStrategy"],
-              })
-            }
-          >
-            <option value="hybrid">Rules + AI Topic Classification</option>
-            <option value="rule">Rules Only</option>
-          </select>
-        </SettingRow>
-        <SettingRow label={t("Automatic Organization")} hint="When disabled, files are recorded and indexed but not moved">
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={s.autoOrganize}
-              onChange={(e) => void update({ autoOrganize: e.target.checked })}
-            />
-            <span />
-          </label>
-        </SettingRow>
-        <SettingRow label="Organization Mode">
-          <select
-            value={s.autoOrganizeMode}
-            onChange={(e) =>
-              void update({
-                autoOrganizeMode: e.target
-                  .value as Settings["autoOrganizeMode"],
-              })
-            }
-          >
-            <option value="immediate">Organize immediately after indexing</option>
-            <option value="batched">Organize on timer or file threshold</option>
-          </select>
-        </SettingRow>
-        {s.autoOrganizeMode === "batched" && (
-          <>
-            <SettingRow label="Batch Interval (Seconds)">
-              <NumberField
-                value={s.autoOrganizeIntervalSeconds}
-                onCommit={(value) =>
-                  update({ autoOrganizeIntervalSeconds: value })
-                }
-              />
-            </SettingRow>
-            <SettingRow label="Batch File Count">
-              <NumberField
-                value={s.autoOrganizeBatchSize}
-                onCommit={(value) => update({ autoOrganizeBatchSize: value })}
-              />
-            </SettingRow>
-          </>
-        )}
-        <SettingRow label="Accepted Extensions" hint="The watcher processes only these file types">
+      <SettingsSection title={t("Watched Folders")} subtitle={t("FileNest waits for file writes to stabilize before indexing")}>
+        <div className="directory-list">
+          {s.watchDirs.length === 0 && <p className="empty-state">{t("No watched folders added")}</p>}
+          {s.watchDirs.map((path) => {
+            const status = snapshot.watchDirectoryStatuses.find((item) => item.path === path);
+            return <div key={path}>
+              <HardDrive size={17} className={status?.state === "watching" ? "success-text" : "warning-text"} />
+              <span>{path}<small>{status?.detail}</small></span>
+              <IconButton label={t("Remove watched folder")} onClick={() => void update({ watchDirs: s.watchDirs.filter((item) => item !== path) })}><Trash2 size={15} /></IconButton>
+            </div>;
+          })}
+          <div className="directory-actions"><button className="secondary-button" onClick={() => void addFolders()}><FolderPlus size={16} />{t("Add Watched Folder…")}</button><button className="secondary-button" disabled={!s.watchDirs.length} onClick={() => void window.fileNest.organizeExisting().then(onRefresh)}><WandSparkles size={16} />{t("Organize Existing Files in Watched Folders…")}</button></div>
+          <details className="settings-disclosure"><summary>{t("Enter Path Manually")}</summary><div className="inline-field"><input value={manualWatchDir} placeholder={t("C:\\Users\\name\\Folder")} onChange={(event) => setManualWatchDir(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addManualFolder(); }} /><button className="secondary-button" disabled={!manualWatchDir.trim()} onClick={() => void addManualFolder()}>{t("Add")}</button></div></details>
+        </div>
+      </SettingsSection>
+      <SettingsSection title={t("Watched File Types")} subtitle={t("Choose the file types FileNest monitors in watched folders")}>
+        <SettingRow label={t("File types to watch")} hint={t("The watcher processes only these file types")}>
           <input
             className="wide-input"
             defaultValue={s.enabledExtensions.join(", ")}
@@ -490,7 +485,7 @@ function IndexSettings({
             }
           />
         </SettingRow>
-        <SettingRow label="Custom File Type" hint="Add a type to the watcher; enable it for vector indexing separately if needed">
+        <SettingRow label={t("Custom File Type")} hint={t("Add a type to the watcher; enable it for vector indexing separately if needed")}>
           <div className="inline-field">
             <input value={customExtensionDraft} placeholder="e.g. log" onChange={(event) => setCustomExtensionDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addCustomExtension(); }} />
             <button className="secondary-button" onClick={() => void addCustomExtension()}>Add</button>
@@ -501,18 +496,8 @@ function IndexSettings({
             {s.customFileExtensions.map((extension) => <button key={extension} className="extension-chip" onClick={() => void update({ customFileExtensions: s.customFileExtensions.filter((item) => item !== extension), enabledExtensions: s.enabledExtensions.filter((item) => item !== extension), vectorizeExtensions: s.vectorizeExtensions.filter((item) => item !== extension) })}>.{extension} ×</button>)}
           </div>
         </SettingRow>}
-        <SettingRow label="Exclude Hidden Files">
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={s.excludeHidden}
-              onChange={(e) => void update({ excludeHidden: e.target.checked })}
-            />
-            <span />
-          </label>
-        </SettingRow>
       </SettingsSection>
-      <SettingsSection title="Vector Index" subtitle="Reindexing is recommended after configuration changes">
+      <SettingsSection title={t("Automatic Vectorization")} subtitle={t("Reindexing is recommended after configuration changes")}>
         <SettingRow label={t("Automatic Vectorization")}>
           <label className="switch">
             <input
@@ -833,18 +818,9 @@ function AiSettings({ snapshot, t, onRefresh }: ChildProps): React.JSX.Element {
         subtitle="Local Ollama, OpenAI/DeepSeek-compatible APIs, or retrieval only"
       >
         <SettingRow label={t("ModelSource")}>
-          <select
-            value={s.llmChoice}
-            onChange={(e) =>
-              void update({
-                llmChoice: e.target.value as Settings["llmChoice"],
-              })
-            }
-          >
-            <option value="ollama">Local Ollama</option>
-            <option value="cloud">Cloud API</option>
-            <option value="none">Search Only</option>
-          </select>
+          <div className="segmented-control" role="group" aria-label={t("ModelSource")}>
+            {(["ollama", "cloud", "none"] as const).map((choice) => <button key={choice} className={s.llmChoice === choice ? "selected" : ""} onClick={() => void update({ llmChoice: choice })}>{t(choice === "ollama" ? "Local Ollama" : choice === "cloud" ? "Cloud API" : "Search Only")}</button>)}
+          </div>
         </SettingRow>
         <SettingRow label="Deep Thinking">
           <label className="switch">

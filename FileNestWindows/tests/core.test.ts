@@ -87,6 +87,53 @@ describe('local vector index', () => {
 })
 
 describe('database, indexing and organization integration', () => {
+  it('persists structured answer feedback with a selected best file', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const source = await database.upsertFile({ path: join(testRoot, 'Downloads', 'feedback-source.txt'), name: 'feedback-source.txt', ext: 'txt', size: 1, mtime: new Date().toISOString(), category: 'documents', sourceDir: join(testRoot, 'Downloads'), indexedAt: null, contentHash: null, title: null, contentText: null, discoveredAt: new Date().toISOString(), organizedAt: null, note: null, organizationSubfolder: null, isDirectory: false, indexSignature: null })
+    const session = await database.createChat()
+    await database.addMessage(session.id, 'user', 'Which file is the best match?')
+    const answer = await database.addMessage(session.id, 'assistant', 'The answer needs correction.', [source.id])
+    await database.saveChatRagFeedback(answer.id, 'notHelpful', { rating: 'inaccurate', reason: 'The answer did not use the strongest source.', bestFileId: source.id, bestFileReason: 'This file contains the direct evidence.' })
+    expect(database.listRagFeedback()[0]).toMatchObject({ messageId: answer.id, rating: 'inaccurate', resultFileIds: [source.id], bestFileId: source.id, analysisStatus: 'pending' })
+    await database.saveChatRagFeedback(answer.id, null)
+    expect(database.listRagFeedback().some((item) => item.messageId === answer.id)).toBe(false)
+  })
+
+  it('keeps an individual reindex queue with recoverable file states', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const file = await database.upsertFile({ path: join(testRoot, 'Downloads', 'reindex-source.txt'), name: 'reindex-source.txt', ext: 'txt', size: 1, mtime: new Date().toISOString(), category: 'documents', sourceDir: join(testRoot, 'Downloads'), indexedAt: null, contentHash: null, title: null, contentText: null, discoveredAt: new Date().toISOString(), organizedAt: null, note: null, organizationSubfolder: null, isDirectory: false, indexSignature: null })
+    const jobId = await database.createReindexJob('all', ['documents'], [file.id])
+    await database.updateReindexJob(jobId, 'running', file.name)
+    await database.updateReindexJobFile(jobId, file.id, 'failed', 'The source is temporarily unavailable.')
+    const job = database.latestReindexJob()
+    expect(job).toMatchObject({ id: jobId, status: 'running', currentFileName: file.name, total: 1, completed: 0, failed: 1 })
+    expect(job?.files).toEqual([expect.objectContaining({ fileId: file.id, state: 'failed', error: 'The source is temporarily unavailable.' })])
+  })
+
+  it('persists library search history by query and search mode', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    await database.saveLibrarySearchHistory('signed contract', false, 3)
+    await database.saveLibrarySearchHistory('signed contract', false, 5)
+    await database.saveLibrarySearchHistory('signed contract', true, 2)
+    expect(database.listLibrarySearchHistory()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ query: 'signed contract', smart: false, resultCount: 5 }),
+      expect.objectContaining({ query: 'signed contract', smart: true, resultCount: 2 })
+    ]))
+    await database.clearLibrarySearchHistory()
+    expect(database.listLibrarySearchHistory()).toHaveLength(0)
+  })
+
+  it('persists a result-set evaluation separately from chat feedback', async () => {
+    const database = new FileNestDatabase()
+    await database.initialize()
+    const file = await database.upsertFile({ path: join(testRoot, 'Downloads', 'search-evaluation.txt'), name: 'search-evaluation.txt', ext: 'txt', size: 1, mtime: new Date().toISOString(), category: 'documents', sourceDir: join(testRoot, 'Downloads'), indexedAt: null, contentHash: null, title: null, contentText: null, discoveredAt: new Date().toISOString(), organizedAt: null, note: null, organizationSubfolder: null, isDirectory: false, indexSignature: null })
+    await database.saveLibrarySearchRagFeedback('renewal term', true, [file.id], { rating: 'accurate', reason: 'The top result has the relevant clause.', bestFileId: file.id, bestFileReason: 'It states the renewal term directly.' })
+    expect(database.listRagFeedback()[0]).toMatchObject({ sourceKind: 'smartSearch', searchQuery: 'renewal term', resultFileIds: [file.id], rating: 'accurate', bestFileId: file.id })
+  })
+
   it('persists metadata, vectors, chat and moves only after indexing', async () => {
     const database = new FileNestDatabase()
     await database.initialize()

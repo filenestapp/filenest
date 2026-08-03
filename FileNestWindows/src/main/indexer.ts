@@ -226,7 +226,13 @@ export class IndexerService {
     }
   }
 
-  async reindexAll(settings: Settings, mode: ReindexMode = 'all', categories: FileCategory[] = [], fileIds?: number[]): Promise<ReindexRunResult> {
+  async reindexAll(
+    settings: Settings,
+    mode: ReindexMode = 'all',
+    categories: FileCategory[] = [],
+    fileIds?: number[],
+    onFileState?: (file: FileRecord, state: 'processing' | 'completed' | 'failed') => Promise<void>
+  ): Promise<ReindexRunResult> {
     if (this.running) return { completed: false, total: 0, failedFileIds: [], pendingFileIds: fileIds ?? [] }
     this.running = true
     this.paused = false
@@ -253,12 +259,16 @@ export class IndexerService {
           if (index >= files.length) return
           const file = files[index]
           this.onProgress?.(completed, files.length, file.name, failed, mode === 'media' ? 'Transcribing audio or video' : 'Checking file')
+          await onFileState?.(file, 'processing')
           const succeeded = mode === 'embeddings'
             ? await this.updateNoteIndex(file, settings)
             : await this.indexFile(file, settings, undefined, mode === 'all' || mode === 'media', () => generation === this.batchGeneration)
           if (!succeeded) {
             failed += 1
             failedFileIds.push(file.id)
+            await onFileState?.(file, 'failed')
+          } else {
+            await onFileState?.(file, 'completed')
           }
           completed += 1
           processedFileIds.add(file.id)

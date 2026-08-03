@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, shell } from 'electron'
 import { basename, dirname, join } from 'node:path'
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import type { AiConnectivityCheck, AppSnapshot, ChatFeedback, ChatStreamEvent, DuplicateFileGroup, DuplicateScanProgress, DuplicateTrashResult, FileCategory, FileRecord, LibrarySearchRequest, LibrarySearchResponse, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { AiConnectivityCheck, AppSnapshot, ChatFeedback, ChatStreamEvent, DuplicateFileGroup, DuplicateScanProgress, DuplicateTrashResult, FileCategory, FileRecord, LibrarySearchRequest, LibrarySearchResponse, RagFeedbackDraft, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 import { FileNestDatabase } from './database'
 import { AppLogger } from './logger'
 import { ContentExtractor } from './content-extractor'
@@ -23,6 +23,7 @@ import { RerankerServiceManager } from './reranker-manager'
 import { mediaTranscriptionManager } from './media-transcription'
 import { DuplicateFileService, sha256File } from './duplicate-files'
 import { AgentSkillService } from './agent-skills'
+import { RagLearningService } from './rag-learning'
 
 const { autoUpdater } = updater
 
@@ -35,6 +36,7 @@ export class AppController {
   private readonly organizer = new OrganizerService(this.database, this.logger)
   private readonly watcher = new FileWatcherService(this.database, this.indexer, this.organizer, this.logger)
   private readonly agentSkills = new AgentSkillService(this.database)
+  private readonly ragLearning = new RagLearningService(this.database, this.agentSkills, new LlmService(), () => this.notifyChanged())
   private readonly chat = new ChatService(this.database, this.embeddings, new LlmService(), this.logger, this.agentSkills)
   private readonly librarySearch = new LibrarySearchService(this.database, this.embeddings, this.logger)
   private readonly duplicateFiles = new DuplicateFileService(this.database)
@@ -84,6 +86,7 @@ export class AppController {
     }
     void this.backfillFileCreationDates()
     if (settings.onboardingCompleted) void this.auditManagedContent()
+    if (settings.onboardingCompleted) void this.ragLearning.processPending(settings).catch((error) => this.logger.log('feedback-learning', 'Unable to process pending feedback', error))
     if (settings.automaticUpdateChecks && app.isPackaged) setTimeout(() => void this.checkForUpdates(), 10_000)
   }
 
@@ -126,7 +129,10 @@ export class AppController {
       whisper: mediaTranscriptionManager.whisper(),
       reranker: this.rerankerManager.status(),
       agentSkills: this.agentSkills.all(),
-      agentSkillDiagnostics: this.agentSkills.allDiagnostics()
+      agentSkillDiagnostics: this.agentSkills.allDiagnostics(),
+      librarySearchHistory: this.database.listLibrarySearchHistory(),
+      ragFeedbackRecords: this.database.listRagFeedback(),
+      reindexJobSummary: this.database.latestReindexJob()
     }
   }
 
@@ -212,6 +218,10 @@ export class AppController {
     return result.canceled ? [] : result.filePaths
   }
 
+  defaultWatchDirectories(): string[] {
+    return [...new Set([app.getPath('desktop'), app.getPath('downloads')])]
+  }
+
   async chooseOrganizedRoot(): Promise<string | null> {
     const result = await dialog.showOpenDialog({ title: 'Choose where to store organized files', defaultPath: this.database.getSettings().organizedRoot, properties: ['openDirectory', 'createDirectory'] })
     return result.canceled ? null : result.filePaths[0] ?? null
@@ -267,9 +277,16 @@ export class AppController {
     await this.indexer.indexFile({ ...file, contentHash: null, indexSignature: null }, this.database.getSettings(), undefined, true)
     this.notifyChanged()
   }
-  pauseIndexing(): void { this.indexer.pause(); this.notifyChanged() }
-  resumeIndexing(): void { this.indexer.resume(); this.notifyChanged() }
-  cancelIndexing(): void { this.indexer.cancel(); this.notifyChanged() }
+  async retryReindexFiles(fileIds: number[]): Promise<void> {
+    const latest = this.database.latestReindexJob()
+    if (!latest || this.indexer.isRunning) return
+    const retryIds = [...new Set(fileIds)].filter((fileId) => latest.files.some((file) => file.fileId === fileId && file.state === 'failed'))
+    if (!retryIds.length) return
+    await this.runReindexJob({ mode: latest.mode, categories: [], fileIds: retryIds })
+  }
+  pauseIndexing(): void { this.indexer.pause(); void this.updateLatestReindexJobStatus('paused'); this.notifyChanged() }
+  resumeIndexing(): void { this.indexer.resume(); void this.updateLatestReindexJobStatus('running'); this.notifyChanged() }
+  cancelIndexing(): void { this.indexer.cancel(); void this.updateLatestReindexJobStatus('stopping'); this.notifyChanged() }
 
   searchFiles(query: string, category?: FileCategory | null): FileRecord[] {
     if (!query.trim() && !category) return this.database.listFiles()
@@ -277,13 +294,20 @@ export class AppController {
     return this.database.searchFiles(query.trim(), category)
   }
 
-  searchLibrary(request: LibrarySearchRequest, sender?: Electron.WebContents): Promise<LibrarySearchResponse> {
-    return this.librarySearch.search(request, this.database.getSettings(), (intent) => {
+  async searchLibrary(request: LibrarySearchRequest, sender?: Electron.WebContents): Promise<LibrarySearchResponse> {
+    const response = await this.librarySearch.search(request, this.database.getSettings(), (intent) => {
       if (request.requestId && sender && !sender.isDestroyed()) {
         sender.send('library:search-progress', { requestId: request.requestId, intent })
       }
     })
+    if (request.recordHistory) {
+      await this.database.saveLibrarySearchHistory(request.query, request.smart === true, response.total)
+      this.notifyChanged()
+    }
+    return response
   }
+  async deleteLibrarySearchHistory(id: number): Promise<void> { await this.database.deleteLibrarySearchHistory(id); this.notifyChanged() }
+  async clearLibrarySearchHistory(): Promise<void> { await this.database.clearLibrarySearchHistory(); this.notifyChanged() }
 
   requestLibrarySearch(rawQuery: string): void {
     const query = rawQuery.trim()
@@ -389,7 +413,19 @@ export class AppController {
 
   selectChat(id: number) { this.selectedSessionId = id; this.loadedChatMessageLimit = 40; this.pendingChatAttachmentPath = null; this.completedChatSessionIds.delete(id); this.notifyChanged(); return this.database.chatMessagePage(id, null, this.loadedChatMessageLimit).messages }
   loadEarlierChatMessages(): void { if (this.selectedSessionId != null) this.loadedChatMessageLimit += 40; this.notifyChanged() }
-  async saveChatFeedback(messageId: number, feedback: ChatFeedback | null): Promise<void> { await this.database.updateChatMessageFeedback(messageId, feedback); this.notifyChanged() }
+  async saveChatFeedback(messageId: number, feedback: ChatFeedback | null, draft: Partial<RagFeedbackDraft> = {}): Promise<void> {
+    await this.database.saveChatRagFeedback(messageId, feedback, draft)
+    this.notifyChanged()
+    if (feedback != null) void this.ragLearning.processPending(this.database.getSettings(), 1).catch((error) => this.logger.log('feedback-learning', 'Unable to process feedback', error))
+  }
+  async saveLibrarySearchFeedback(query: string, smart: boolean, fileIds: number[], draft: RagFeedbackDraft): Promise<void> {
+    await this.database.saveLibrarySearchRagFeedback(query, smart, fileIds, draft)
+    this.notifyChanged()
+    void this.ragLearning.processPending(this.database.getSettings(), 1).catch((error) => this.logger.log('feedback-learning', 'Unable to process search feedback', error))
+  }
+  async analyzeRagFeedback(id: number): Promise<void> {
+    await this.ragLearning.analyze(id, this.database.getSettings())
+  }
   markChatSeen(id: number): void { this.completedChatSessionIds.delete(id); this.notifyChanged() }
   async deleteChat(id: number): Promise<void> { await this.database.deleteChat(id); this.runningChatSessionIds.delete(id); this.completedChatSessionIds.delete(id); if (this.selectedSessionId === id) this.selectedSessionId = this.database.listChatSessions()[0]?.id ?? null; this.notifyChanged() }
   async clearChats(): Promise<void> { await this.database.clearChats(); this.selectedSessionId = null; this.runningChatSessionIds.clear(); this.completedChatSessionIds.clear(); this.notifyChanged() }
@@ -544,15 +580,37 @@ export class AppController {
   private async runReindexJob(job: { mode: ReindexMode; categories: FileCategory[]; fileIds: number[] | null }): Promise<void> {
     if (this.indexer.isRunning) return
     await writeFile(this.pendingReindexPath, JSON.stringify(job), 'utf8')
+    const settings = this.database.getSettings()
+    const queuedFileIds = job.fileIds ?? this.database.listFiles().filter((file) => {
+      if (job.categories.length && !job.categories.includes(file.category)) return false
+      if (job.mode === 'unindexed') return !file.indexedAt
+      if (job.mode === 'media') return settings.mediaTranscriptionEnabled && ['mp3', 'wav', 'aac', 'flac', 'm4a', 'ogg', 'opus', 'aiff', 'aif', 'wma', 'mp4', 'mov', 'mkv', 'avi', 'm4v', 'webm', 'mpeg', 'mpg'].includes(file.ext.toLowerCase())
+      return true
+    }).map((file) => file.id)
+    const databaseJobId = await this.database.createReindexJob(job.mode, job.categories, queuedFileIds)
     try {
-      const result = await this.indexer.reindexAll(this.database.getSettings(), job.mode, job.categories, job.fileIds ?? undefined)
+      const result = await this.indexer.reindexAll(settings, job.mode, job.categories, queuedFileIds, async (file, state) => {
+        await this.database.updateReindexJob(databaseJobId, 'running', state === 'processing' ? file.name : null)
+        await this.database.updateReindexJobFile(databaseJobId, file.id, state, state === 'failed' ? 'Indexing did not complete' : null)
+        this.notifyChanged()
+      })
       const retryIds = [...new Set([...result.failedFileIds, ...result.pendingFileIds])]
+      const completedStatus = result.completed ? retryIds.length ? 'completedWithErrors' : 'completed' : 'stopped'
+      await this.database.updateReindexJob(databaseJobId, completedStatus)
       if (result.completed && retryIds.length === 0) await rm(this.pendingReindexPath, { force: true })
       else await writeFile(this.pendingReindexPath, JSON.stringify({ ...job, fileIds: retryIds }), 'utf8')
+    } catch (error) {
+      await this.database.updateReindexJob(databaseJobId, 'interrupted')
+      throw error
     } finally {
       this.indexingProgress = null
       this.notifyChanged()
     }
+  }
+
+  private async updateLatestReindexJobStatus(status: 'running' | 'paused' | 'stopping'): Promise<void> {
+    const summary = this.database.latestReindexJob()
+    if (summary && ['running', 'paused', 'stopping'].includes(summary.status)) await this.database.updateReindexJob(summary.id, status, summary.currentFileName)
   }
 
   private async ensureAttachedFile(path: string): Promise<FileRecord> {

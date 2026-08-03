@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { copyFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
+import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join, relative, resolve } from 'node:path'
@@ -125,12 +125,48 @@ export class AgentSkillService {
     await this.refresh()
   }
 
+  async instructionBody(name: string): Promise<string | null> {
+    const skill = this.skills.find((item) => item.name === name)
+    if (!skill) return null
+    return (await parseSkill(skill.skillFilePath))?.body ?? null
+  }
+
+  async evolveSkill(name: string, description: string | null, instruction: string, rationale: string | null): Promise<AgentSkill | null> {
+    const target = this.skills.find((item) => item.name === name)
+    const parsed = target ? await parseSkill(target.skillFilePath) : null
+    if (!target || !parsed) return null
+    const normalizedInstruction = collapseWhitespace(instruction)
+    if (!normalizedInstruction) return target
+    const learnedSection = parsed.body.includes('## Learned Adjustments') ? '' : '\n\n## Learned Adjustments'
+    const adjustment = parsed.body.toLowerCase().includes(normalizedInstruction.toLowerCase()) ? '' : `\n\n- ${normalizedInstruction}${rationale ? `\n  Rationale: ${collapseWhitespace(rationale)}` : ''}`
+    return this.writeManagedSkill({
+      name: target.name,
+      description: clampText(description || parsed.description, 1_024),
+      title: titleForSkill(target.name),
+      metadata: { ...parsed.metadata, 'filenest-origin': 'feedback-learning', 'filenest-parent-origin': target.origin, 'filenest-version': String(Math.max(1, Number(parsed.metadata['filenest-version'] ?? 0) + 1)) },
+      body: `${parsed.body}${adjustment ? learnedSection + adjustment : ''}`
+    })
+  }
+
+  async upsertLearnedSkill(name: string, description: string, title: string, scope: 'search' | 'answer' | 'both', instructions: string, rationale: string | null): Promise<AgentSkill | null> {
+    if (!SKILL_NAME.test(name)) throw new Error('The learned skill name is invalid')
+    const body = `# ${clampText(title, 100)}\n\n${collapseWhitespace(instructions)}${rationale ? `\n\n## Rationale\n\n${collapseWhitespace(rationale)}` : ''}`
+    return this.writeManagedSkill({
+      name,
+      description: clampText(description, 1_024),
+      title: clampText(title, 100),
+      metadata: { 'filenest-origin': 'feedback-learning', 'filenest-scope': scope, 'filenest-version': '1' },
+      body
+    })
+  }
+
   async activate(capability: AgentSkillCapability, task: string): Promise<AgentSkillActivation> {
     const explicitNames = extractExplicitNames(task)
     const capabilityValue = capability
     const selected = this.skills.filter((skill) => skill.enabled && (
       explicitNames.includes(skill.name)
       || skill.metadata['filenest-auto-activate'] === capabilityValue
+      || scopeMatchesCapability(skill.metadata['filenest-scope'], capabilityValue)
       || matchesSkillIntent(skill.metadata['filenest-intent'], task)
     ))
     const unique = [...new Map(selected.map((skill) => [skill.name, skill])).values()]
@@ -175,6 +211,21 @@ export class AgentSkillService {
 
   private async saveNames(key: string, names: Set<string>): Promise<void> {
     await this.database.setInternalSetting(key, JSON.stringify([...names].sort()))
+  }
+
+  private async writeManagedSkill(input: { name: string; description: string; title: string; metadata: Record<string, string>; body: string }): Promise<AgentSkill | null> {
+    const directory = resolve(this.managedDirectory, input.name)
+    const root = resolve(this.managedDirectory)
+    if (!directory.startsWith(`${root}/`)) throw new Error('The learned skill destination is invalid')
+    await mkdir(directory, { recursive: true })
+    const metadata = Object.entries(input.metadata).map(([key, value]) => `  ${key}: "${yamlValue(value)}"`).join('\n')
+    const source = `---\nname: ${input.name}\ndescription: "${yamlValue(input.description)}"\nmetadata:\n${metadata}\n---\n\n${input.body.trim()}\n`
+    await writeFile(join(directory, 'SKILL.md'), source, 'utf8')
+    const disabled = this.namesFor(DISABLED_NAMES_KEY)
+    disabled.delete(input.name)
+    await this.saveNames(DISABLED_NAMES_KEY, disabled)
+    await this.refresh()
+    return this.skills.find((skill) => skill.name === input.name && skill.origin === 'managed') ?? null
   }
 }
 
@@ -247,3 +298,14 @@ function matchesSkillIntent(intent: string | undefined, task: string): boolean {
   const requestsNarrowScope = /page\s*\d|chapter|section|paragraph|\u7b2c\s*\d+\s*\u9875|\u7ae0\u8282|\u6bb5\u843d/.test(normalized)
   return requestsDocumentWork && requestsFullCoverage && !requestsNarrowScope
 }
+
+function scopeMatchesCapability(scope: string | undefined, capability: AgentSkillCapability): boolean {
+  if (capability === 'search') return scope === 'search' || scope === 'both'
+  if (capability === 'library-answer' || capability === 'attached-file-answer') return scope === 'answer' || scope === 'both'
+  return false
+}
+
+function collapseWhitespace(value: string): string { return value.trim().replace(/\s+/g, ' ') }
+function clampText(value: string, maximum: number): string { return collapseWhitespace(value).slice(0, maximum) }
+function yamlValue(value: string): string { return value.replace(/[\r\n]+/g, ' ').replace(/"/g, "'") }
+function titleForSkill(name: string): string { return name.split('-').map((part) => part[0]?.toUpperCase() + part.slice(1)).join(' ') }

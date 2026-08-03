@@ -32,7 +32,14 @@ export class LibrarySearchService {
       if (request.category && file.category !== request.category) return false
       if (!matchesSmartSearchPlan(file, plan)) return false
       if (!dateIntent) return true
-      const dateValue = plan ? plan.dateField === 'added' ? file.discoveredAt : plan.dateField === 'organized' ? file.organizedAt : file.mtime : request.dateField === 'created' ? file.discoveredAt : file.mtime
+      const selectedDateField = request.dateFrom || request.dateTo
+        ? (request.dateField === 'created' ? 'created' : 'modified')
+        : (plan?.dateField === 'added' ? 'added' : plan?.dateField === 'organized' ? 'organized' : 'modified')
+      const dateValue = selectedDateField === 'created' || selectedDateField === 'added'
+        ? file.discoveredAt
+        : selectedDateField === 'organized'
+          ? file.organizedAt
+          : file.mtime
       if (!dateValue) return false
       const value = new Date(dateValue)
       return value >= dateIntent.from && value <= dateIntent.to

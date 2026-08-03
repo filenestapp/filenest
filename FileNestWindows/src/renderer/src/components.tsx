@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ButtonHTMLAttributes, type ReactNode } from 'react'
-import { Archive, AudioLines, Code2, Copy, ExternalLink, File, FileImage, FileText, Film, FolderOpen, Maximize2, Minimize2, RefreshCw, Trash2, X } from 'lucide-react'
+import { Archive, AudioLines, Code2, Copy, ExternalLink, File, FileImage, FileText, Film, FolderOpen, Maximize2, MessageCircle, Minimize2, RefreshCw, Trash2, X } from 'lucide-react'
 import type { AppLanguage, DocumentChunk, FileCategory, FileRecord } from '../../shared/types'
 import { translate } from './i18n'
 
@@ -32,7 +32,7 @@ export function formatDate(value: string, language: AppLanguage, compact = false
   return new Intl.DateTimeFormat(locale, compact ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value))
 }
 
-export function FileInspector({ file, language, onClose }: { file: FileRecord; language: AppLanguage; onClose(): void }): React.JSX.Element {
+export function FileInspector({ file, language, onClose, onStartChat }: { file: FileRecord; language: AppLanguage; onClose(): void; onStartChat(file: FileRecord): void }): React.JSX.Element {
   const t = (value: string): string => translate(value, language)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [note, setNote] = useState(file.note ?? '')
@@ -69,7 +69,7 @@ export function FileInspector({ file, language, onClose }: { file: FileRecord; l
         <section className="inspector-section"><div className="field-label">{t('Relevance')}</div><span className="status-badge success">● {t('Best Match')}</span></section>
         <section className="inspector-section"><div className="field-label">{t('Location')}</div><p className="path-text">{file.path}</p><button className="text-action" onClick={() => void window.fileNest.showInExplorer(file.path)}><FolderOpen size={15} />{t('Show in File Explorer')}</button></section>
         <section className="inspector-section detail-grid"><div><div className="field-label">{t('Modified')}</div><p>{formatDate(file.mtime, language)}</p></div><div><div className="field-label">{t('Created')}</div><p>{formatDate(file.creationDate ?? file.discoveredAt, language)}</p></div><div><div className="field-label">{t('Category')}</div><p>{t(categoryLabels[file.category])} · {formatBytes(file.size)}</p></div></section>
-        <section className="inspector-section"><div className="field-label">{t('Quick Actions')}</div><div className="stacked-actions"><button className="text-action" onClick={() => void window.fileNest.openFile(file.path)}><ExternalLink size={15} />{t('Open')}</button><button className="text-action" onClick={copyPath}><Copy size={15} />{t('Copy File Path')}</button></div></section>
+        <section className="inspector-section"><div className="field-label">{t('Quick Actions')}</div><div className="stacked-actions"><button className="text-action" onClick={() => void window.fileNest.openFile(file.path)}><ExternalLink size={15} />{t('Open')}</button><button className="text-action" onClick={copyPath}><Copy size={15} />{t('Copy File Path')}</button><button className="text-action" onClick={() => onStartChat(file)}><MessageCircle size={15} />{t('Chat with File')}</button></div></section>
         <section className="inspector-section"><div className="field-label">{t('File Preview')}</div><Preview file={file} url={previewUrl} /></section>
         {chunks.length > 0 && <section className="inspector-section"><div className="field-label">{t('Structured Content')} · {chunkCount}</div><div className="chunk-list">{chunks.map((chunk) => <article key={chunk.index}><header><strong>{t(chunk.kind)}</strong><span>{chunk.sectionPath.join(' / ')}{chunk.pageStart != null ? ` · p.${chunk.pageStart}` : ''}</span></header><p>{chunk.text}</p></article>)}</div>{chunks.length < chunkCount && <button className="secondary-button" onClick={() => void window.fileNest.getDocumentChunks(file.id, chunks.length, 20).then((values) => setChunks((current) => [...current, ...values]))}>{t('Load More')}</button>}</section>}
         <section className="inspector-section"><div className="field-label">{t('Note')}</div><textarea className="note-editor" value={note} onChange={(event) => setNote(event.target.value)} placeholder={t('Note')} /><div className="inline-actions"><button className="secondary-button" disabled={busy} onClick={() => void saveNote()}>{t('Save Note')}</button><button className="secondary-button" disabled={busy} onClick={() => void generateSummary()}>{t('Generate Summary')}</button></div>{summary && <p className="summary-text">{summary}</p>}</section>

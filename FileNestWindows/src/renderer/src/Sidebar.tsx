@@ -1,15 +1,15 @@
+import { useState } from "react";
 import {
-  Archive,
+  Cpu,
   FileSearch,
   Folder,
   MessageCircle,
   LoaderCircle,
-  MoreHorizontal,
   PlusSquare,
   Settings as SettingsIcon,
-  ShieldCheck,
   Wifi,
   WifiOff,
+  X,
 } from "lucide-react";
 import type { AppSnapshot } from "../../shared/types";
 import { formatDate, IconButton } from "./components";
@@ -24,7 +24,6 @@ export function Sidebar({
   onSelectChat,
   onNewChat,
   onDeleteChat,
-  onClearChats,
 }: {
   snapshot: AppSnapshot;
   page: Page;
@@ -32,7 +31,6 @@ export function Sidebar({
   onSelectChat(id: number): void;
   onNewChat(): void;
   onDeleteChat(id: number): void;
-  onClearChats(): void;
 }): React.JSX.Element {
   const t = (value: string): string =>
     translate(value, snapshot.settings.appLanguage);
@@ -56,7 +54,7 @@ export function Sidebar({
         </button>
         <button
           className={page === "chat" ? "selected" : ""}
-          onClick={() => onPage("chat")}
+          onClick={onNewChat}
         >
           <MessageCircle size={19} />
           {t("Find with Chat")}
@@ -64,9 +62,6 @@ export function Sidebar({
       </nav>
       <div className="recent-heading">
         <span>{t("Recent")}</span>
-        <IconButton label="Clear Chat History" onClick={onClearChats}>
-          <MoreHorizontal size={15} />
-        </IconButton>
         <IconButton label={t("New Chat")} onClick={onNewChat}>
           <PlusSquare size={15} />
         </IconButton>
@@ -113,35 +108,8 @@ export function Sidebar({
           </div>
         ))}
       </div>
-      <div className="sidebar-status">
-        <div className="status-line">
-          {snapshot.watching ? <Wifi size={16} /> : <WifiOff size={16} />}
-          <div>
-            <strong>{snapshot.watching ? t("Watching") : t("Paused")}</strong>
-            <span>{snapshot.settings.watchDirs[0] ?? "—"}</span>
-          </div>
-        </div>
-        <div className="status-line">
-          <ShieldCheck size={16} />
-          <div>
-            <strong>{usesCloud ? t("Cloud Mode") : t("Local file access")}</strong>
-            <span>
-              {usesCloud
-                ? t("Cloud features send the content they need")
-                : t("File contents are not uploaded")}
-            </span>
-          </div>
-        </div>
-      </div>
       <div className="sidebar-footer">
-        <div className="footer-indicators">
-          <Wifi size={16} className={snapshot.watching ? "active-green" : ""} />
-          <FileSearch
-            size={16}
-            className={snapshot.indexing ? "spin active-blue" : ""}
-          />
-          <Archive size={16} />
-        </div>
+        <SidebarStatusControls snapshot={snapshot} t={t} onOpenSettings={() => onPage("settings")} />
         <IconButton
           label={t("Settings")}
           className={page === "settings" ? "active" : ""}
@@ -152,4 +120,29 @@ export function Sidebar({
       </div>
     </aside>
   );
+}
+
+function SidebarStatusControls({
+  snapshot,
+  t,
+  onOpenSettings,
+}: {
+  snapshot: AppSnapshot;
+  t(value: string): string;
+  onOpenSettings(): void;
+}): React.JSX.Element {
+  const [open, setOpen] = useState<"watching" | "indexing" | "ai" | null>(null);
+  const usesCloud = snapshot.settings.llmChoice === "cloud" || snapshot.settings.embeddingSource === "cloud" || snapshot.settings.ocrSource === "cloud";
+  const status = open === "watching"
+    ? { title: snapshot.watching ? t("Watching") : t("Paused"), detail: snapshot.settings.watchDirs.length ? `${snapshot.settings.watchDirs.length} ${t("watched folders")}` : t("No watched folders"), action: snapshot.watching ? t("Pause Watching") : t("Start Watching"), run: () => snapshot.watching ? window.fileNest.stopWatching() : window.fileNest.startWatching() }
+    : open === "indexing"
+      ? { title: snapshot.indexing ? t("Indexing") : t("Index Status"), detail: snapshot.indexingProgress ? `${snapshot.indexingProgress.completed}/${snapshot.indexingProgress.total} · ${snapshot.indexingProgress.currentName}` : t("Your local index is ready"), action: t("Open Settings"), run: onOpenSettings }
+      : { title: usesCloud ? t("Cloud Mode") : t("Local AI"), detail: usesCloud ? t("Cloud features send the content they need") : t("File contents are not uploaded"), action: t("Open Settings"), run: onOpenSettings };
+  const toggle = (value: "watching" | "indexing" | "ai"): void => setOpen((current) => current === value ? null : value);
+  return <div className="sidebar-status-controls">
+    <IconButton label={snapshot.watching ? t("Watching") : t("Paused")} className={open === "watching" ? "active" : ""} onClick={() => toggle("watching")}>{snapshot.watching ? <Wifi size={16} className="active-green" /> : <WifiOff size={16} />}</IconButton>
+    <IconButton label={snapshot.indexing ? t("Indexing") : t("Index Status")} className={open === "indexing" ? "active" : ""} onClick={() => toggle("indexing")}><FileSearch size={16} className={snapshot.indexing ? "spin active-blue" : ""} /></IconButton>
+    <IconButton label={usesCloud ? t("Cloud Mode") : t("Local AI")} className={open === "ai" ? "active" : ""} onClick={() => toggle("ai")}><Cpu size={16} className={usesCloud ? "active-blue" : "active-green"} /></IconButton>
+    {open && <section className="sidebar-status-popover" role="dialog" aria-label={status.title}><header><div><strong>{status.title}</strong><span>{status.detail}</span></div><button aria-label={t("Close")} onClick={() => setOpen(null)}><X size={15} /></button></header><button className="text-action" onClick={() => { void status.run(); setOpen(null); }}>{status.action}</button></section>}
+  </div>;
 }

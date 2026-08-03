@@ -1,10 +1,11 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { ChatFeedback, ChatStreamEvent, FileCategory, FileNestApi, LibrarySearchProgressEvent, LibrarySearchRequest, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
+import type { ChatFeedback, ChatStreamEvent, FileCategory, FileNestApi, LibrarySearchProgressEvent, LibrarySearchRequest, RagFeedbackDraft, ReindexMode, Rule, SendChatRequest, Settings } from '../shared/types'
 
 const api: FileNestApi = {
   getSnapshot: () => ipcRenderer.invoke('app:snapshot'),
   refresh: () => ipcRenderer.invoke('app:refresh'),
   updateSettings: (patch: Partial<Settings>) => ipcRenderer.invoke('settings:update', patch),
+  defaultWatchDirectories: () => ipcRenderer.invoke('settings:default-watch-directories'),
   chooseWatchDirectories: () => ipcRenderer.invoke('dialog:watch-directories'),
   chooseOrganizedRoot: () => ipcRenderer.invoke('dialog:organized-root'),
   chooseOrganizationDirectories: () => ipcRenderer.invoke('dialog:organization-directories'),
@@ -22,11 +23,14 @@ const api: FileNestApi = {
   cancelOrganization: () => ipcRenderer.invoke('organizer:cancel'),
   reindexAll: (mode?: ReindexMode, categories?: FileCategory[]) => ipcRenderer.invoke('indexer:reindex-all', mode, categories),
   reindexFile: (id: number) => ipcRenderer.invoke('indexer:reindex-file', id),
+  retryReindexFiles: (fileIds: number[]) => ipcRenderer.invoke('indexer:retry-files', fileIds),
   pauseIndexing: () => ipcRenderer.invoke('indexer:pause'),
   resumeIndexing: () => ipcRenderer.invoke('indexer:resume'),
   cancelIndexing: () => ipcRenderer.invoke('indexer:cancel'),
   searchFiles: (query: string, category?: FileCategory | null) => ipcRenderer.invoke('files:search', query, category),
   searchLibrary: (request: LibrarySearchRequest) => ipcRenderer.invoke('files:smart-search', request),
+  deleteLibrarySearchHistory: (id: number) => ipcRenderer.invoke('library:history-delete', id),
+  clearLibrarySearchHistory: () => ipcRenderer.invoke('library:history-clear'),
   submitQuickSearch: (query: string) => ipcRenderer.invoke('quick-search:submit', query),
   consumeLibrarySearch: (id: string) => ipcRenderer.invoke('quick-search:consume', id),
   openFile: (path: string) => ipcRenderer.invoke('files:open', path),
@@ -47,7 +51,9 @@ const api: FileNestApi = {
   beginChat: (path?: string | null) => ipcRenderer.invoke('chat:begin', path),
   selectChat: (id: number) => ipcRenderer.invoke('chat:select', id),
   loadEarlierChatMessages: () => ipcRenderer.invoke('chat:load-earlier'),
-  saveChatFeedback: (messageId: number, feedback: ChatFeedback | null) => ipcRenderer.invoke('chat:feedback', messageId, feedback),
+  saveChatFeedback: (messageId: number, feedback: ChatFeedback | null, draft?: Partial<RagFeedbackDraft>) => ipcRenderer.invoke('chat:feedback', messageId, feedback, draft),
+  saveLibrarySearchFeedback: (query: string, smart: boolean, fileIds: number[], draft: RagFeedbackDraft) => ipcRenderer.invoke('library:feedback', query, smart, fileIds, draft),
+  analyzeRagFeedback: (id: number) => ipcRenderer.invoke('feedback:analyze', id),
   markChatSeen: (id: number) => ipcRenderer.invoke('chat:seen', id),
   deleteChat: (id: number) => ipcRenderer.invoke('chat:delete', id),
   clearChats: () => ipcRenderer.invoke('chat:clear'),
