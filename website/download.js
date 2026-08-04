@@ -1,7 +1,7 @@
 const FALLBACK_RELEASE = {
-  tagName: "v0.2.12",
-  version: "0.2.12",
-  url: "https://github.com/filenestapp/filenest/releases/tag/v0.2.12",
+  tagName: "v0.2.13",
+  version: "0.2.13",
+  url: "https://github.com/filenestapp/filenest/releases/tag/v0.2.13",
 };
 
 const repository = "filenestapp/filenest";
