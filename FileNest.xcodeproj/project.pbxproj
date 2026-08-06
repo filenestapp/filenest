@@ -981,7 +981,7 @@
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 2.9.3;
+				minimumVersion = 2.9.5;
 			};
 		};
 		AC8C82323C3270EA3FAC4E81 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */ = {
