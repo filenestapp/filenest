@@ -2548,6 +2548,23 @@ final class ChatService {
                 )
                 if lhsYearTier != rhsYearTier { return lhsYearTier > rhsYearTier }
             }
+            if sortByConfidence,
+               let lhsID = lhs.file.id,
+               let rhsID = rhs.file.id,
+               let lhsSemantic = semanticByID[lhsID],
+               let rhsSemantic = semanticByID[rhsID],
+               abs(lhsSemantic.score - rhsSemantic.score) >= 0.08 {
+                let lhsHasHigherSemanticScore = lhsSemantic.score > rhsSemantic.score
+                let strongerID = lhsHasHigherSemanticScore ? lhsID : rhsID
+                let weakerID = lhsHasHigherSemanticScore ? rhsID : lhsID
+                // A strong semantic-only hit can contain the requested evidence even
+                // when another file partially matches its name or metadata. Retain an
+                // exact full-query lexical match as the stronger direct-evidence case.
+                if lexicalByID[strongerID] == nil,
+                   lexicalByID[weakerID]?.hasExactPhrase != true {
+                    return lhsHasHigherSemanticScore
+                }
+            }
             if sortByConfidence, lhs.confidence != rhs.confidence {
                 return lhs.confidence > rhs.confidence
             }
