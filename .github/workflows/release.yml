@@ -809,6 +809,7 @@ jobs:
           FILENEST_DEPLOY_KEY="$ssh_key" \
             FILENEST_DEPLOY_HOST="$FILENEST_DEPLOY_HOST" \
             FILENEST_DEPLOY_USER="$FILENEST_DEPLOY_USER" \
+            FILENEST_REMOTE_DIR="/home/${FILENEST_DEPLOY_USER}/filenest-deploy" \
             FILENEST_UPDATE_DATA_DIR="$FILENEST_UPDATE_DATA_DIR" \
             FILENEST_OMP_MANIFEST_FILE="$FILENEST_OMP_MANIFEST_FILE" \
             ./scripts/deploy-non-docker.sh --skip-website --skip-r2
