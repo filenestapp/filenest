@@ -86,7 +86,7 @@ targets:
             done
           fi
           if [[ "${NEEDS_BUILD}" == "1" ]]; then
-            PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}" "${SRCROOT}/script/build_agent_host.sh"
+            PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" "${SRCROOT}/script/build_agent_host.sh"
           fi
 
           HOST_DESTINATION="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/AgentHost"

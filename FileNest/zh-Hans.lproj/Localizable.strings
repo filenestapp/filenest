@@ -1376,6 +1376,10 @@
 "OMP Preview stopped before completing this answer. The partial response is shown above." = "OMP 预览在完成回答前停止，以上为已生成的部分内容。";
 "Agent harness stopped before completing this answer. The partial response is shown above." = "Agent harness 在完成回答前停止，以上为已生成的部分内容。";
 "OMP Agent Host" = "OMP 智能体主机";
+"Official OMP Runtime" = "官方 OMP 运行时";
+"Install Official OMP" = "安装官方 OMP";
+"Restore Previous Version" = "恢复上一版本";
+"FileNest downloads official OMP releases over HTTPS, verifies GitHub's SHA-256 digest, validates the executable, and switches versions atomically. The FileNest adapter keeps model and tool access isolated." = "FileNest 通过 HTTPS 下载官方 OMP 版本，校验 GitHub 提供的 SHA-256 摘要并验证可执行文件，再以原子方式切换版本。FileNest 适配器会隔离模型和工具访问。";
 "Latest Version" = "最新版本";
 "OMP Host not detected" = "未检测到 OMP Host";
 "Developer Agent Host path is active; managed updates are disabled." = "当前使用开发者 Agent Host 路径，已禁用托管更新。";

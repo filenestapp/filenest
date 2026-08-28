@@ -1376,6 +1376,10 @@
 "OMP Preview stopped before completing this answer. The partial response is shown above." = "OMP Preview stopped before completing this answer. The partial response is shown above.";
 "Agent harness stopped before completing this answer. The partial response is shown above." = "Agent harness stopped before completing this answer. The partial response is shown above.";
 "OMP Agent Host" = "OMP Agent Host";
+"Official OMP Runtime" = "Official OMP Runtime";
+"Install Official OMP" = "Install Official OMP";
+"Restore Previous Version" = "Restore Previous Version";
+"FileNest downloads official OMP releases over HTTPS, verifies GitHub's SHA-256 digest, validates the executable, and switches versions atomically. The FileNest adapter keeps model and tool access isolated." = "FileNest downloads official OMP releases over HTTPS, verifies GitHub's SHA-256 digest, validates the executable, and switches versions atomically. The FileNest adapter keeps model and tool access isolated.";
 "Latest Version" = "Latest Version";
 "OMP Host not detected" = "OMP Host not detected";
 "Developer Agent Host path is active; managed updates are disabled." = "Developer Agent Host path is active; managed updates are disabled.";
