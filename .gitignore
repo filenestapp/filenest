@@ -14,6 +14,9 @@ xcuserdata/
 
 # Local tooling
 .zcode/
+/AgentHost/node_modules/
+/AgentHost/dist/
+/AgentHost/*.bun-build
 
 # Local deployment secrets and cache
 configs/deploy.env

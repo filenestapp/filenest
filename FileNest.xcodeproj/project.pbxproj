@@ -7,10 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0064D6CCA07C17B351E704FE /* AgentHostTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B4D321398D7E10555802D9F /* AgentHostTool.swift */; };
 		062CDF46DE094E7FAA57B505 /* SkillToolRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 123027FD36720A5F37B945F5 /* SkillToolRuntime.swift */; };
 		0BCD6B56BC019566B68191AB /* FileSummaryServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36CF2D61C9C4F8518467BDBB /* FileSummaryServiceTests.swift */; };
 		0D0079FBE59AF415B552211F /* LocalizationCoverageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2786CDACA256972DC2ECF363 /* LocalizationCoverageTests.swift */; };
 		109C885C8C54D0CDB864F9A5 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 223BD5AC49BC6D8392DC2FD5 /* OnboardingView.swift */; };
+		17571DB3AF98F84B9ACCEFAC /* DownloadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07E06AC16C853536E311BA34 /* DownloadCoordinator.swift */; };
 		17DDB1D0BC7305DC6A33BF54 /* AppLogService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9021C96F7CACC531E1190D9D /* AppLogService.swift */; };
 		1803A0D5DC3335026AC0E5AE /* ProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEF4267D593581CD58AA17C5 /* ProviderTests.swift */; };
 		19310935F0A7DA7AE25AB8B6 /* LLMProviders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E2841AC565E2C180CE122C2 /* LLMProviders.swift */; };
@@ -31,7 +33,9 @@
 		4A49D4D410474E7E805A58DB /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 101F44DB3C904905BA9E50BB /* ZIPFoundation */; };
 		4B461762DB0DC67A53CA2EB9 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 190F7700405997953654E162 /* ZIPFoundation */; };
 		4E24DDB45B41D46F0FD06CF2 /* GlobalHotKeyService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84B15BFCEE47362DDAFEBC65 /* GlobalHotKeyService.swift */; };
+		50AE38AEDA9ADC2CA48D5AC5 /* OMPAgentHostService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 801C8A874B9FDB8E9CC41188 /* OMPAgentHostService.swift */; };
 		535C4C61FC49458FFCCC940F /* SQLiteVec in Frameworks */ = {isa = PBXBuildFile; productRef = 8816A508D9E30086057930AC /* SQLiteVec */; };
+		54889080C83515EAB09F8ADA /* AgentAttachedDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C7738D2E69B65DE34BC2499 /* AgentAttachedDocument.swift */; };
 		552EE7BDC7AB9F178BDB65A6 /* FileSubfolderClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9A8EA592BDC9D941191D08E /* FileSubfolderClassifier.swift */; };
 		58C60715E5958EC742B4C465 /* OrganizerServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3852187AB6DFCAF137FE021B /* OrganizerServiceTests.swift */; };
 		5C692283F5741559C274CE53 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 502A8F6440EE3876771CAB8C /* DesignSystem.swift */; };
@@ -48,12 +52,15 @@
 		6BB3287893C5D806DABEDD22 /* ChatContextManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 812F58B8B1E370C9E41AC685 /* ChatContextManager.swift */; };
 		6FA1EF6DEB91E79B62A8D9D8 /* OrganizerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F78A71B3DCB8483A341C7A /* OrganizerService.swift */; };
 		738623A6F243BE6B0326C280 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92AB18FB7207E6AAFB5AC33F /* SettingsView.swift */; };
+		7495B95738F822F9BA5DC7DE /* OMPAgentEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 390B0AAEA832924435AB959E /* OMPAgentEngine.swift */; };
 		750134831B313854FDD639B1 /* IndexerServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D279A11830E6026464167E5D /* IndexerServiceTests.swift */; };
 		774627DC21958FDE2E99C087 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 54BC25167D88C35FBCFDB01F /* Assets.xcassets */; };
 		79ABCA0FFC6D322EA4448A74 /* RerankerServiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F38171219B7AC3A1FF963A0C /* RerankerServiceManager.swift */; };
 		7C01A5CE17EBDFB072B323D9 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41ABE72DDFB85190D0B6DDD6 /* Models.swift */; };
 		7F521007711937B112316C2C /* DoclingDocumentProcessorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4342A416E7A8C573C6C0C9 /* DoclingDocumentProcessorTests.swift */; };
 		7F8D94874A5A9B67A476E32E /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A5DA86309B1EC6717579503C /* GRDB */; };
+		82C16095AFA6D931C7F69448 /* AgentEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8997DB797A95DC5C96C93BFF /* AgentEngineTests.swift */; };
+		8533F041034D5B97AB5AE206 /* FileNestAgentToolGateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FD4BD19F2914F2D7ABC9E25 /* FileNestAgentToolGateway.swift */; };
 		857B9C95B04104247BE51E01 /* IndexerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DE24403AF530F82278B6BC3 /* IndexerService.swift */; };
 		85CDF972A6583F2C78AACFBB /* Skills in Resources */ = {isa = PBXBuildFile; fileRef = D604009DE4571B5F83AB5B40 /* Skills */; };
 		87265031BCF5DF5E784BDF58 /* StatisticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BD24682372EBBAB7E8E0E48 /* StatisticsView.swift */; };
@@ -61,11 +68,13 @@
 		91E4FCD02C332A942183BCE0 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6649AC190414A7EAA31FD24E /* MenuBarView.swift */; };
 		938F9B4ED20BCE5F9164179E /* OCRProviders.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA951D7F40D7C1191BC6D808 /* OCRProviders.swift */; };
 		973F86E6A2DFBFF214A72876 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B1E54077AA4314A64BF946B /* LibraryView.swift */; };
+		97977FA5FE426117B276E7F8 /* OMPRPCFrameDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DCF2FDCCA40D765A06DBB66 /* OMPRPCFrameDecoder.swift */; };
 		9BE37ACCBD9A4B542903877A /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 64E59484A5961578C5B1A8A2 /* GRDB */; };
 		9F2DDEB6C49B15E6EAD2FFC9 /* DoclingServiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDE601367998B1A01F5BBC35 /* DoclingServiceManager.swift */; };
-		A1D0A4C57F1E4E949DEB9E01 /* DownloadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2D0A4C57F1E4E949DEB9E02 /* DownloadCoordinator.swift */; };
 		9F838A2B83F874CAF4A49530 /* FileSummaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76AB49499CF6F2DE1415434C /* FileSummaryService.swift */; };
 		A02F1E1580AA1F36CA2E8255 /* FileNestApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A8A793C6CFB7D4E6B507F3E /* FileNestApp.swift */; };
+		AAF2A0951D5B8706E5654B4C /* AgentEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 765FEF497A1A51108ACDA8D2 /* AgentEngine.swift */; };
+		AE46E79C9E6F06B3F8E442FE /* OMPRPCConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 283AF8939640B8244A83D4D7 /* OMPRPCConnection.swift */; };
 		AF858DEA4596E60D4F744EE2 /* FileStabilityTrackerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C1B8C692F4C1A7136F74DFF /* FileStabilityTrackerTests.swift */; };
 		B2CC94B45128414A2C0C6330 /* FileEligibilityPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8A570EDA948B6E37046E18A /* FileEligibilityPolicy.swift */; };
 		B3774AF7D6283FD6955A9079 /* AppLogServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52AED83B94BFD772F7ED7A1E /* AppLogServiceTests.swift */; };
@@ -76,6 +85,8 @@
 		C858C26590E234AE9B3FC73B /* AccelerateVectorStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF82143A6594FB0098BAD8A /* AccelerateVectorStoreTests.swift */; };
 		CC2060844D8D45F17E6EE1D6 /* DoclingDocumentProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F98BCDF2352B228C459EB5C5 /* DoclingDocumentProcessor.swift */; };
 		CC4DD1E96E5ECD3F3C849804 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = C1BDC54AEBEC9EC9960E5C72 /* Sparkle */; };
+		CC538C9F464BEBCC83615E3C /* FileNestInstallation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E84E840DA8AA00450F44C2B /* FileNestInstallation.swift */; };
+		CD4F99C6664645D3ED3A68BE /* AgentJSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0B30D6A72424A56D4FA3E8D /* AgentJSONValue.swift */; };
 		CDF716F420D91A55CC38C246 /* AppStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F5C65ABB5663DA46CEF9876 /* AppStateTests.swift */; };
 		CE9AF85986CD8EDCFBCA0A32 /* FilePreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 297D19E22AC1C76B71C6AF9A /* FilePreviewView.swift */; };
 		CFEF238FB153D24FC6A03282 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27303B439066A29084763669 /* ChatView.swift */; };
@@ -93,6 +104,7 @@
 		F3756EEC872DD311665B8684 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B384135AFF13CA8C8B35647 /* Protocols.swift */; };
 		F4687B636DC276423B58B9EF /* AgentSkillServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13F6E3E583635E529EED4C4 /* AgentSkillServiceTests.swift */; };
 		F483106C890A5D06AC88546F /* FileStabilityTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6593BF0E6103F8909253FADE /* FileStabilityTracker.swift */; };
+		F61EB8A961C03CC936046BB2 /* AgentHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E74FD4FC2107956360A0805 /* AgentHarness.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -107,11 +119,14 @@
 
 /* Begin PBXFileReference section */
 		05F3FDF12A0309FE2F98566C /* SQLiteStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteStoreTests.swift; sourceTree = "<group>"; };
+		07E06AC16C853536E311BA34 /* DownloadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadCoordinator.swift; sourceTree = "<group>"; };
 		07F627F75F60ECBD269437A6 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		0A8A793C6CFB7D4E6B507F3E /* FileNestApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNestApp.swift; sourceTree = "<group>"; };
 		0B1E54077AA4314A64BF946B /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
+		0C7738D2E69B65DE34BC2499 /* AgentAttachedDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAttachedDocument.swift; sourceTree = "<group>"; };
 		0EC590A60246A1F41F87AB27 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		123027FD36720A5F37B945F5 /* SkillToolRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillToolRuntime.swift; sourceTree = "<group>"; };
+		1B4D321398D7E10555802D9F /* AgentHostTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentHostTool.swift; sourceTree = "<group>"; };
 		1DDEE9EB899F17FB57569A2A /* AppSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettingsTests.swift; sourceTree = "<group>"; };
 		1E2841AC565E2C180CE122C2 /* LLMProviders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMProviders.swift; sourceTree = "<group>"; };
 		217ED1BD609FC8CA031940F2 /* QuickSearchPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickSearchPanel.swift; sourceTree = "<group>"; };
@@ -119,11 +134,13 @@
 		223BD5AC49BC6D8392DC2FD5 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		27303B439066A29084763669 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		2786CDACA256972DC2ECF363 /* LocalizationCoverageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationCoverageTests.swift; sourceTree = "<group>"; };
+		283AF8939640B8244A83D4D7 /* OMPRPCConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OMPRPCConnection.swift; sourceTree = "<group>"; };
 		297D19E22AC1C76B71C6AF9A /* FilePreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePreviewView.swift; sourceTree = "<group>"; };
 		32F78A71B3DCB8483A341C7A /* OrganizerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizerService.swift; sourceTree = "<group>"; };
 		35C6B51B5FD06A5250D1301C /* AIRuleGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIRuleGeneratorTests.swift; sourceTree = "<group>"; };
 		36CF2D61C9C4F8518467BDBB /* FileSummaryServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSummaryServiceTests.swift; sourceTree = "<group>"; };
 		3852187AB6DFCAF137FE021B /* OrganizerServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizerServiceTests.swift; sourceTree = "<group>"; };
+		390B0AAEA832924435AB959E /* OMPAgentEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OMPAgentEngine.swift; sourceTree = "<group>"; };
 		3ED860C7A38EA05934B40D2C /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		3F5C65ABB5663DA46CEF9876 /* AppStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateTests.swift; sourceTree = "<group>"; };
 		41ABE72DDFB85190D0B6DDD6 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
@@ -139,15 +156,21 @@
 		6649AC190414A7EAA31FD24E /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		6AD85EC7E3721FE271E568E7 /* LaunchAtLoginService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLoginService.swift; sourceTree = "<group>"; };
 		6B384135AFF13CA8C8B35647 /* Protocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocols.swift; sourceTree = "<group>"; };
+		6E74FD4FC2107956360A0805 /* AgentHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentHarness.swift; sourceTree = "<group>"; };
+		6FD4BD19F2914F2D7ABC9E25 /* FileNestAgentToolGateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNestAgentToolGateway.swift; sourceTree = "<group>"; };
+		765FEF497A1A51108ACDA8D2 /* AgentEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentEngine.swift; sourceTree = "<group>"; };
 		76AB49499CF6F2DE1415434C /* FileSummaryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSummaryService.swift; sourceTree = "<group>"; };
 		7970E57A08715FE45E17523A /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		7C1B8C692F4C1A7136F74DFF /* FileStabilityTrackerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileStabilityTrackerTests.swift; sourceTree = "<group>"; };
+		7E84E840DA8AA00450F44C2B /* FileNestInstallation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNestInstallation.swift; sourceTree = "<group>"; };
+		801C8A874B9FDB8E9CC41188 /* OMPAgentHostService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OMPAgentHostService.swift; sourceTree = "<group>"; };
 		812F58B8B1E370C9E41AC685 /* ChatContextManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatContextManager.swift; sourceTree = "<group>"; };
 		83A36E51998EEBF3C18DBB26 /* LocalArchiveDocumentExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalArchiveDocumentExtractor.swift; sourceTree = "<group>"; };
 		8433DC917419F63B9601AB90 /* AIRuleGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIRuleGenerator.swift; sourceTree = "<group>"; };
 		84B15BFCEE47362DDAFEBC65 /* GlobalHotKeyService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalHotKeyService.swift; sourceTree = "<group>"; };
 		8649BE2799C7BB363E75B4E0 /* SQLiteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteStore.swift; sourceTree = "<group>"; };
 		88E04005FF9FE0F7CC30C37C /* RAGLearningService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAGLearningService.swift; sourceTree = "<group>"; };
+		8997DB797A95DC5C96C93BFF /* AgentEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentEngineTests.swift; sourceTree = "<group>"; };
 		8BC13866E4DE2369E11F04E4 /* ChatService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatService.swift; sourceTree = "<group>"; };
 		9021C96F7CACC531E1190D9D /* AppLogService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogService.swift; sourceTree = "<group>"; };
 		915DFBAB0D88A18EF3A6A6DC /* PromptCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptCatalog.swift; sourceTree = "<group>"; };
@@ -155,15 +178,16 @@
 		93AF189A6E886107AA525ED4 /* FileContentHasherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileContentHasherTests.swift; sourceTree = "<group>"; };
 		9C4AE7D85E21287AE2C5B421 /* OllamaServiceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaServiceManager.swift; sourceTree = "<group>"; };
 		9CA5D1539B5BF0191A893469 /* ReindexActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReindexActivityView.swift; sourceTree = "<group>"; };
+		9DCF2FDCCA40D765A06DBB66 /* OMPRPCFrameDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OMPRPCFrameDecoder.swift; sourceTree = "<group>"; };
 		9E792A846DAEB2DEAC97A618 /* FileNest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FileNest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A13F6E3E583635E529EED4C4 /* AgentSkillServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSkillServiceTests.swift; sourceTree = "<group>"; };
-		A2D0A4C57F1E4E949DEB9E02 /* DownloadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadCoordinator.swift; sourceTree = "<group>"; };
 		ACF82143A6594FB0098BAD8A /* AccelerateVectorStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccelerateVectorStoreTests.swift; sourceTree = "<group>"; };
 		B0074C4678D01C5C464228C9 /* OCRDocumentProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRDocumentProcessor.swift; sourceTree = "<group>"; };
 		B290655B42F0B0722076C1D9 /* ContentExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentExtractor.swift; sourceTree = "<group>"; };
 		BA0E2E173EE92362C7254410 /* FileWatcherServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcherServiceTests.swift; sourceTree = "<group>"; };
 		BC9488E7EC05DA35DA043E28 /* RAGFeedbackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAGFeedbackView.swift; sourceTree = "<group>"; };
 		BD8EABE9FA5CB20261C9D250 /* FileNestSkillCLI */ = {isa = PBXFileReference; includeInIndex = 0; path = FileNestSkillCLI; sourceTree = BUILT_PRODUCTS_DIR; };
+		C0B30D6A72424A56D4FA3E8D /* AgentJSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentJSONValue.swift; sourceTree = "<group>"; };
 		C1AF71E1C61D599A9EC1771B /* OrganizationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationPolicy.swift; sourceTree = "<group>"; };
 		C7F32D12E48807558F2E0953 /* ChatServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatServiceTests.swift; sourceTree = "<group>"; };
 		C9A8EA592BDC9D941191D08E /* FileSubfolderClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSubfolderClassifier.swift; sourceTree = "<group>"; };
@@ -226,8 +250,8 @@
 				812F58B8B1E370C9E41AC685 /* ChatContextManager.swift */,
 				8BC13866E4DE2369E11F04E4 /* ChatService.swift */,
 				DDE601367998B1A01F5BBC35 /* DoclingServiceManager.swift */,
-				A2D0A4C57F1E4E949DEB9E02 /* DownloadCoordinator.swift */,
 				5D5696358B1F92AD48267E65 /* DocumentTreeNavigator.swift */,
+				07E06AC16C853536E311BA34 /* DownloadCoordinator.swift */,
 				6593BF0E6103F8909253FADE /* FileStabilityTracker.swift */,
 				C9A8EA592BDC9D941191D08E /* FileSubfolderClassifier.swift */,
 				76AB49499CF6F2DE1415434C /* FileSummaryService.swift */,
@@ -236,6 +260,7 @@
 				5DE24403AF530F82278B6BC3 /* IndexerService.swift */,
 				6AD85EC7E3721FE271E568E7 /* LaunchAtLoginService.swift */,
 				9C4AE7D85E21287AE2C5B421 /* OllamaServiceManager.swift */,
+				801C8A874B9FDB8E9CC41188 /* OMPAgentHostService.swift */,
 				32F78A71B3DCB8483A341C7A /* OrganizerService.swift */,
 				915DFBAB0D88A18EF3A6A6DC /* PromptCatalog.swift */,
 				88E04005FF9FE0F7CC30C37C /* RAGLearningService.swift */,
@@ -259,6 +284,7 @@
 				07F627F75F60ECBD269437A6 /* AppSettings.swift */,
 				7970E57A08715FE45E17523A /* AppState.swift */,
 				0A8A793C6CFB7D4E6B507F3E /* FileNestApp.swift */,
+				7E84E840DA8AA00450F44C2B /* FileNestInstallation.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -269,6 +295,7 @@
 				54BC25167D88C35FBCFDB01F /* Assets.xcassets */,
 				98B9D2C4BC0A1E54992416E3 /* Localizable.strings */,
 				D604009DE4571B5F83AB5B40 /* Skills */,
+				B2B33C29C3DEACBDD9BBBD2D /* AgentEngine */,
 				2A208D02E61A1878075701F4 /* App */,
 				7B220AD0BDAE87C7EC93A1DA /* Domain */,
 				BFB4B507C25D067653048F2E /* Extraction */,
@@ -349,6 +376,22 @@
 			name = Packages;
 			sourceTree = "<group>";
 		};
+		B2B33C29C3DEACBDD9BBBD2D /* AgentEngine */ = {
+			isa = PBXGroup;
+			children = (
+				0C7738D2E69B65DE34BC2499 /* AgentAttachedDocument.swift */,
+				765FEF497A1A51108ACDA8D2 /* AgentEngine.swift */,
+				6E74FD4FC2107956360A0805 /* AgentHarness.swift */,
+				1B4D321398D7E10555802D9F /* AgentHostTool.swift */,
+				C0B30D6A72424A56D4FA3E8D /* AgentJSONValue.swift */,
+				6FD4BD19F2914F2D7ABC9E25 /* FileNestAgentToolGateway.swift */,
+				390B0AAEA832924435AB959E /* OMPAgentEngine.swift */,
+				283AF8939640B8244A83D4D7 /* OMPRPCConnection.swift */,
+				9DCF2FDCCA40D765A06DBB66 /* OMPRPCFrameDecoder.swift */,
+			);
+			path = AgentEngine;
+			sourceTree = "<group>";
+		};
 		BFB4B507C25D067653048F2E /* Extraction */ = {
 			isa = PBXGroup;
 			children = (
@@ -375,6 +418,7 @@
 			isa = PBXGroup;
 			children = (
 				ACF82143A6594FB0098BAD8A /* AccelerateVectorStoreTests.swift */,
+				8997DB797A95DC5C96C93BFF /* AgentEngineTests.swift */,
 				A13F6E3E583635E529EED4C4 /* AgentSkillServiceTests.swift */,
 				35C6B51B5FD06A5250D1301C /* AIRuleGeneratorTests.swift */,
 				52AED83B94BFD772F7ED7A1E /* AppLogServiceTests.swift */,
@@ -410,6 +454,7 @@
 				193A0B6EF164549FE1266FDB /* Sources */,
 				69EBCDB125332E3EC4D5001C /* Resources */,
 				73AB67FCD8FE7B43F257E73F /* Frameworks */,
+				B142DE32E4E5C07E36889D2B /* Bundle FileNest OMP Adapter */,
 				01CEA26FE17E11695C5815E4 /* Generate Build Information */,
 			);
 			buildRules = (
@@ -551,6 +596,25 @@
 			shellPath = /bin/sh;
 			shellScript = "set -euo pipefail\nINFO_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nINFO_FILE=\"${INFO_DIR}/FileNestBuildInfo.plist\"\nmkdir -p \"${INFO_DIR}\"\nrm -f \"${INFO_FILE}\"\n/usr/bin/plutil -create xml1 \"${INFO_FILE}\"\n/usr/bin/plutil -replace BuildDate -string \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"${INFO_FILE}\"\n/usr/bin/plutil -replace MarketingVersion -string \"${MARKETING_VERSION}\" \"${INFO_FILE}\"\n/usr/bin/plutil -replace BuildNumber -string \"${CURRENT_PROJECT_VERSION}\" \"${INFO_FILE}\"\n\nAPP_INFO_PLIST=\"${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Info.plist\"\nif [[ ! -f \"${APP_INFO_PLIST}\" && -f \"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\" ]]; then\n  APP_INFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\"\nfi\nif [[ ! -f \"${APP_INFO_PLIST}\" ]]; then\n  exit 0\nfi\n/usr/bin/plutil -replace SUEnableAutomaticChecks -bool YES \"${APP_INFO_PLIST}\" 2>/dev/null \\\n  || /usr/bin/plutil -insert SUEnableAutomaticChecks -bool YES \"${APP_INFO_PLIST}\"\n/usr/bin/plutil -replace SUAllowsAutomaticUpdates -bool YES \"${APP_INFO_PLIST}\" 2>/dev/null \\\n  || /usr/bin/plutil -insert SUAllowsAutomaticUpdates -bool YES \"${APP_INFO_PLIST}\"\n/usr/bin/plutil -replace SUAutomaticallyUpdate -bool YES \"${APP_INFO_PLIST}\" 2>/dev/null \\\n  || /usr/bin/plutil -insert SUAutomaticallyUpdate -bool YES \"${APP_INFO_PLIST}\"\n\nif [[ -n \"${FILENEST_UPDATE_FEED_URL:-}\" ]]; then\n  /usr/bin/plutil -replace SUFeedURL -string \"${FILENEST_UPDATE_FEED_URL}\" \"${APP_INFO_PLIST}\" 2>/dev/null \\\n    || /usr/bin/plutil -insert SUFeedURL -string \"${FILENEST_UPDATE_FEED_URL}\" \"${APP_INFO_PLIST}\"\nelse\n  /usr/bin/plutil -remove SUFeedURL \"${APP_INFO_PLIST}\" 2>/dev/null || true\nfi\n\nif [[ -n \"${FILENEST_SPARKLE_PUBLIC_KEY:-}\" ]]; then\n  /usr/bin/plutil -replace SUPublicEDKey -string \"${FILENEST_SPARKLE_PUBLIC_KEY}\" \"${APP_INFO_PLIST}\" 2>/dev/null \\\n    || /usr/bin/plutil -insert SUPublicEDKey -string \"${FILENEST_SPARKLE_PUBLIC_KEY}\" \"${APP_INFO_PLIST}\"\nelse\n  /usr/bin/plutil -remove SUPublicEDKey \"${APP_INFO_PLIST}\" 2>/dev/null || true\nfi\n";
 		};
+		B142DE32E4E5C07E36889D2B /* Bundle FileNest OMP Adapter */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Bundle FileNest OMP Adapter";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -euo pipefail\nHOST_SOURCE=\"${SRCROOT}/AgentHost/dist/filenest-agent-host\"\nVERSION_SOURCE=\"${SRCROOT}/AgentHost/dist/version.txt\"\nBUILD_INPUTS=(\n  \"${SRCROOT}/AgentHost/src/main.ts\"\n  \"${SRCROOT}/AgentHost/package.json\"\n  \"${SRCROOT}/AgentHost/bun.lock\"\n)\nNEEDS_BUILD=0\nif [[ ! -x \"${HOST_SOURCE}\" || ! -s \"${VERSION_SOURCE}\" ]]; then\n  NEEDS_BUILD=1\nelse\n  for INPUT in \"${BUILD_INPUTS[@]}\"; do\n    if [[ ! -f \"${INPUT}\" || \"${INPUT}\" -nt \"${HOST_SOURCE}\" ]]; then\n      NEEDS_BUILD=1\n      break\n    fi\n  done\nfi\nif [[ \"${NEEDS_BUILD}\" == \"1\" ]]; then\n  PATH=\"/opt/homebrew/bin:/usr/local/bin:/Users/la230048/.nvm/versions/node/v24.18.1/bin:/opt/homebrew/opt/openjdk@17/bin:/opt/homebrew/Cellar/mysql/8.2.0_1/bin:/Users/la230048/.codeium/windsurf/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/Library/Apple/usr/bin:/Applications/VMware Fusion.app/Contents/Public:/Users/la230048/.codex/tmp/arg0/codex-arg0qf6Jb8:/Users/la230048/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/Users/la230048/.nvm/versions/node/v24.18.1/bin:/opt/homebrew/opt/openjdk@17/bin:/opt/homebrew/Cellar/mysql/8.2.0_1/bin:/Users/la230048/.codeium/windsurf/bin:/Users/la230048/.cargo/bin:/Users/la230048/.local/bin:/Users/la230048/go/bin:/Users/la230048/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/Users/la230048/Applications/ChatGPT.app/Contents/Resources:/Users/la230048/.local/bin:/Users/la230048/go/bin:/Users/la230048/.local/bin\" \"${SRCROOT}/script/build_agent_host.sh\"\nfi\n\nHOST_DESTINATION=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/AgentHost\"\n/usr/bin/install -d -m 0755 \"${HOST_DESTINATION}\"\n/usr/bin/install -m 0755 \"${HOST_SOURCE}\" \"${HOST_DESTINATION}/filenest-agent-host\"\n/usr/bin/install -m 0644 \"${VERSION_SOURCE}\" \"${HOST_DESTINATION}/version.txt\"\n";
+		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -560,6 +624,11 @@
 			files = (
 				6518E053A5334B11CC5FECC1 /* AIRuleGenerator.swift in Sources */,
 				25F4F037026B133DF6FBBD81 /* AccelerateVectorStore.swift in Sources */,
+				54889080C83515EAB09F8ADA /* AgentAttachedDocument.swift in Sources */,
+				AAF2A0951D5B8706E5654B4C /* AgentEngine.swift in Sources */,
+				F61EB8A961C03CC936046BB2 /* AgentHarness.swift in Sources */,
+				0064D6CCA07C17B351E704FE /* AgentHostTool.swift in Sources */,
+				CD4F99C6664645D3ED3A68BE /* AgentJSONValue.swift in Sources */,
 				45DCE8AE103F5301D86ABD45 /* AgentSkillService.swift in Sources */,
 				17DDB1D0BC7305DC6A33BF54 /* AppLogService.swift in Sources */,
 				5F68F392524A348200FDA99D /* AppSettings.swift in Sources */,
@@ -572,12 +641,14 @@
 				5C692283F5741559C274CE53 /* DesignSystem.swift in Sources */,
 				CC2060844D8D45F17E6EE1D6 /* DoclingDocumentProcessor.swift in Sources */,
 				9F2DDEB6C49B15E6EAD2FFC9 /* DoclingServiceManager.swift in Sources */,
-				A1D0A4C57F1E4E949DEB9E01 /* DownloadCoordinator.swift in Sources */,
 				3A4FA057F752A7DA6ED038B9 /* DocumentTreeNavigator.swift in Sources */,
+				17571DB3AF98F84B9ACCEFAC /* DownloadCoordinator.swift in Sources */,
 				2EAD682AF620F5C5BBBB3DAD /* EmbeddingProviders.swift in Sources */,
 				5E523175D5F8F4F0428ACAB2 /* FileContentHasher.swift in Sources */,
 				B2CC94B45128414A2C0C6330 /* FileEligibilityPolicy.swift in Sources */,
+				8533F041034D5B97AB5AE206 /* FileNestAgentToolGateway.swift in Sources */,
 				A02F1E1580AA1F36CA2E8255 /* FileNestApp.swift in Sources */,
+				CC538C9F464BEBCC83615E3C /* FileNestInstallation.swift in Sources */,
 				CE9AF85986CD8EDCFBCA0A32 /* FilePreviewView.swift in Sources */,
 				F483106C890A5D06AC88546F /* FileStabilityTracker.swift in Sources */,
 				552EE7BDC7AB9F178BDB65A6 /* FileSubfolderClassifier.swift in Sources */,
@@ -594,6 +665,10 @@
 				7C01A5CE17EBDFB072B323D9 /* Models.swift in Sources */,
 				5FA431EEF8353C868350B8FF /* OCRDocumentProcessor.swift in Sources */,
 				938F9B4ED20BCE5F9164179E /* OCRProviders.swift in Sources */,
+				7495B95738F822F9BA5DC7DE /* OMPAgentEngine.swift in Sources */,
+				50AE38AEDA9ADC2CA48D5AC5 /* OMPAgentHostService.swift in Sources */,
+				AE46E79C9E6F06B3F8E442FE /* OMPRPCConnection.swift in Sources */,
+				97977FA5FE426117B276E7F8 /* OMPRPCFrameDecoder.swift in Sources */,
 				BB2DF823113251DFB6CE4257 /* OllamaServiceManager.swift in Sources */,
 				109C885C8C54D0CDB864F9A5 /* OnboardingView.swift in Sources */,
 				D9D9DE504E105FFD9A319390 /* OrganizationPolicy.swift in Sources */,
@@ -628,6 +703,7 @@
 			files = (
 				8BEA04EDE8D4B439EE224D21 /* AIRuleGeneratorTests.swift in Sources */,
 				C858C26590E234AE9B3FC73B /* AccelerateVectorStoreTests.swift in Sources */,
+				82C16095AFA6D931C7F69448 /* AgentEngineTests.swift in Sources */,
 				F4687B636DC276423B58B9EF /* AgentSkillServiceTests.swift in Sources */,
 				B3774AF7D6283FD6955A9079 /* AppLogServiceTests.swift in Sources */,
 				2C2164A680993E7AFDA06680 /* AppSettingsTests.swift in Sources */,
@@ -717,7 +793,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.local.FileNestTests;
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FileNest.app/Contents/MacOS/FileNest";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FileNest Dev.app/Contents/MacOS/FileNest Dev";
 			};
 			name = Debug;
 		};
@@ -810,6 +886,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.local.filenest;
+				PRODUCT_MODULE_NAME = FileNest;
 				PRODUCT_NAME = FileNest;
 				SDKROOT = macosx;
 			};
@@ -890,14 +967,15 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
 				ENABLE_PREVIEWS = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = FileNest;
+				INFOPLIST_KEY_CFBundleDisplayName = "FileNest Dev";
 				INFOPLIST_KEY_LSUIElement = NO;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.local.filenest;
-				PRODUCT_NAME = FileNest;
+				PRODUCT_BUNDLE_IDENTIFIER = com.local.filenest.dev;
+				PRODUCT_MODULE_NAME = FileNest;
+				PRODUCT_NAME = "FileNest Dev";
 				SDKROOT = macosx;
 			};
 			name = Debug;

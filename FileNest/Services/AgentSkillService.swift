@@ -137,12 +137,9 @@ final class AgentSkillService {
         bundledDirectory: URL? = nil
     ) {
         self.store = store
-        let applicationSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.homeDirectoryForCurrentUser
         self.managedDirectory = managedDirectory
-            ?? applicationSupport.appendingPathComponent("FileNest/Skills", isDirectory: true)
+            ?? ManagedRuntimePaths.applicationSupportRoot
+                .appendingPathComponent("Skills", isDirectory: true)
         self.sharedUserDirectory = sharedUserDirectory
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".agents/skills", isDirectory: true)

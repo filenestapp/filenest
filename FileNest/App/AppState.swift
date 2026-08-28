@@ -366,6 +366,8 @@ final class AppState: ObservableObject {
     let paddleOCR: PaddleOCRServiceManager
     let ffmpeg: FFmpegServiceManager
     let whisper: WhisperServiceManager
+    let ompAgentHost: OMPAgentHostServiceManager
+    let agentHarnesses: AgentHarnessRegistry
     let updates: AppUpdateService
 
     @Published var statusText = "Ready"
@@ -666,6 +668,7 @@ final class AppState: ObservableObject {
          settings: AppSettings = .shared,
          organizeRoot: URL? = nil,
          indexer providedIndexer: IndexerService? = nil,
+         agentHarnessRegistry: AgentHarnessRegistry = .builtIn,
          startAutomatically: Bool = !AppState.isRunningTests) {
         self.store = store
         self.settings = settings
@@ -679,11 +682,13 @@ final class AppState: ObservableObject {
         let agentSkills = AgentSkillService(store: store)
         _ = agentSkills.refresh()
         agentSkills.migrateLegacySkills((try? store.allAISystemSkills()) ?? [])
+        let agentHarnesses = agentHarnessRegistry
         let chat = ChatService(
             store: store,
             settings: settings,
             vectorStore: indexer.vectorStore,
-            skillService: agentSkills
+            skillService: agentSkills,
+            agentHarnessRegistry: agentHarnesses
         )
         let ragLearning = RAGLearningService(
             store: store,
@@ -697,6 +702,7 @@ final class AppState: ObservableObject {
         let paddleOCR = PaddleOCRServiceManager()
         let ffmpeg = FFmpegServiceManager()
         let whisper = WhisperServiceManager()
+        let ompAgentHost = OMPAgentHostServiceManager()
         // The watcher depends on the organizer and indexer, so create those first.
         let watcher = FileWatcherService(
             store: store,
@@ -716,6 +722,8 @@ final class AppState: ObservableObject {
         self.paddleOCR = paddleOCR
         self.ffmpeg = ffmpeg
         self.whisper = whisper
+        self.ompAgentHost = ompAgentHost
+        self.agentHarnesses = agentHarnesses
         self.watcher = watcher
         if startAutomatically {
             SystemNotificationService.shared.configure()
@@ -794,6 +802,9 @@ final class AppState: ObservableObject {
                     self?.refreshIndexConfigurationState()
                 }
             }
+            .store(in: &cancellables)
+        ompAgentHost.objectWillChange
+            .sink { [weak self] _ in self?.scheduleServicePresentationRefresh() }
             .store(in: &cancellables)
         updates.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -2182,7 +2193,8 @@ final class AppState: ObservableObject {
                 rating: rating,
                 reason: reason,
                 bestFileID: bestFileID,
-                bestFileReason: bestFileReason
+                bestFileReason: bestFileReason,
+                harnessKind: feedbackHarnessKind(for: message)
             )
             var updatedMessage = message
             updatedMessage.feedback = rating == .accurate ? "helpful" : "notHelpful"
@@ -2247,6 +2259,19 @@ final class AppState: ObservableObject {
         updatedMessage.feedback = nil
         try? store.updateChatMessage(updatedMessage)
         refreshRAGLearningState()
+    }
+
+    private func feedbackHarnessKind(for message: ChatMessage) -> String {
+        if let responseHarnessKind = message.responseHarnessKind,
+           !responseHarnessKind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return responseHarnessKind
+        }
+        // Messages created before harness provenance was persisted can still be
+        // classified reliably for the built-in OMP adapter.
+        if message.responseProvider == AgentHarnessKind.omp.rawValue {
+            return AgentHarnessKind.omp.rawValue
+        }
+        return AgentHarnessKind.classic.rawValue
     }
 
     func setAISystemSkillEnabled(_ skill: AISystemSkill, enabled: Bool) {
@@ -2497,7 +2522,8 @@ final class AppState: ObservableObject {
             async let doclingUpdates: Void = docling.checkForUpdates()
             async let paddleUpdates: Void = paddleOCR.checkForUpdates()
             async let ffmpegUpdates: Void = ffmpeg.checkForUpdates()
-            _ = await (ollamaUpdates, doclingUpdates, paddleUpdates, ffmpegUpdates)
+            async let ompUpdates: Void = ompAgentHost.checkForUpdates()
+            _ = await (ollamaUpdates, doclingUpdates, paddleUpdates, ffmpegUpdates, ompUpdates)
         }
         modelVersionCheckTask = task
         await task.value
@@ -2519,6 +2545,7 @@ final class AppState: ObservableObject {
             async let rerankerRefresh: Void = reranker.refresh()
             ffmpeg.refresh()
             whisper.refresh()
+            ompAgentHost.refresh()
             _ = await (ollamaRefresh, paddleRefresh, rerankerRefresh)
             if settings.rerankerSource == AppSettings.RerankerSource.local.rawValue,
                RerankerServiceManager.isModelInstalled,
@@ -2593,6 +2620,18 @@ final class AppState: ObservableObject {
             flashAttentionEnabled: settings.ollamaFlashAttentionEnabled
         )
         synchronizeActiveOllamaHost(requestedHost: requestedHost)
+    }
+
+    func updateOMPAgentHost() async {
+        await ompAgentHost.update()
+    }
+
+    func installOMPAgentHost() async {
+        await ompAgentHost.installLatest()
+    }
+
+    func rollbackOMPAgentHost() {
+        ompAgentHost.rollback()
     }
 
     private func synchronizeActiveOllamaHost(requestedHost: String) {

@@ -65,6 +65,15 @@ struct ChatView: View {
         return appState.currentChatAttachmentPath
     }
 
+    private var isSelectedAgentHarnessAvailable: Bool {
+        appState.agentHarnesses.isAvailable(for: appState.settings.selectedAgentHarnessKind)
+    }
+
+    private var usesAgentHarness: Bool {
+        isSelectedAgentHarnessAvailable
+            && appState.settings.selectedAgentHarnessKind != .classic
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             chatHeader
@@ -350,7 +359,9 @@ struct ChatView: View {
                     .frame(height: composerTextHeight)
 
                     if composerText.isEmpty {
-                        Text(isFileChat ? "Ask about this file…" : "Describe the file you're looking for…")
+                        Text(isFileChat
+                             ? "Ask about this file…"
+                             : (usesAgentHarness ? "Ask anything…" : "Describe the file you're looking for…"))
                             .font(.system(size: 14, weight: .regular))
                             .foregroundStyle(Color.secondary.opacity(0.38))
                             .padding(.top, 3)
@@ -399,6 +410,43 @@ struct ChatView: View {
                         }
                         .buttonStyle(.plain)
                         .help(appState.settings.thinkingMode ? "Turn off Thinking Mode" : "Turn on Thinking Mode")
+
+                        if appState.agentHarnesses.selectableKinds.count > 1 {
+                            Menu {
+                                ForEach(appState.agentHarnesses.selectableKinds) { kind in
+                                    Button {
+                                        appState.settings.setAgentHarness(kind)
+                                    } label: {
+                                        HStack {
+                                            Text(appState.settings.localized(
+                                                appState.agentHarnesses.displayName(for: kind)
+                                            ))
+                                            if appState.settings.selectedAgentHarnessKind == kind {
+                                                Image(systemName: "checkmark")
+                                            }
+                                        }
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: usesAgentHarness ? "bolt.horizontal.circle.fill" : "bubble.left")
+                                    Text(appState.settings.localized(
+                                        appState.agentHarnesses.displayName(for: appState.settings.selectedAgentHarnessKind)
+                                    ))
+                                }
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(usesAgentHarness ? FileNestTheme.accent : .secondary)
+                                .padding(.horizontal, 8)
+                                .frame(height: 26)
+                                .background(
+                                    usesAgentHarness ? FileNestTheme.selection : Color.clear,
+                                    in: Capsule()
+                                )
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("Choose the agent harness for this chat")
+                        }
 
                         ChatComposerModelMenu(openSettings: openSettings)
 

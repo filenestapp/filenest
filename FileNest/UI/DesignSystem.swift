@@ -245,6 +245,8 @@ extension AppSettings {
             "Downloading the Whisper %@ model…",
             "FFmpeg %@ is ready",
             "OpenAI Whisper %@ is ready",
+            "The OMP Host update manifest is unavailable: HTTP status %@",
+            "The OMP Host artifact download failed: HTTP status %@",
         ]
         for template in templates {
             let parts = template.components(separatedBy: "%@")

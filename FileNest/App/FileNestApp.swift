@@ -139,7 +139,7 @@ final class FileNestAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "FileNest"
+        window.title = FileNestInstallation.displayName
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.contentView = NSHostingView(rootView: rootView)
@@ -213,7 +213,7 @@ final class MainWindowPresenter {
 
     @discardableResult
     private func focusExistingMainWindow() -> Bool {
-        guard let window = NSApp.windows.first(where: { $0.title == "FileNest" }) else {
+        guard let window = NSApp.windows.first(where: { $0.title == FileNestInstallation.displayName }) else {
             return false
         }
         if window.isMiniaturized { window.deminiaturize(nil) }
@@ -240,12 +240,12 @@ struct FileNestApp: App {
         } label: {
             Image(nsImage: Self.menuBarIcon)
                 .frame(width: 16, height: 16)
-                .accessibilityLabel("FileNest")
+                .accessibilityLabel(FileNestInstallation.displayName)
                 .background(MainWindowPresentationBridge())
         }
         .menuBarExtraStyle(.window)
 
-        WindowGroup("FileNest", id: "main") {
+        WindowGroup(FileNestInstallation.displayName, id: "main") {
             Group {
                 if FileNestEnvironment.isSettingsPreview ||
                     FileNestEnvironment.isStatisticsPreview ||

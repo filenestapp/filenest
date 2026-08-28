@@ -11,7 +11,10 @@ enum ManagedRuntimePaths {
     nonisolated static var applicationSupportRoot: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return support.appendingPathComponent("FileNest", isDirectory: true)
+        return support.appendingPathComponent(
+            FileNestInstallation.applicationSupportDirectoryName,
+            isDirectory: true
+        )
     }
 
     nonisolated static var cacheRoot: URL {
@@ -31,7 +34,9 @@ enum ManagedRuntimePaths {
     }
 
     nonisolated static var ollamaModelsRoot: URL {
-        applicationSupportRoot.appendingPathComponent("Ollama/models", isDirectory: true)
+        applicationSupportRoot
+            .appendingPathComponent("Models", isDirectory: true)
+            .appendingPathComponent("Ollama", isDirectory: true)
     }
 
     nonisolated static func managedEnvironment(
@@ -312,9 +317,8 @@ final class DoclingServiceManager: ObservableObject {
     }
 
     nonisolated static var installRoot: URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return support.appendingPathComponent("FileNest/Docling", isDirectory: true)
+        ManagedRuntimePaths.applicationSupportRoot
+            .appendingPathComponent("Docling", isDirectory: true)
     }
 
     nonisolated static var installedPackageVersion: String? {
@@ -612,9 +616,8 @@ final class FFmpegServiceManager: ObservableObject {
     }
 
     nonisolated static var installRoot: URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return support.appendingPathComponent("FileNest/MediaTools", isDirectory: true)
+        ManagedRuntimePaths.applicationSupportRoot
+            .appendingPathComponent("MediaTools", isDirectory: true)
     }
 
     nonisolated static var managedExecutable: URL {
@@ -927,9 +930,8 @@ final class WhisperServiceManager: ObservableObject {
     init() { refresh() }
 
     nonisolated static var installRoot: URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return support.appendingPathComponent("FileNest/Whisper", isDirectory: true)
+        ManagedRuntimePaths.applicationSupportRoot
+            .appendingPathComponent("Whisper", isDirectory: true)
     }
 
     nonisolated static var pythonExecutable: URL { installRoot.appendingPathComponent("venv/bin/python") }

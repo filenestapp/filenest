@@ -620,6 +620,7 @@ final class ChatService {
     private let providedLLMProvider: LLMProvider?
     private let providedVectorStore: VectorStore?
     private let skillService: AgentSkillService?
+    private let agentHarnessRegistry: AgentHarnessRegistry
     private let longDocumentWorkflow: LongDocumentWorkflowExecutor
     private let contextWindowResolver = ChatModelContextWindowResolver()
     private let doclingProcessor = DoclingDocumentProcessor()
@@ -656,18 +657,25 @@ final class ChatService {
         }
     }
 
+    private struct AgentHarnessResponse {
+        let content: String
+        let firstResponseDuration: TimeInterval?
+    }
+
     init(store: SQLiteStore,
          settings: AppSettings,
          embedder: EmbeddingProvider? = nil,
          llmProvider: LLMProvider? = nil,
          vectorStore: VectorStore? = nil,
-         skillService: AgentSkillService? = nil) {
+         skillService: AgentSkillService? = nil,
+         agentHarnessRegistry: AgentHarnessRegistry = .builtIn) {
         self.store = store
         self.settings = settings
         self.providedEmbedder = embedder
         self.providedLLMProvider = llmProvider
         self.providedVectorStore = vectorStore
         self.skillService = skillService
+        self.agentHarnessRegistry = agentHarnessRegistry
         self.longDocumentWorkflow = LongDocumentWorkflowExecutor(store: store)
         try? store.migrateLegacyChatMessagesIfNeeded()
         try? store.deleteEmptyChatSessions()
@@ -961,14 +969,65 @@ final class ChatService {
                 var firstResponseDuration: TimeInterval?
                 var responseProvider: String?
                 var responseModel: String?
+                var responseHarnessKind: String?
                 var requestTurns = history
                 var requestContext = related.context
                 var workflowInputTokens: Int?
                 var workflowOutputTokens: Int?
 
-                if case let .vectorOnly(cloudFailure) = providerMode {
-                    fullReply = vectorFallbackMessage(files: related.files, cloudFailure: cloudFailure)
+                let harnessMode: AgentInteractionMode = if isFileChat {
+                    .attachedFiles
+                } else if related.files.isEmpty {
+                    .generalChat
                 } else {
+                    .libraryReadOnly
+                }
+                let generationConfiguration = settings.agentGenerationConfiguration(
+                    modelOverride: modelOverride
+                )
+                if let harnessAdapter = selectedAgentHarnessAdapter(
+                    providerMode: providerMode,
+                    mode: harnessMode
+                ) {
+                    do {
+                        let response = try await streamAgentHarnessAnswer(
+                            adapter: harnessAdapter,
+                            question: question,
+                            history: history,
+                            mode: harnessMode,
+                            file: related.files.first,
+                            preparedContext: related.context,
+                            skillActivation: skillActivation,
+                            generationConfiguration: generationConfiguration,
+                            responseStartedAt: responseStartedAt,
+                            onDelta: { continuation.yield(.delta($0)) }
+                        )
+                        fullReply = response.content
+                        firstResponseDuration = response.firstResponseDuration
+                        providerCompleted = true
+                        responseProvider = generationConfiguration?.provider.rawValue
+                            ?? harnessAdapter.kind.rawValue
+                        responseModel = generationConfiguration?.model
+                            ?? harnessAdapter.displayName
+                        responseHarnessKind = harnessAdapter.kind.rawValue
+                    } catch {
+                        if Task.isCancelled || error is CancellationError {
+                            continuation.yield(.cancelled)
+                            continuation.finish()
+                            return
+                        }
+                        AppLogService.shared.write(
+                            "Agent harness chat failed; using the configured chat provider",
+                            category: .chat,
+                            level: .warning,
+                            metadata: ["error": error.localizedDescription]
+                        )
+                    }
+                }
+
+                if !providerCompleted, case let .vectorOnly(cloudFailure) = providerMode {
+                    fullReply = vectorFallbackMessage(files: related.files, cloudFailure: cloudFailure)
+                } else if !providerCompleted {
                     let provider: LLMProvider
                     switch providerMode {
                     case .configured:
@@ -1187,6 +1246,7 @@ final class ChatService {
                         providerCompleted = true
                         responseProvider = responseProvider ?? provider.name
                         responseModel = modelOverride ?? activeModelName(for: providerMode)
+                        responseHarnessKind = AgentHarnessKind.classic.rawValue
                     } catch {
                         if Task.isCancelled || (error as? URLError)?.code == .cancelled {
                             continuation.yield(.cancelled)
@@ -1261,7 +1321,8 @@ final class ChatService {
                     firstResponseDuration: firstResponseDuration,
                     totalResponseDuration: providerCompleted ? totalResponseDuration : nil,
                     responseProvider: providerCompleted ? responseProvider : nil,
-                    responseModel: providerCompleted ? responseModel : nil
+                    responseModel: providerCompleted ? responseModel : nil,
+                    responseHarnessKind: providerCompleted ? responseHarnessKind : nil
                 )
                 if replacingAssistantMessageID != nil {
                     try? store.updateChatMessage(assistantMessage)
@@ -1274,6 +1335,142 @@ final class ChatService {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    private func selectedAgentHarnessAdapter(
+        providerMode: ChatProviderMode,
+        mode: AgentInteractionMode
+    ) -> (any AgentHarnessAdapter)? {
+        guard case .configured = providerMode,
+              settings.selectedAgentHarnessKind != .classic else {
+            return nil
+        }
+        let kind = settings.selectedAgentHarnessKind
+        guard let adapter = agentHarnessRegistry.adapter(for: kind),
+              adapter.isAvailable,
+              adapter.supportedModes.contains(mode) else {
+            return nil
+        }
+        return adapter
+    }
+
+    private func streamAgentHarnessAnswer(
+        adapter: any AgentHarnessAdapter,
+        question: String,
+        history: [ChatTurn],
+        mode: AgentInteractionMode,
+        file: FileRecord?,
+        preparedContext: String,
+        skillActivation: AgentSkillActivation,
+        generationConfiguration: AgentGenerationConfiguration?,
+        responseStartedAt: Date,
+        onDelta: @escaping (String) -> Void
+    ) async throws -> AgentHarnessResponse {
+        let document: AgentAttachedDocument?
+        if mode == .attachedFiles {
+            guard let file else {
+                throw AgentEngineError.unavailable("FileNest did not resolve the attached document.")
+            }
+            let attachedDocument = AgentAttachedDocument(file: file, preparedContext: preparedContext)
+            guard !attachedDocument.chunks.isEmpty else {
+                throw AgentEngineError.unavailable("FileNest did not prepare readable attachment content.")
+            }
+            document = attachedDocument
+        } else {
+            document = nil
+        }
+
+        var content = ""
+        var firstResponseDuration: TimeInterval?
+        var engine: (any AgentEngine)?
+        do {
+            var earlierTurns = history
+            if let last = earlierTurns.last,
+               last.role == .user,
+               last.content.trimmingCharacters(in: .whitespacesAndNewlines) == question {
+                earlierTurns.removeLast()
+            }
+            let input = AgentInput(
+                text: question,
+                mode: mode,
+                attachedFileIDs: mode == .attachedFiles ? file?.id.map { [$0] } ?? [] : [],
+                history: earlierTurns.compactMap { turn in
+                    let role: AgentConversationTurn.Role
+                    switch turn.role {
+                    case .user: role = .user
+                    case .assistant: role = .assistant
+                    case .system: return nil
+                    }
+                    return AgentConversationTurn(role: role, content: turn.content)
+                },
+                context: mode == .libraryReadOnly ? preparedContext : nil
+            )
+            engine = try adapter.makeEngine(for: AgentHarnessRequest(
+                input: input,
+                attachedDocument: document,
+                skillContext: AgentHarnessSkillContext(
+                    names: skillActivation.names,
+                    context: skillActivation.context
+                ),
+                generationConfiguration: generationConfiguration
+            ))
+            guard let engine else {
+                throw AgentEngineError.unavailable("The agent harness did not create an engine.")
+            }
+            try await engine.start()
+            let events = await engine.send(input)
+            for try await event in events {
+                try Task.checkCancellation()
+                switch event {
+                case let .textDelta(delta):
+                    if firstResponseDuration == nil, !delta.isEmpty {
+                        firstResponseDuration = Date().timeIntervalSince(responseStartedAt)
+                    }
+                    content += delta
+                    onDelta(delta)
+                case let .notice(message):
+                    AppLogService.shared.write(
+                        "Agent harness notice",
+                        category: .chat,
+                        level: .notice,
+                        metadata: ["message": String(message.prefix(1_024))]
+                    )
+                case .started, .toolStarted, .toolUpdated, .toolCompleted, .completed:
+                    break
+                }
+            }
+            await engine.shutdown()
+        } catch {
+            if let engine {
+                if Task.isCancelled || error is CancellationError {
+                    await engine.cancel()
+                }
+                await engine.shutdown()
+            }
+            if Task.isCancelled || error is CancellationError {
+                throw CancellationError()
+            }
+            if !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let warning = "\n\n> " + settings.localized(
+                    "Agent harness stopped before completing this answer. The partial response is shown above."
+                )
+                content += warning
+                onDelta(warning)
+                return AgentHarnessResponse(
+                    content: content,
+                    firstResponseDuration: firstResponseDuration
+                )
+            }
+            throw error
+        }
+
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AgentEngineError.invalidResponse("The agent harness returned no answer content.")
+        }
+        return AgentHarnessResponse(
+            content: content,
+            firstResponseDuration: firstResponseDuration
+        )
     }
 
     private func cloudContextWindowOverride(

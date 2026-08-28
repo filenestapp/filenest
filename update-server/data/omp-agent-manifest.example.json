@@ -1,0 +1,13 @@
+{
+  "version": "17.3.0",
+  "artifacts": {
+    "arm64": {
+      "url": "https://downloads.filenestapp.com/omp-agent/17.3.0/filenest-agent-host-arm64",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "x86_64": {
+      "url": "https://downloads.filenestapp.com/omp-agent/17.3.0/filenest-agent-host-x86_64",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  }
+}

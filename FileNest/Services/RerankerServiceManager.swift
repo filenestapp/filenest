@@ -40,9 +40,8 @@ final class RerankerServiceManager: ObservableObject {
     }
 
     nonisolated static var installRoot: URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return support.appendingPathComponent("FileNest/Reranker", isDirectory: true)
+        ManagedRuntimePaths.applicationSupportRoot
+            .appendingPathComponent("Reranker", isDirectory: true)
     }
 
     nonisolated static var pythonExecutable: URL {

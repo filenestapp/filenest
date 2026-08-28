@@ -9,8 +9,8 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     MACOSX_DEPLOYMENT_TARGET: "13.0"
-    MARKETING_VERSION: "0.2.5"
-    CURRENT_PROJECT_VERSION: "5"
+    MARKETING_VERSION: "0.2.13"
+    CURRENT_PROJECT_VERSION: "18"
     GENERATE_INFOPLIST_FILE: "YES"
     INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright (c) 2026 FileNest"
     INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
@@ -38,10 +38,16 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.local.filenest
         PRODUCT_NAME: FileNest
+        PRODUCT_MODULE_NAME: FileNest
         INFOPLIST_KEY_CFBundleDisplayName: FileNest
         INFOPLIST_KEY_LSUIElement: "NO"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_PREVIEWS: "YES"
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.local.filenest.dev
+          PRODUCT_NAME: FileNest Dev
+          INFOPLIST_KEY_CFBundleDisplayName: FileNest Dev
     dependencies:
       - package: GRDB
         product: GRDB
@@ -53,7 +59,40 @@ targets:
         product: Sparkle
       - package: MarkdownUI
         product: MarkdownUI
+    scheme:
+      testTargets:
+        - FileNestTests
     postBuildScripts:
+      - name: Bundle FileNest OMP Adapter
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          HOST_SOURCE="${SRCROOT}/AgentHost/dist/filenest-agent-host"
+          VERSION_SOURCE="${SRCROOT}/AgentHost/dist/version.txt"
+          BUILD_INPUTS=(
+            "${SRCROOT}/AgentHost/src/main.ts"
+            "${SRCROOT}/AgentHost/package.json"
+            "${SRCROOT}/AgentHost/bun.lock"
+          )
+          NEEDS_BUILD=0
+          if [[ ! -x "${HOST_SOURCE}" || ! -s "${VERSION_SOURCE}" ]]; then
+            NEEDS_BUILD=1
+          else
+            for INPUT in "${BUILD_INPUTS[@]}"; do
+              if [[ ! -f "${INPUT}" || "${INPUT}" -nt "${HOST_SOURCE}" ]]; then
+                NEEDS_BUILD=1
+                break
+              fi
+            done
+          fi
+          if [[ "${NEEDS_BUILD}" == "1" ]]; then
+            PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}" "${SRCROOT}/script/build_agent_host.sh"
+          fi
+
+          HOST_DESTINATION="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/AgentHost"
+          /usr/bin/install -d -m 0755 "${HOST_DESTINATION}"
+          /usr/bin/install -m 0755 "${HOST_SOURCE}" "${HOST_DESTINATION}/filenest-agent-host"
+          /usr/bin/install -m 0644 "${VERSION_SOURCE}" "${HOST_DESTINATION}/version.txt"
       - name: Generate Build Information
         basedOnDependencyAnalysis: false
         script: |
@@ -67,7 +106,13 @@ targets:
           /usr/bin/plutil -replace MarketingVersion -string "${MARKETING_VERSION}" "${INFO_FILE}"
           /usr/bin/plutil -replace BuildNumber -string "${CURRENT_PROJECT_VERSION}" "${INFO_FILE}"
 
-          APP_INFO_PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          APP_INFO_PLIST="${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Info.plist"
+          if [[ ! -f "${APP_INFO_PLIST}" && -f "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}" ]]; then
+            APP_INFO_PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          fi
+          if [[ ! -f "${APP_INFO_PLIST}" ]]; then
+            exit 0
+          fi
           /usr/bin/plutil -replace SUEnableAutomaticChecks -bool YES "${APP_INFO_PLIST}" 2>/dev/null \
             || /usr/bin/plutil -insert SUEnableAutomaticChecks -bool YES "${APP_INFO_PLIST}"
           /usr/bin/plutil -replace SUAllowsAutomaticUpdates -bool YES "${APP_INFO_PLIST}" 2>/dev/null \
@@ -107,6 +152,9 @@ targets:
       base:
         # Xcode's bundled XCTest runtime requires macOS 14; this does not change the app's macOS 13 deployment target.
         MACOSX_DEPLOYMENT_TARGET: "14.0"
+      configs:
+        Debug:
+          TEST_HOST: "$(BUILT_PRODUCTS_DIR)/FileNest Dev.app/Contents/MacOS/FileNest Dev"
     sources:
       - path: FileNestTests
     dependencies:

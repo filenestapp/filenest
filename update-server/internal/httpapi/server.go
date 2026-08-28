@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,16 +23,20 @@ import (
 
 const (
 	maxRequestBody = 1 << 20
+	maxOMPManifest = 64 << 10
 	adminPath      = "/v1/admin/releases"
 )
 
+var ompSHA256Pattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
+
 type Server struct {
-	store          release.Store
-	adminToken     string
-	allowedOrigins map[string]struct{}
-	logger         *slog.Logger
-	mux            *http.ServeMux
-	now            func() time.Time
+	store           release.Store
+	adminToken      string
+	ompManifestFile string
+	allowedOrigins  map[string]struct{}
+	logger          *slog.Logger
+	mux             *http.ServeMux
+	now             func() time.Time
 }
 
 type Option func(*Server)
@@ -48,6 +54,12 @@ func WithClock(now func() time.Time) Option {
 		if now != nil {
 			server.now = now
 		}
+	}
+}
+
+func WithOMPManifestFile(path string) Option {
+	return func(server *Server) {
+		server.ompManifestFile = strings.TrimSpace(path)
 	}
 }
 
@@ -86,6 +98,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/v1/releases/latest", s.handleLatest)
 	s.mux.HandleFunc("/appcast.xml", s.handleAppcast)
 	s.mux.HandleFunc("/appcast/", s.handleAppcastAlias)
+	s.mux.HandleFunc("/omp-agent/stable.json", s.handleOMPManifest)
 	s.mux.HandleFunc(adminPath, s.handleAdminReleases)
 	s.mux.HandleFunc(adminPath+"/", s.handleAdminRelease)
 }
@@ -190,6 +203,54 @@ func (s *Server) handleAppcast(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	writeCacheable(writer, request, http.StatusOK, "application/rss+xml; charset=utf-8", payload)
+}
+
+func (s *Server) handleOMPManifest(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		writeMethodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	if s.ompManifestFile == "" {
+		http.NotFound(writer, request)
+		return
+	}
+	payload, err := os.ReadFile(s.ompManifestFile)
+	if errors.Is(err, os.ErrNotExist) {
+		http.NotFound(writer, request)
+		return
+	}
+	if err != nil {
+		s.logger.Error("Could not read OMP update manifest", "path", s.ompManifestFile, "error", err)
+		writeError(writer, http.StatusInternalServerError, "manifest_read_failed", "could not read the OMP update manifest")
+		return
+	}
+	if len(payload) == 0 || len(payload) > maxOMPManifest || !validOMPManifest(payload) {
+		writeError(writer, http.StatusInternalServerError, "invalid_manifest", "the OMP update manifest is invalid")
+		return
+	}
+	writeCacheable(writer, request, http.StatusOK, "application/json; charset=utf-8", payload)
+}
+
+func validOMPManifest(payload []byte) bool {
+	var manifest struct {
+		Version   string `json:"version"`
+		Artifacts map[string]struct {
+			URL    string `json:"url"`
+			SHA256 string `json:"sha256"`
+		} `json:"artifacts"`
+	}
+	if err := json.Unmarshal(payload, &manifest); err != nil ||
+		strings.TrimSpace(manifest.Version) == "" || len(manifest.Artifacts) == 0 {
+		return false
+	}
+	for _, artifact := range manifest.Artifacts {
+		parsed, err := url.Parse(strings.TrimSpace(artifact.URL))
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			!ompSHA256Pattern.MatchString(strings.TrimSpace(artifact.SHA256)) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleAdminReleases(writer http.ResponseWriter, request *http.Request) {

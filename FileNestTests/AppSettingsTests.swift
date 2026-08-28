@@ -187,6 +187,52 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(reloaded.lastAIModelVersionCheckAt, modelVersionCheckDate)
     }
 
+    func testAgentGenerationConfigurationFollowsGlobalLocalSettings() {
+        let settings = AppSettings(store: store)
+        settings.setLLMChoice(AppSettings.LLMChoice.ollama.rawValue)
+        settings.setOllamaHost("http://127.0.0.1:11434")
+        settings.setOllamaModel("qwen3:8b")
+        settings.setThinkingMode(true)
+
+        XCTAssertEqual(
+            settings.agentGenerationConfiguration(),
+            AgentGenerationConfiguration(
+                provider: .ollama,
+                model: "qwen3:8b",
+                baseURL: "http://127.0.0.1:11434",
+                apiKey: nil,
+                thinkingEnabled: true
+            )
+        )
+    }
+
+    func testAgentGenerationConfigurationFollowsGlobalCloudSettings() {
+        let settings = AppSettings(store: store)
+        settings.setLLMChoice(AppSettings.LLMChoice.cloud.rawValue)
+        settings.setCloudAPIFormat(AppSettings.CloudAPIFormat.anthropic.rawValue)
+        settings.setCloudBaseURL("https://api.example.test/v1")
+        settings.setCloudModel("claude-sonnet")
+        settings.setCloudKey("test-cloud-key")
+
+        XCTAssertEqual(
+            settings.agentGenerationConfiguration(),
+            AgentGenerationConfiguration(
+                provider: .anthropic,
+                model: "claude-sonnet",
+                baseURL: "https://api.example.test/v1",
+                apiKey: "test-cloud-key",
+                thinkingEnabled: false
+            )
+        )
+    }
+
+    func testAgentGenerationConfigurationIsNilWhenChatIsDisabled() {
+        let settings = AppSettings(store: store)
+        settings.setLLMChoice(AppSettings.LLMChoice.none.rawValue)
+
+        XCTAssertNil(settings.agentGenerationConfiguration())
+    }
+
     func testAIModelVersionCheckUsesPersistent24HourTTL() {
         let settings = AppSettings(store: store)
         let checkedAt = Date(timeIntervalSince1970: 1_750_000_000)
@@ -335,6 +381,126 @@ final class AppSettingsTests: XCTestCase {
         let output = Data("ollama version is 0.32.1\n".utf8)
 
         XCTAssertEqual(OllamaServiceManager.version(fromCommandOutput: output), "0.32.1")
+    }
+
+    func testOllamaModelsAreStoredOutsideTheReplaceableApplicationDirectory() {
+        let installRoot = OllamaServiceManager.localApplicationURL.deletingLastPathComponent()
+            .standardizedFileURL.path + "/"
+
+        XCTAssertFalse(ManagedRuntimePaths.ollamaModelsRoot.standardizedFileURL.path.hasPrefix(installRoot))
+    }
+
+    func testOllamaModelDirectoryMigratesFromThePreviousManagedLocation() throws {
+        let previousDirectory = temporaryDirectory
+            .appendingPathComponent("Ollama/models", isDirectory: true)
+        let managedDirectory = temporaryDirectory
+            .appendingPathComponent("Models/Ollama", isDirectory: true)
+        let manifest = previousDirectory
+            .appendingPathComponent("manifests/qwen3-embedding", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: manifest.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("model-manifest".utf8).write(to: manifest)
+
+        try OllamaServiceManager.prepareManagedModelDirectory(
+            managedDirectory: managedDirectory,
+            migrationSources: [previousDirectory]
+        )
+
+        XCTAssertEqual(
+            try Data(contentsOf: managedDirectory.appendingPathComponent("manifests/qwen3-embedding")),
+            Data("model-manifest".utf8)
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: previousDirectory.path))
+    }
+
+    func testOllamaModelMigrationPrefersPopulatedLegacyDirectory() throws {
+        let emptyPreviousDirectory = temporaryDirectory
+            .appendingPathComponent("Ollama/models", isDirectory: true)
+        let populatedLegacyDirectory = temporaryDirectory
+            .appendingPathComponent("UserOllama/models", isDirectory: true)
+        let managedDirectory = temporaryDirectory
+            .appendingPathComponent("Models/Ollama", isDirectory: true)
+        let manifest = populatedLegacyDirectory
+            .appendingPathComponent("manifests/qwen3-embedding", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: emptyPreviousDirectory.appendingPathComponent("manifests", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: managedDirectory.appendingPathComponent("blobs", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: manifest.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("model-manifest".utf8).write(to: manifest)
+
+        try OllamaServiceManager.prepareManagedModelDirectory(
+            managedDirectory: managedDirectory,
+            migrationSources: [emptyPreviousDirectory, populatedLegacyDirectory]
+        )
+
+        XCTAssertEqual(
+            try Data(contentsOf: managedDirectory.appendingPathComponent("manifests/qwen3-embedding")),
+            Data("model-manifest".utf8)
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: populatedLegacyDirectory.path))
+    }
+
+    func testOllamaApplicationReplacementPreservesSiblingModels() throws {
+        let installRoot = temporaryDirectory.appendingPathComponent("Ollama", isDirectory: true)
+        let destinationApplication = installRoot.appendingPathComponent("Ollama.app", isDirectory: true)
+        let stagedApplication = temporaryDirectory
+            .appendingPathComponent("Ollama.staged.app", isDirectory: true)
+        let modelBlob = installRoot.appendingPathComponent("models/blobs/model-data")
+        let oldExecutable = destinationApplication.appendingPathComponent("Contents/Resources/ollama")
+        let newExecutable = stagedApplication.appendingPathComponent("Contents/Resources/ollama")
+        for file in [modelBlob, oldExecutable, newExecutable] {
+            try FileManager.default.createDirectory(
+                at: file.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        }
+        try Data("downloaded-model".utf8).write(to: modelBlob)
+        try Data("old-runtime".utf8).write(to: oldExecutable)
+        try Data("new-runtime".utf8).write(to: newExecutable)
+
+        try OllamaServiceManager.replaceInstalledApplication(
+            with: stagedApplication,
+            at: destinationApplication
+        )
+
+        XCTAssertEqual(try Data(contentsOf: modelBlob), Data("downloaded-model".utf8))
+        XCTAssertEqual(try Data(contentsOf: oldExecutable), Data("new-runtime".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagedApplication.path))
+    }
+
+    func testOllamaApplicationReplacementRestoresPreviousBundleOnFailure() throws {
+        let installRoot = temporaryDirectory.appendingPathComponent("Ollama", isDirectory: true)
+        let destinationApplication = installRoot.appendingPathComponent("Ollama.app", isDirectory: true)
+        let oldExecutable = destinationApplication.appendingPathComponent("Contents/Resources/ollama")
+        let modelBlob = installRoot.appendingPathComponent("models/blobs/model-data")
+        for file in [oldExecutable, modelBlob] {
+            try FileManager.default.createDirectory(
+                at: file.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        }
+        try Data("old-runtime".utf8).write(to: oldExecutable)
+        try Data("downloaded-model".utf8).write(to: modelBlob)
+
+        XCTAssertThrowsError(
+            try OllamaServiceManager.replaceInstalledApplication(
+                with: temporaryDirectory.appendingPathComponent("missing.app"),
+                at: destinationApplication
+            )
+        )
+
+        XCTAssertEqual(try Data(contentsOf: oldExecutable), Data("old-runtime".utf8))
+        XCTAssertEqual(try Data(contentsOf: modelBlob), Data("downloaded-model".utf8))
     }
 
     func testOllamaAutomaticStartupPolicyFollowsActiveProviders() {

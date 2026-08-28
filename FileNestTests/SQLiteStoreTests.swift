@@ -906,6 +906,7 @@ final class SQLiteStoreTests: XCTestCase {
             totalResponseDuration: 1.75,
             responseProvider: "ollama",
             responseModel: "qwen3.5:9b",
+            responseHarnessKind: AgentHarnessKind.classic.rawValue,
             feedback: "helpful"
         ))
 
@@ -917,6 +918,7 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(stored.totalResponseDuration), 1.75, accuracy: 0.001)
         XCTAssertEqual(stored.responseProvider, "ollama")
         XCTAssertEqual(stored.responseModel, "qwen3.5:9b")
+        XCTAssertEqual(stored.responseHarnessKind, AgentHarnessKind.classic.rawValue)
         XCTAssertEqual(stored.feedback, "helpful")
     }
 
@@ -942,9 +944,11 @@ final class SQLiteStoreTests: XCTestCase {
             rating: .inaccurate,
             reason: "The ranking missed the exact phrase.",
             bestFileID: bestFileID,
-            bestFileReason: "It contains the complete permit title."
+            bestFileReason: "It contains the complete permit title.",
+            harnessKind: AgentHarnessKind.omp.rawValue
         )
         XCTAssertEqual(chatFeedback.sourceKind, RAGFeedbackSourceKind.chat.rawValue)
+        XCTAssertEqual(chatFeedback.harnessKind, AgentHarnessKind.omp.rawValue)
         XCTAssertEqual(chatFeedback.bestFileID, bestFileID)
         XCTAssertEqual(chatFeedback.analysisStatus, RAGFeedbackAnalysisStatus.pending.rawValue)
 

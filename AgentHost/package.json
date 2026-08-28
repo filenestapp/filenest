@@ -1,0 +1,17 @@
+{
+  "name": "@filenest/omp-agent-host",
+  "version": "17.2.13",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/main.ts --compile --external omp-legacy-pi-modules --outfile dist/filenest-agent-host",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  }
+}

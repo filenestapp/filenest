@@ -155,6 +155,7 @@ WEB_GROUP="${FILENEST_WEB_GROUP:-www}"
 SITE_DOMAIN="${FILENEST_SITE_DOMAIN:-filenestapp.com}"
 REMOTE_BINARY="${FILENEST_UPDATE_BINARY:-/usr/local/bin/filenest-update-api}"
 REMOTE_DATA_DIR="${FILENEST_UPDATE_DATA_DIR:-/var/lib/filenest-update-api}"
+REMOTE_OMP_MANIFEST_FILE="${FILENEST_OMP_MANIFEST_FILE:-$REMOTE_DATA_DIR/omp-agent-manifest.json}"
 REMOTE_ENV_FILE="${FILENEST_UPDATE_ENV_FILE:-/etc/filenest-update-api.env}"
 SYSTEMD_SERVICE="${FILENEST_UPDATE_SERVICE:-filenest-update-api}"
 R2_PREFIX="${FILENEST_R2_PREFIX:-downloads}"
@@ -469,14 +470,15 @@ STAGE_DIR="$2"
 WEB_ROOT="$3"
 REMOTE_BINARY="$4"
 REMOTE_DATA_DIR="$5"
-REMOTE_ENV_FILE="$6"
-SYSTEMD_SERVICE="$7"
-DEPLOY_USER="$8"
-DEPLOY_WEBSITE="$9"
-DEPLOY_BACKEND="${10}"
-SITE_DOMAIN="${11}"
-WEB_OWNER="${12}"
-WEB_GROUP="${13}"
+REMOTE_OMP_MANIFEST_FILE="$6"
+REMOTE_ENV_FILE="$7"
+SYSTEMD_SERVICE="$8"
+DEPLOY_USER="$9"
+DEPLOY_WEBSITE="${10}"
+DEPLOY_BACKEND="${11}"
+SITE_DOMAIN="${12}"
+WEB_OWNER="${13}"
+WEB_GROUP="${14}"
 
 case "$REMOTE_DIR" in
   /*) ;;
@@ -486,7 +488,15 @@ case "$STAGE_DIR" in
   "$REMOTE_DIR"/releases/*) ;;
   *) echo "Unexpected remote release directory: $STAGE_DIR" >&2; exit 1 ;;
 esac
-if [ "$REMOTE_DIR" = "/" ] || [ "$WEB_ROOT" = "/" ] || [ "$REMOTE_DATA_DIR" = "/" ]; then
+case "$REMOTE_DATA_DIR" in
+  /*) ;;
+  *) echo "Remote data directory must be absolute." >&2; exit 1 ;;
+esac
+case "$REMOTE_OMP_MANIFEST_FILE" in
+  /*) ;;
+  *) echo "Remote OMP manifest path must be absolute." >&2; exit 1 ;;
+esac
+if [ "$REMOTE_DIR" = "/" ] || [ "$WEB_ROOT" = "/" ] || [ "$REMOTE_DATA_DIR" = "/" ] || [ "$REMOTE_OMP_MANIFEST_FILE" = "/" ]; then
   echo "Refusing to deploy to a root directory." >&2
   exit 1
 fi
@@ -536,12 +546,21 @@ if [ "$DEPLOY_BACKEND" = "1" ]; then
     {
       printf 'FILENEST_UPDATE_ADDR=127.0.0.1:8080\n'
       printf 'FILENEST_UPDATE_DATA_FILE=%s/releases.json\n' "$REMOTE_DATA_DIR"
+      printf 'FILENEST_OMP_MANIFEST_FILE=%s\n' "$REMOTE_OMP_MANIFEST_FILE"
       printf 'FILENEST_UPDATE_ADMIN_TOKEN=\n'
       printf 'FILENEST_UPDATE_ALLOWED_ORIGINS=https://%s\n' "$SITE_DOMAIN"
     } > "$ENV_TMP"
     sudo install -m 0600 -o root -g root "$ENV_TMP" "$REMOTE_ENV_FILE"
     rm -f "$ENV_TMP"
     echo "[Remote] Created $REMOTE_ENV_FILE with the admin API disabled."
+  fi
+  if ! sudo grep -q '^FILENEST_OMP_MANIFEST_FILE=' "$REMOTE_ENV_FILE"; then
+    ENV_TMP="$(mktemp)"
+    sudo cat "$REMOTE_ENV_FILE" > "$ENV_TMP"
+    printf 'FILENEST_OMP_MANIFEST_FILE=%s\n' "$REMOTE_OMP_MANIFEST_FILE" >> "$ENV_TMP"
+    sudo install -m 0600 -o root -g root "$ENV_TMP" "$REMOTE_ENV_FILE"
+    rm -f "$ENV_TMP"
+    echo "[Remote] Added the OMP manifest path to $REMOTE_ENV_FILE."
   fi
 
   SERVICE_TMP="$(mktemp)"
@@ -638,6 +657,7 @@ activate_remote_release() {
       "$WEB_ROOT" \
       "$REMOTE_BINARY" \
       "$REMOTE_DATA_DIR" \
+      "$REMOTE_OMP_MANIFEST_FILE" \
       "$REMOTE_ENV_FILE" \
       "$SYSTEMD_SERVICE" \
       "$REMOTE_USER" \
@@ -658,6 +678,7 @@ print_plan() {
   fi
   if [[ "$DEPLOY_BACKEND" == 1 ]]; then
     printf '[Deploy] Backend: local linux/%s build -> %s\n' "$GOARCH" "$REMOTE_BINARY"
+    printf '[Deploy] OMP manifest: %s\n' "$REMOTE_OMP_MANIFEST_FILE"
   else
     printf '[Deploy] Backend: skipped\n'
   fi

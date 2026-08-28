@@ -76,8 +76,7 @@ final class SQLiteStore: @unchecked Sendable {
                                    appropriateFor: nil, create: true))
             ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         let legacyURL = support.appendingPathComponent("filenest.sqlite")
-        let destinationURL = support
-            .appendingPathComponent("FileNest", isDirectory: true)
+        let destinationURL = ManagedRuntimePaths.applicationSupportRoot
             .appendingPathComponent("filenest.sqlite")
 
         // The macOS test host initializes the app lifecycle before XCTest cases run.
@@ -659,6 +658,7 @@ final class SQLiteStore: @unchecked Sendable {
                 t.column("ts", .datetime).notNull()
                 t.column("related_file_ids", .text)
                 t.column("related_file_matches", .text)
+                t.column("response_harness_kind", .text)
             }
 
             try db.create(table: "chat_sessions", ifNotExists: true) { t in
@@ -693,6 +693,9 @@ final class SQLiteStore: @unchecked Sendable {
             }
             if !chatColumns.contains("response_model") {
                 try db.execute(sql: "ALTER TABLE chat_messages ADD COLUMN response_model TEXT")
+            }
+            if !chatColumns.contains("response_harness_kind") {
+                try db.execute(sql: "ALTER TABLE chat_messages ADD COLUMN response_harness_kind TEXT")
             }
             if !chatColumns.contains("feedback") {
                 try db.execute(sql: "ALTER TABLE chat_messages ADD COLUMN feedback TEXT")
@@ -731,6 +734,7 @@ final class SQLiteStore: @unchecked Sendable {
                 t.column("best_file_id", .integer)
                     .references("files", onDelete: .setNull)
                 t.column("best_file_reason", .text)
+                t.column("harness_kind", .text)
                 t.column("analysis_status", .text)
                     .notNull()
                     .defaults(to: RAGFeedbackAnalysisStatus.pending.rawValue)
@@ -739,6 +743,10 @@ final class SQLiteStore: @unchecked Sendable {
                 t.column("created_at", .datetime).notNull()
                 t.column("updated_at", .datetime).notNull()
                 t.column("analyzed_at", .datetime)
+            }
+            let feedbackColumns = try db.columns(in: "rag_feedback").map(\.name)
+            if !feedbackColumns.contains("harness_kind") {
+                try db.execute(sql: "ALTER TABLE rag_feedback ADD COLUMN harness_kind TEXT")
             }
             try db.create(
                 index: "idx_rag_feedback_status",
@@ -2835,7 +2843,8 @@ final class SQLiteStore: @unchecked Sendable {
         rating: RAGFeedbackRating,
         reason: String?,
         bestFileID: Int64?,
-        bestFileReason: String?
+        bestFileReason: String?,
+        harnessKind: String? = nil
     ) throws -> RAGFeedbackRecord {
         try upsertRAGFeedback(
             sourceKey: "chat:\(messageID)",
@@ -2847,7 +2856,8 @@ final class SQLiteStore: @unchecked Sendable {
             rating: rating,
             reason: reason,
             bestFileID: bestFileID,
-            bestFileReason: bestFileReason
+            bestFileReason: bestFileReason,
+            harnessKind: harnessKind
         )
     }
 
@@ -2859,7 +2869,8 @@ final class SQLiteStore: @unchecked Sendable {
         rating: RAGFeedbackRating,
         reason: String?,
         bestFileID: Int64?,
-        bestFileReason: String?
+        bestFileReason: String?,
+        harnessKind: String? = nil
     ) throws -> RAGFeedbackRecord {
         let normalizedQuery = query
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2874,7 +2885,8 @@ final class SQLiteStore: @unchecked Sendable {
             rating: rating,
             reason: reason,
             bestFileID: bestFileID,
-            bestFileReason: bestFileReason
+            bestFileReason: bestFileReason,
+            harnessKind: harnessKind
         )
     }
 
@@ -2889,7 +2901,8 @@ final class SQLiteStore: @unchecked Sendable {
         rating: RAGFeedbackRating,
         reason: String?,
         bestFileID: Int64?,
-        bestFileReason: String?
+        bestFileReason: String?,
+        harnessKind: String? = nil
     ) throws -> RAGFeedbackRecord {
         let now = Date()
         let resultFileIDsJSON = resultFileIDs.isEmpty
@@ -2902,8 +2915,8 @@ final class SQLiteStore: @unchecked Sendable {
                     INSERT INTO rag_feedback(
                         source_key, source_kind, message_id, session_id, search_query,
                         result_file_ids, rating, reason, best_file_id, best_file_reason,
-                        analysis_status, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        harness_kind, analysis_status, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(source_key) DO UPDATE SET
                         source_kind = excluded.source_kind,
                         session_id = excluded.session_id,
@@ -2914,6 +2927,7 @@ final class SQLiteStore: @unchecked Sendable {
                         reason = excluded.reason,
                         best_file_id = excluded.best_file_id,
                         best_file_reason = excluded.best_file_reason,
+                        harness_kind = excluded.harness_kind,
                         analysis_status = excluded.analysis_status,
                         analysis_summary = NULL,
                         analysis_error = NULL,
@@ -2931,6 +2945,7 @@ final class SQLiteStore: @unchecked Sendable {
                     reason,
                     bestFileID,
                     bestFileReason,
+                    harnessKind,
                     RAGFeedbackAnalysisStatus.pending.rawValue,
                     now,
                     now,

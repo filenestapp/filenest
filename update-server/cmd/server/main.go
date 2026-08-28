@@ -30,7 +30,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	api := httpapi.New(store, cfg.AdminToken, cfg.AllowedOrigins, httpapi.WithLogger(logger))
+	api := httpapi.New(
+		store,
+		cfg.AdminToken,
+		cfg.AllowedOrigins,
+		httpapi.WithLogger(logger),
+		httpapi.WithOMPManifestFile(cfg.OMPManifestFile),
+	)
 	server := &http.Server{
 		Addr:              cfg.Address,
 		Handler:           api.Handler(),
@@ -53,7 +59,12 @@ func main() {
 		}
 	}()
 
-	logger.Info("Starting FileNest update API", "address", cfg.Address, "data_file", cfg.DataFile)
+	logger.Info(
+		"Starting FileNest update API",
+		"address", cfg.Address,
+		"data_file", cfg.DataFile,
+		"omp_manifest_file", cfg.OMPManifestFile,
+	)
 	if cfg.AdminToken == "" {
 		logger.Warn("Admin API is disabled because FILENEST_UPDATE_ADMIN_TOKEN is empty")
 	}

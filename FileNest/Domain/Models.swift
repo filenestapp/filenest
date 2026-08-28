@@ -459,6 +459,7 @@ struct RAGFeedbackRecord: Identifiable, Codable, Equatable {
     var reason: String?
     var bestFileID: Int64?
     var bestFileReason: String?
+    var harnessKind: String?
     var analysisStatus: String
     var analysisSummary: String?
     var analysisError: String?
@@ -479,6 +480,7 @@ extension RAGFeedbackRecord: FetchableRecord, MutablePersistableRecord {
         case resultFileIDsJSON = "result_file_ids"
         case bestFileID = "best_file_id"
         case bestFileReason = "best_file_reason"
+        case harnessKind = "harness_kind"
         case analysisStatus = "analysis_status"
         case analysisSummary = "analysis_summary"
         case analysisError = "analysis_error"
@@ -645,6 +647,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var totalResponseDuration: TimeInterval? = nil
     var responseProvider: String? = nil
     var responseModel: String? = nil
+    var responseHarnessKind: String? = nil
     var feedback: String? = nil
 }
 
@@ -676,6 +679,7 @@ extension ChatMessage: FetchableRecord, MutablePersistableRecord {
         case totalResponseDuration = "total_response_duration"
         case responseProvider = "response_provider"
         case responseModel = "response_model"
+        case responseHarnessKind = "response_harness_kind"
         case feedback
     }
     mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }

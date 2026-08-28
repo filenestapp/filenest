@@ -17,6 +17,24 @@ FileNest uses the independent Go service in [`update-server`](../update-server) 
    the release and relaunches the application.
 9. Other clients and operations tools can use `/v1/updates/check`.
 
+The OMP Agent Host uses a separate manifest because its Bun runtime is an
+architecture-specific executable rather than a Sparkle application archive:
+
+1. CI builds the pinned `@oh-my-pi/pi-coding-agent` host for `arm64` and
+   `x86_64` with `script/build_agent_host.sh`.
+2. CI uploads both immutable executables to `downloads.filenestapp.com` and
+   records their SHA-256 digests.
+3. CI atomically replaces the file configured by
+   `FILENEST_OMP_MANIFEST_FILE` with the new `version` and `artifacts` JSON.
+4. FileNest checks `GET /omp-agent/stable.json`, verifies the manifest and
+   artifact digest, then stages and atomically replaces the managed host.
+
+If the production API still returns `404` while a release is being rolled out,
+FileNest retries discovery against the latest GitHub Release and accepts only
+the two architecture-specific `filenest-agent-host-*` assets when GitHub
+provides a SHA-256 digest. This is a migration fallback for an older API
+deployment; the configured manifest remains the primary update source.
+
 The API never receives or stores Apple signing certificates, notarization credentials, or the Sparkle private key.
 
 Release builds receive the appcast URL and EdDSA public key through the
@@ -27,6 +45,7 @@ Production endpoints:
 
 - Appcast and update API: `https://updates.filenestapp.com`
 - Immutable macOS update archives: `https://downloads.filenestapp.com`
+- OMP Agent Host manifest: `https://updates.filenestapp.com/omp-agent/stable.json`
 
 ## JSON update check
 

@@ -350,10 +350,7 @@ final class OllamaServiceManager: ObservableObject {
     nonisolated static let officialDownloadURL = URL(string: "https://ollama.com/download/Ollama.dmg")!
 
     nonisolated static var localApplicationURL: URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return support
-            .appendingPathComponent("FileNest", isDirectory: true)
+        ManagedRuntimePaths.applicationSupportRoot
             .appendingPathComponent("Ollama", isDirectory: true)
             .appendingPathComponent("Ollama.app", isDirectory: true)
     }
@@ -850,23 +847,63 @@ final class OllamaServiceManager: ObservableObject {
         return FileManager.default.isExecutableFile(atPath: executable.path) ? executable : nil
     }
 
-    nonisolated private static func prepareManagedModelDirectory() throws {
-        let manager = FileManager.default
-        let managed = ManagedRuntimePaths.ollamaModelsRoot
-        if manager.fileExists(atPath: managed.path) { return }
+    nonisolated static func prepareManagedModelDirectory(
+        fileManager: FileManager = .default,
+        managedDirectory: URL = ManagedRuntimePaths.ollamaModelsRoot,
+        migrationSources: [URL]? = nil
+    ) throws {
+        let sources = migrationSources ?? [
+            ManagedRuntimePaths.applicationSupportRoot
+                .appendingPathComponent("Ollama/models", isDirectory: true),
+            fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent(".ollama/models", isDirectory: true),
+        ]
+        let managedPath = managedDirectory.standardizedFileURL.path
+        let existingSources = sources.filter { source in
+            source.standardizedFileURL.path != managedPath
+                && fileManager.fileExists(atPath: source.path)
+        }
+        let existingSource = existingSources.first {
+            directoryContainsRegularFile($0, fileManager: fileManager)
+        } ?? existingSources.first
 
-        let legacy = manager.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ollama/models", isDirectory: true)
-        try manager.createDirectory(
-            at: managed.deletingLastPathComponent(),
+        if fileManager.fileExists(atPath: managedDirectory.path) {
+            guard !directoryContainsRegularFile(managedDirectory, fileManager: fileManager),
+                  let existingSource,
+                  directoryContainsRegularFile(existingSource, fileManager: fileManager) else { return }
+            try fileManager.removeItem(at: managedDirectory)
+        }
+
+        try fileManager.createDirectory(
+            at: managedDirectory.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        if manager.fileExists(atPath: legacy.path) {
-            try manager.moveItem(at: legacy, to: managed)
-            log("Migrated Ollama models into the FileNest-managed directory")
+        if let source = existingSource {
+            try fileManager.moveItem(at: source, to: managedDirectory)
+            log(
+                "Migrated Ollama models into the dedicated FileNest model directory",
+                metadata: ["source": source.path, "destination": managedDirectory.path]
+            )
         } else {
-            try manager.createDirectory(at: managed, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: managedDirectory, withIntermediateDirectories: true)
         }
+    }
+
+    nonisolated private static func directoryContainsRegularFile(
+        _ directory: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        guard let enumerator = fileManager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+        for case let item as URL in enumerator {
+            if (try? item.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+                return true
+            }
+        }
+        return false
     }
 
     nonisolated private static func installedVersion(for executable: URL) -> String? {
@@ -975,37 +1012,60 @@ final class OllamaServiceManager: ObservableObject {
 
         let destinationApplication = localApplicationURL
         let installRoot = destinationApplication.deletingLastPathComponent()
-        let parent = installRoot.deletingLastPathComponent()
-        let stagingRoot = parent.appendingPathComponent("Ollama.installing-\(UUID().uuidString)", isDirectory: true)
-        let stagingApplication = stagingRoot.appendingPathComponent("Ollama.app", isDirectory: true)
-        let backupRoot = parent.appendingPathComponent("Ollama.backup-\(UUID().uuidString)", isDirectory: true)
+        let stagingApplication = installRoot.appendingPathComponent(
+            ".Ollama.installing-\(UUID().uuidString).app",
+            isDirectory: true
+        )
         let fileManager = FileManager.default
 
-        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
-        defer { try? fileManager.removeItem(at: stagingRoot) }
-        try fileManager.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: installRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: stagingApplication) }
         _ = try runProcess(executable: "/usr/bin/ditto", arguments: [sourceApplication.path, stagingApplication.path])
         try verifyCodeSignature(of: stagingApplication)
-
-        let hadExistingInstall = fileManager.fileExists(atPath: installRoot.path)
-        if hadExistingInstall {
-            try fileManager.moveItem(at: installRoot, to: backupRoot)
-        }
-        do {
-            try fileManager.moveItem(at: stagingRoot, to: installRoot)
-            if hadExistingInstall { try? fileManager.removeItem(at: backupRoot) }
-        } catch {
-            if hadExistingInstall, !fileManager.fileExists(atPath: installRoot.path) {
-                try? fileManager.moveItem(at: backupRoot, to: installRoot)
-            }
-            throw error
-        }
+        try replaceInstalledApplication(
+            with: stagingApplication,
+            at: destinationApplication,
+            fileManager: fileManager
+        )
 
         let executable = destinationApplication.appendingPathComponent("Contents/Resources/ollama")
         guard fileManager.isExecutableFile(atPath: executable.path) else {
             throw OllamaManagerError.executableMissing
         }
         return executable
+    }
+
+    /// Replaces only the application bundle so sibling runtime data, especially downloaded models,
+    /// remains untouched. The previous bundle is restored if the staged bundle cannot be installed.
+    nonisolated static func replaceInstalledApplication(
+        with stagedApplication: URL,
+        at destinationApplication: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        let installRoot = destinationApplication.deletingLastPathComponent()
+        let backupApplication = installRoot.appendingPathComponent(
+            ".Ollama.backup-\(UUID().uuidString).app",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: installRoot, withIntermediateDirectories: true)
+
+        let hadExistingApplication = fileManager.fileExists(atPath: destinationApplication.path)
+        if hadExistingApplication {
+            try fileManager.moveItem(at: destinationApplication, to: backupApplication)
+        }
+        do {
+            try fileManager.moveItem(at: stagedApplication, to: destinationApplication)
+            if hadExistingApplication {
+                try? fileManager.removeItem(at: backupApplication)
+            }
+        } catch {
+            if hadExistingApplication,
+               !fileManager.fileExists(atPath: destinationApplication.path),
+               fileManager.fileExists(atPath: backupApplication.path) {
+                try? fileManager.moveItem(at: backupApplication, to: destinationApplication)
+            }
+            throw error
+        }
     }
 
     nonisolated private static func verifyCodeSignature(of application: URL) throws {

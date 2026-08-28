@@ -475,6 +475,52 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  omp-agent-host:
+    name: OMP Agent Host (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+            bun_target: bun-darwin-arm64
+          - architecture: x86_64
+            runner: macos-15-intel
+            bun_target: bun-darwin-x64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Build and verify OMP Agent Host
+        shell: bash
+        env:
+          FILENEST_AGENT_HOST_TARGET: ${{ matrix.bun_target }}
+          FILENEST_AGENT_HOST_OUTPUT: ${{ runner.temp }}/omp-agent-host/filenest-agent-host-${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          ./script/build_agent_host.sh
+          output="${FILENEST_AGENT_HOST_OUTPUT}"
+          test -x "${output}"
+          test -s "${output}.sha256"
+          test -s "$(dirname "${output}")/version.txt"
+          shasum -a 256 --check "${output}.sha256"
+          mv "$(dirname "${output}")/version.txt" "${output}.version.txt"
+
+      - name: Upload OMP Agent Host artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-omp-agent-host-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/omp-agent-host/*
+          if-no-files-found: error
+          retention-days: 14
+
   windows:
     name: Windows package
     runs-on: windows-latest
@@ -593,11 +639,13 @@ jobs:
     name: Publish GitHub Release
     needs:
       - macos
+      - omp-agent-host
       - windows
     if: >-
       ${{
         always() &&
         needs.macos.result == 'success' &&
+        needs['omp-agent-host'].result == 'success' &&
         needs.windows.result == 'success' &&
         (github.event_name == 'push' || inputs.publish_release)
       }}
@@ -610,6 +658,9 @@ jobs:
       FILENEST_DEPLOY_SSH_KEY: ${{ secrets.FILENEST_DEPLOY_SSH_KEY }}
       FILENEST_UPDATE_ADMIN_URL: ${{ vars.FILENEST_UPDATE_ADMIN_URL }}
       FILENEST_UPDATE_ADMIN_TOKEN: ${{ secrets.FILENEST_UPDATE_ADMIN_TOKEN }}
+      FILENEST_DOWNLOAD_BASE_URL: ${{ vars.FILENEST_DOWNLOAD_BASE_URL }}
+      FILENEST_UPDATE_DATA_DIR: ${{ vars.FILENEST_UPDATE_DATA_DIR }}
+      FILENEST_OMP_MANIFEST_FILE: ${{ vars.FILENEST_OMP_MANIFEST_FILE }}
 
     steps:
       - name: Require signed and notarized macOS output
@@ -713,3 +764,154 @@ jobs:
 
           rm -f "$ssh_key" "$known_hosts"
           echo "Published signed macOS update metadata and archive."
+
+      - name: Deploy update API before publishing OMP manifest
+        shell: bash
+        env:
+          FILENEST_DEPLOY_HOST: ${{ vars.FILENEST_DEPLOY_HOST }}
+          FILENEST_DEPLOY_USER: ${{ vars.FILENEST_DEPLOY_USER }}
+          FILENEST_DEPLOY_SSH_KEY: ${{ secrets.FILENEST_DEPLOY_SSH_KEY }}
+          FILENEST_UPDATE_DATA_DIR: ${{ vars.FILENEST_UPDATE_DATA_DIR }}
+          FILENEST_OMP_MANIFEST_FILE: ${{ vars.FILENEST_OMP_MANIFEST_FILE }}
+        run: |
+          set -euo pipefail
+          required_values=("$FILENEST_DEPLOY_HOST" "$FILENEST_DEPLOY_USER" "$FILENEST_DEPLOY_SSH_KEY")
+          for value in "${required_values[@]}"; do
+            if [[ -z "$value" ]]; then
+              echo "Update API deployment configuration is incomplete." >&2
+              exit 1
+            fi
+          done
+
+          ssh_key="$RUNNER_TEMP/filenest-update-api-key"
+          printf '%s\n' "$FILENEST_DEPLOY_SSH_KEY" > "$ssh_key"
+          chmod 600 "$ssh_key"
+          trap 'rm -f "$ssh_key"' EXIT
+
+          FILENEST_DEPLOY_KEY="$ssh_key" \
+            FILENEST_DEPLOY_HOST="$FILENEST_DEPLOY_HOST" \
+            FILENEST_DEPLOY_USER="$FILENEST_DEPLOY_USER" \
+            FILENEST_UPDATE_DATA_DIR="$FILENEST_UPDATE_DATA_DIR" \
+            FILENEST_OMP_MANIFEST_FILE="$FILENEST_OMP_MANIFEST_FILE" \
+            ./scripts/deploy-non-docker.sh --skip-website --skip-r2
+
+      - name: Publish OMP Agent Host artifacts and manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          required_values=(
+            "$FILENEST_DEPLOY_HOST"
+            "$FILENEST_DEPLOY_USER"
+            "$FILENEST_DEPLOY_SSH_KEY"
+            "$FILENEST_UPDATE_ADMIN_URL"
+            "$FILENEST_DOWNLOAD_BASE_URL"
+          )
+          for value in "${required_values[@]}"; do
+            if [[ -z "$value" ]]; then
+              echo "OMP Agent Host deployment configuration is incomplete." >&2
+              exit 1
+            fi
+          done
+
+          arm_binary="release-assets/filenest-agent-host-arm64"
+          x86_binary="release-assets/filenest-agent-host-x86_64"
+          arm_version_file="${arm_binary}.version.txt"
+          x86_version_file="${x86_binary}.version.txt"
+          for file in "$arm_binary" "$x86_binary" "$arm_version_file" "$x86_version_file"; do
+            [[ -s "$file" ]] || {
+              echo "Missing OMP Agent Host artifact: $file" >&2
+              exit 1
+            }
+          done
+
+          omp_version="$(tr -d '[:space:]' < "$arm_version_file")"
+          x86_version="$(tr -d '[:space:]' < "$x86_version_file")"
+          [[ -n "$omp_version" && "$omp_version" == "$x86_version" ]] || {
+            echo "OMP Agent Host versions do not match: $omp_version vs $x86_version" >&2
+            exit 1
+          }
+          [[ "$omp_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "Invalid OMP Agent Host version: $omp_version" >&2
+            exit 1
+          }
+
+          arm_sha="$(shasum -a 256 "$arm_binary" | awk '{print $1}')"
+          x86_sha="$(shasum -a 256 "$x86_binary" | awk '{print $1}')"
+          manifest="$RUNNER_TEMP/omp-agent-manifest.json"
+          OMP_VERSION="$omp_version" \
+          ARM_SHA="$arm_sha" \
+          X86_SHA="$x86_sha" \
+          DOWNLOAD_BASE="${FILENEST_DOWNLOAD_BASE_URL%/}" \
+          python3 - "$manifest" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          version = os.environ["OMP_VERSION"]
+          base = os.environ["DOWNLOAD_BASE"]
+          payload = {
+              "version": version,
+              "artifacts": {
+                  "arm64": {
+                      "url": f"{base}/omp-agent/{version}/filenest-agent-host-arm64",
+                      "sha256": os.environ["ARM_SHA"],
+                  },
+                  "x86_64": {
+                      "url": f"{base}/omp-agent/{version}/filenest-agent-host-x86_64",
+                      "sha256": os.environ["X86_SHA"],
+                  },
+              },
+          }
+          Path(sys.argv[1]).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+          PY
+
+          remote_data_dir="${FILENEST_UPDATE_DATA_DIR:-/var/lib/filenest-update-api}"
+          remote_manifest="${FILENEST_OMP_MANIFEST_FILE:-$remote_data_dir/omp-agent-manifest.json}"
+          if [[ ! "$remote_data_dir" =~ ^/[A-Za-z0-9._/-]+$ ||
+                ! "$remote_manifest" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+            echo "Remote OMP paths must be safe absolute paths." >&2
+            exit 1
+          fi
+
+          ssh_key="$RUNNER_TEMP/filenest-omp-deploy-key"
+          known_hosts="$RUNNER_TEMP/omp-known_hosts"
+          printf '%s\n' "$FILENEST_DEPLOY_SSH_KEY" > "$ssh_key"
+          chmod 600 "$ssh_key"
+          ssh-keyscan -H "$FILENEST_DEPLOY_HOST" > "$known_hosts"
+          ssh_options=(-i "$ssh_key" -o UserKnownHostsFile="$known_hosts")
+
+          for architecture in arm64 x86_64; do
+            binary="release-assets/filenest-agent-host-$architecture"
+            remote_relative="omp-agent/$omp_version/filenest-agent-host-$architecture"
+            remote_download_path="$remote_data_dir/downloads/$remote_relative"
+            remote_download_dir="$(dirname "$remote_download_path")"
+            remote_staging="/tmp/filenest-$architecture-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.upload"
+            scp "${ssh_options[@]}" "$binary" "${FILENEST_DEPLOY_USER}@${FILENEST_DEPLOY_HOST}:$remote_staging"
+            ssh "${ssh_options[@]}" "${FILENEST_DEPLOY_USER}@${FILENEST_DEPLOY_HOST}" \
+              "sudo install -d -m 0755 -o ${FILENEST_DEPLOY_USER} -g www '$remote_download_dir' && sudo install -m 0755 -o ${FILENEST_DEPLOY_USER} -g www '$remote_staging' '$remote_download_path' && rm -f '$remote_staging'"
+          done
+
+          manifest_staging="/tmp/filenest-omp-manifest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.upload"
+          remote_manifest_dir="$(dirname "$remote_manifest")"
+          scp "${ssh_options[@]}" "$manifest" "${FILENEST_DEPLOY_USER}@${FILENEST_DEPLOY_HOST}:$manifest_staging"
+          ssh "${ssh_options[@]}" "${FILENEST_DEPLOY_USER}@${FILENEST_DEPLOY_HOST}" \
+            "sudo install -d -m 0750 -o ${FILENEST_DEPLOY_USER} -g www '$remote_manifest_dir' && sudo install -m 0640 -o ${FILENEST_DEPLOY_USER} -g www '$manifest_staging' '$remote_manifest' && rm -f '$manifest_staging'"
+
+          manifest_url="${FILENEST_UPDATE_ADMIN_URL%/}/omp-agent/stable.json?release_validation=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          curl --fail-with-body --silent --show-error --location --retry 12 --retry-delay 5 --retry-all-errors "$manifest_url" > "$RUNNER_TEMP/published-omp-manifest.json"
+          OMP_VERSION="$omp_version" python3 - "$RUNNER_TEMP/published-omp-manifest.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          if manifest.get("version") != os.environ["OMP_VERSION"]:
+              raise SystemExit("published OMP manifest version mismatch")
+          if set(manifest.get("artifacts", {})) != {"arm64", "x86_64"}:
+              raise SystemExit("published OMP manifest architecture mismatch")
+          PY
+
+          rm -f "$ssh_key" "$known_hosts"
+          echo "Published OMP Agent Host version $omp_version and verified its public manifest."

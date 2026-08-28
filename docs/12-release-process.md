@@ -54,6 +54,11 @@ The following repository Actions variables are also required:
   `https://updates.filenestapp.com`.
 - `FILENEST_DEPLOY_HOST` and `FILENEST_DEPLOY_USER`: production archive upload
   target.
+- The update-server deployment environment sets `FILENEST_OMP_MANIFEST_FILE`
+  to the OMP Agent Host manifest path, normally
+  `/var/lib/filenest-update-api/omp-agent-manifest.json`.
+- The matching `FILENEST_OMP_MANIFEST_FILE` Actions variable is used by the
+  release workflow when it publishes the manifest.
 
 The release workflow injects these values into the final application
 `Info.plist`. A macOS build is treated as a validation-only artifact when
@@ -90,6 +95,16 @@ signed with Developer ID, notarized, stapled, and validated. The workflow then:
 4. uploads the signed ZIP to `downloads.filenestapp.com`;
 5. verifies the public download URL;
 6. publishes the signed metadata to the update API.
+
+The publish job also deploys the current Go update API before replacing the
+OMP manifest. This keeps `/omp-agent/stable.json` available when the manifest
+and its architecture-specific binaries are uploaded; a stale pre-OMP API
+binary would otherwise return `404` even when the files exist.
+
+OMP Agent Host releases are published alongside the app release: build the
+`arm64` and `x86_64` sidecars, upload their immutable files, and atomically
+replace the configured OMP manifest with the new version and SHA-256 digests.
+The FileNest app downloads and verifies the sidecar independently of Sparkle.
 
 Each DMG includes `FileNest.app` and an `Applications` Finder alias. This is
 the standard drag-to-install layout: open the DMG, then drag FileNest onto the

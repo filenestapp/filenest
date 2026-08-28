@@ -1138,6 +1138,33 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Agent Harness") {
+                Picker("Harness", selection: Binding(
+                    get: { appState.settings.selectedAgentHarnessKind.rawValue },
+                    set: { appState.settings.setAgentHarness(AgentHarnessKind(rawValue: $0)) }
+                )) {
+                    ForEach(appState.agentHarnesses.selectableKinds) { kind in
+                        Text(appState.settings.localized(
+                            appState.agentHarnesses.displayName(for: kind)
+                        )).tag(kind.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text("Choose which adapter handles agent-style chat. Classic uses FileNest's existing provider pipeline; other adapters can be added without changing chat orchestration.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+
+                if appState.settings.selectedAgentHarnessKind != .classic,
+                   !appState.agentHarnesses.isAvailable(for: appState.settings.selectedAgentHarnessKind) {
+                    Label("The selected harness is not installed; Classic will be used until it becomes available.", systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(FileNestTheme.warning)
+                }
+            }
+
+            ompAgentHostSettings
+
             if usesOllama {
                 ollamaServiceSettings
             }
@@ -1381,7 +1408,7 @@ struct SettingsView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
-                Text("Checks Ollama, PaddleOCR, Docling, and FFmpeg for updates, and refreshes Whisper status when this page opens.")
+                Text("Checks Ollama, PaddleOCR, Docling, FFmpeg, and the OMP Host for updates, and refreshes Whisper status when this page opens.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -1390,6 +1417,95 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+    }
+
+    private var ompAgentHostSettings: some View {
+        Section("Official OMP Runtime") {
+            LabeledContent("Status") {
+                HStack(spacing: 7) {
+                    Image(systemName: appState.ompAgentHost.isAvailable
+                          ? "checkmark.circle.fill"
+                          : "circle.dashed")
+                        .foregroundStyle(appState.ompAgentHost.isAvailable
+                                         ? FileNestTheme.success
+                                         : .secondary)
+                    Text(appState.ompAgentHost.isAvailable
+                         ? "Ready"
+                         : "Not installed")
+                }
+            }
+
+            LabeledContent("Runtime") {
+                Text(appState.ompAgentHost.executablePath.map {
+                    URL(fileURLWithPath: $0).tildeAbbreviatedPath
+                } ?? "OMP runtime not installed")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
+            if let latestVersion = appState.ompAgentHost.latestVersion {
+                LabeledContent("Latest Version") {
+                    Text(latestVersion)
+                        .fontDesign(.monospaced)
+                        .textSelection(.enabled)
+                }
+            }
+
+            if appState.ompAgentHost.isManagedInstall {
+                ManagedServiceUpdateControls(
+                    installedVersion: appState.ompAgentHost.installedVersion,
+                    status: appState.ompAgentHost.updateStatus,
+                    isInstalling: appState.ompAgentHost.isInstalling,
+                    onCheck: {
+                        Task { await appState.ompAgentHost.checkForUpdates() }
+                    },
+                    onUpdate: {
+                        Task { await appState.updateOMPAgentHost() }
+                    }
+                )
+            } else {
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await appState.ompAgentHost.checkForUpdates() }
+                    } label: {
+                        Label("Check for Updates", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(appState.ompAgentHost.isInstalling || appState.ompAgentHost.updateStatus.isBusy)
+
+                    Button {
+                        Task { await appState.installOMPAgentHost() }
+                    } label: {
+                        Label("Install Official OMP", systemImage: "arrow.down.circle")
+                    }
+                    .disabled(appState.ompAgentHost.isInstalling || appState.ompAgentHost.updateStatus.isBusy)
+                }
+            }
+
+            if appState.ompAgentHost.canRollback {
+                Button {
+                    appState.rollbackOMPAgentHost()
+                } label: {
+                    Label("Restore Previous Version", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(appState.ompAgentHost.isInstalling || appState.ompAgentHost.updateStatus.isBusy)
+            }
+
+            if appState.ompAgentHost.isInstalling {
+                SettingsOperationProgress(
+                    status: appState.ompAgentHost.installStatus,
+                    progress: nil
+                )
+            } else if let error = appState.ompAgentHost.lastError {
+                Label(appState.settings.localizedRuntimeMessage(error), systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(FileNestTheme.warning)
+            }
+
+            Text("FileNest downloads official OMP releases over HTTPS, verifies GitHub's SHA-256 digest, validates the executable, and switches versions atomically. The FileNest adapter keeps model and tool access isolated.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var lastAIModelVersionCheckText: String {

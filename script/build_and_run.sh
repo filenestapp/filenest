@@ -3,18 +3,35 @@ set -euo pipefail
 
 MODE="${1:-run}"
 CONFIGURATION_WAS_SET="${FILENEST_CONFIGURATION+x}"
-CONFIGURATION="${FILENEST_CONFIGURATION:-Release}"
+CONFIGURATION="${FILENEST_CONFIGURATION:-Debug}"
 if [[ ( "$MODE" == "--debug" || "$MODE" == "debug" ) && -z "$CONFIGURATION_WAS_SET" ]]; then
   CONFIGURATION="Debug"
 fi
-APP_NAME="FileNest"
-BUNDLE_ID="com.local.filenest"
+if [[ ( "$MODE" == "--release" || "$MODE" == "release" ) && -z "$CONFIGURATION_WAS_SET" ]]; then
+  CONFIGURATION="Release"
+fi
+
+case "$CONFIGURATION" in
+  Debug)
+    APP_NAME="FileNest Dev"
+    BUNDLE_ID="com.local.filenest.dev"
+    ;;
+  Release)
+    APP_NAME="FileNest"
+    BUNDLE_ID="com.local.filenest"
+    ;;
+  *)
+    echo "Unsupported FileNest configuration: $CONFIGURATION" >&2
+    echo "Use Debug or Release via FILENEST_CONFIGURATION." >&2
+    exit 2
+    ;;
+esac
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DERIVED_DATA="$ROOT_DIR/.build/DerivedData"
-BUILT_APP_BUNDLE="$DERIVED_DATA/Build/Products/$CONFIGURATION/FileNest.app"
-APP_BUNDLE="$HOME/Applications/FileNest.app"
-STAGED_APP_BUNDLE="$HOME/Applications/.FileNest.app.staging"
-APP_BINARY="$APP_BUNDLE/Contents/MacOS/FileNest"
+BUILT_APP_BUNDLE="$DERIVED_DATA/Build/Products/$CONFIGURATION/$APP_NAME.app"
+APP_BUNDLE="$HOME/Applications/$APP_NAME.app"
+STAGED_APP_BUNDLE="$HOME/Applications/.$APP_NAME.app.staging"
+APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
 SIGNING_IDENTITY="${FILENEST_SIGNING_IDENTITY:-$(
   /usr/bin/security find-identity -p codesigning -v 2>/dev/null \
@@ -85,7 +102,7 @@ remove_transient_app_bundles() {
       rm -rf "$candidate"
     done < <(
       find "$root" -maxdepth 10 -type d \
-        -path '*/Build/Products/*/FileNest.app' -print0 2>/dev/null
+        -path "*/Build/Products/*/$APP_NAME.app" -print0 2>/dev/null
     )
   done
 
@@ -182,7 +199,7 @@ open_app() {
 }
 
 case "$MODE" in
-  run)
+  run|--release|release)
     open_app
     ;;
   --install-only|install-only)
@@ -210,7 +227,7 @@ case "$MODE" in
     exit 1
     ;;
   *)
-    echo "usage: $0 [run|--install-only|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|--release|--install-only|--debug|--logs|--telemetry|--verify]" >&2
     exit 2
     ;;
 esac

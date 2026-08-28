@@ -93,6 +93,44 @@ struct OnboardingView: View {
         ]
     }
 
+    private var requiredLocalComponentNames: [String] {
+        var missing = [String]()
+        if appState.ollama.state != .running { missing.append("Ollama") }
+        if !doclingReady { missing.append("Docling") }
+        if !paddleOCRReady { missing.append("PaddleOCR") }
+        return missing
+    }
+
+    private var localComponentsReady: Bool {
+        requiredLocalComponentNames.isEmpty
+    }
+
+    private var ompRuntimeRequired: Bool {
+        appState.settings.selectedAgentHarnessKind == .omp
+    }
+
+    private var canContinue: Bool {
+        switch currentStep {
+        case .basics:
+            return !ompRuntimeRequired || appState.ompAgentHost.isAvailable
+        case .localRuntime:
+            return localComponentsReady
+        default:
+            return true
+        }
+    }
+
+    private var continueRequirementMessage: String? {
+        switch currentStep {
+        case .basics where ompRuntimeRequired && !appState.ompAgentHost.isAvailable:
+            return "Install the official OMP runtime before continuing with OMP Preview."
+        case .localRuntime where !localComponentsReady:
+            return "Install and start \(requiredLocalComponentNames.joined(separator: ", ")) before continuing."
+        default:
+            return nil
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -121,6 +159,7 @@ struct OnboardingView: View {
             appState.docling.refresh()
             appState.ffmpeg.refresh()
             appState.whisper.refresh()
+            appState.ompAgentHost.refresh()
             _ = await (ollamaRefresh, paddleRefresh)
         }
         .onChange(of: appState.settings.watchDirs) { _ in
@@ -338,6 +377,50 @@ struct OnboardingView: View {
                 .padding(12)
             }
 
+            OnboardingSection(title: "Agent Harness") {
+                VStack(spacing: 0) {
+                    OnboardingFormRow(label: "Harness") {
+                        Picker("", selection: Binding(
+                            get: { appState.settings.selectedAgentHarnessKind.rawValue },
+                            set: { appState.settings.setAgentHarness(AgentHarnessKind(rawValue: $0)) }
+                        )) {
+                            ForEach(appState.agentHarnesses.selectableKinds) { kind in
+                                Text(appState.settings.localized(
+                                    appState.agentHarnesses.displayName(for: kind)
+                                )).tag(kind.rawValue)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(width: 250)
+                    }
+
+                    if appState.settings.selectedAgentHarnessKind == .omp {
+                        Divider().padding(.leading, 132)
+                        DependencyRow(
+                            title: "Official OMP Runtime",
+                            detail: ompAgentHostDetail,
+                            icon: "bolt.horizontal.circle",
+                            ready: appState.ompAgentHost.isAvailable,
+                            busy: appState.ompAgentHost.isInstalling
+                                || appState.ompAgentHost.updateStatus.isBusy,
+                            progress: nil,
+                            buttonTitle: "Install Official OMP"
+                        ) {
+                            Task { await appState.installOMPAgentHost() }
+                        }
+                    }
+                }
+            }
+
+            if ompRuntimeRequired && !appState.ompAgentHost.isAvailable {
+                OnboardingNotice(
+                    icon: "exclamationmark.triangle",
+                    text: "OMP Preview requires the official OMP runtime. Install it before continuing.",
+                    color: FileNestTheme.warning
+                )
+            }
+
             OnboardingSection(title: "Audio & Video") {
                 HStack(spacing: 12) {
                     Image(systemName: "waveform.badge.mic")
@@ -461,6 +544,14 @@ struct OnboardingView: View {
                 text: "Components are installed in an isolated FileNest user environment without changing system Python or requiring administrator access.",
                 color: FileNestTheme.success
             )
+
+            if let continueRequirementMessage {
+                OnboardingNotice(
+                    icon: "exclamationmark.triangle",
+                    text: continueRequirementMessage,
+                    color: FileNestTheme.warning
+                )
+            }
         }
     }
 
@@ -872,6 +963,7 @@ struct OnboardingView: View {
             if currentIndex < steps.count - 1 {
                 Button("Continue") { navigate(to: steps[currentIndex + 1]) }
                     .buttonStyle(GradientButtonStyle(compact: true))
+                    .disabled(!canContinue)
             } else {
                 Button("Finish Setup") {
                     finishOnboarding(organizeExisting: organizeExistingFiles)
@@ -992,6 +1084,21 @@ struct OnboardingView: View {
         case .stopped: return "Not installed or the service is stopped"
         case .failed(let message): return message
         }
+    }
+
+    private var ompAgentHostDetail: String {
+        if appState.ompAgentHost.isInstalling {
+            return appState.ompAgentHost.installStatus.isEmpty
+                ? "Downloading the OMP Host update…"
+                : appState.ompAgentHost.installStatus
+        }
+        if let error = appState.ompAgentHost.lastError {
+            return error
+        }
+        if appState.ompAgentHost.isAvailable {
+            return "Official OMP runtime is ready. FileNest keeps model and tool access isolated."
+        }
+        return "Install the official OMP runtime from GitHub Releases."
     }
 
     private var doclingReady: Bool {

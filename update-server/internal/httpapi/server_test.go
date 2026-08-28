@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +96,47 @@ func TestAppcastSupportsConditionalRequest(t *testing.T) {
 
 	if secondResponse.Code != http.StatusNotModified {
 		t.Fatalf("status = %d, want %d", secondResponse.Code, http.StatusNotModified)
+	}
+}
+
+func TestOMPManifestServesConfiguredManifest(t *testing.T) {
+	api, _ := newTestServer(t)
+	manifestPath := filepath.Join(t.TempDir(), "omp-agent-manifest.json")
+	payload := `{"version":"17.3.0","artifacts":{"arm64":{"url":"https://downloads.example.com/omp-arm64","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}`
+	if err := os.WriteFile(manifestPath, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	api.ompManifestFile = manifestPath
+
+	request := httptest.NewRequest(http.MethodGet, "/omp-agent/stable.json", nil)
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if response.Header().Get("Content-Type") != "application/json; charset=utf-8" {
+		t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
+	}
+	if response.Body.String() != payload {
+		t.Fatalf("body = %s, want %s", response.Body.String(), payload)
+	}
+}
+
+func TestOMPManifestRejectsInvalidConfiguredManifest(t *testing.T) {
+	api, _ := newTestServer(t)
+	manifestPath := filepath.Join(t.TempDir(), "omp-agent-manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"version":"17.3.0","artifacts":{}}`), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	api.ompManifestFile = manifestPath
+
+	request := httptest.NewRequest(http.MethodGet, "/omp-agent/stable.json", nil)
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
 	}
 }
 

@@ -1099,9 +1099,8 @@ final class LongDocumentWorkflowExecutor {
         self.store = store
         self.skillTools = skillTools
         self.checkpointDirectory = checkpointDirectory
-            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-                .first!
-                .appendingPathComponent("FileNest/LongDocumentWorkflows", isDirectory: true)
+            ?? ManagedRuntimePaths.applicationSupportRoot
+                .appendingPathComponent("LongDocumentWorkflows", isDirectory: true)
     }
 
     func sourceUnits(

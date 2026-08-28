@@ -11,6 +11,7 @@ This service publishes signed FileNest releases through both a Sparkle 2 appcast
 | `GET` | `/appcast/{channel}.xml` | Channel-specific Sparkle appcast |
 | `GET` | `/v1/updates/check` | JSON update check |
 | `GET` | `/v1/releases/latest` | Latest matching release metadata |
+| `GET` | `/omp-agent/stable.json` | SHA-256 checked OMP Agent Host manifest |
 | `POST` | `/v1/admin/releases` | Create or replace release metadata |
 | `DELETE` | `/v1/admin/releases/{id}` | Delete release metadata |
 
@@ -28,6 +29,7 @@ The update check also accepts the installed `version` and integer `build`. The b
 cd update-server
 export FILENEST_UPDATE_ADMIN_TOKEN="$(openssl rand -hex 32)"
 export FILENEST_UPDATE_DATA_FILE="$PWD/data/releases.json"
+export FILENEST_OMP_MANIFEST_FILE="$PWD/data/omp-agent-manifest.json"
 go run ./cmd/server
 ```
 
@@ -67,6 +69,7 @@ A macOS release is rejected unless it has:
 HTTP URLs are accepted only for `localhost` and loopback addresses to support local testing.
 
 Example release metadata is available at [`data/release.example.json`](data/release.example.json).
+The OMP manifest shape is available at [`data/omp-agent-manifest.example.json`](data/omp-agent-manifest.example.json). Publish it by atomically replacing the configured `FILENEST_OMP_MANIFEST_FILE` after uploading the architecture-specific host binaries.
 
 ## Connect FileNest
 
@@ -84,6 +87,7 @@ For a universal package, use `arch=universal`. The app already rejects non-HTTPS
 | --- | --- | --- |
 | `FILENEST_UPDATE_ADDR` | `127.0.0.1:8080` | Listener address |
 | `FILENEST_UPDATE_DATA_FILE` | `data/releases.json` | Persistent metadata file |
+| `FILENEST_OMP_MANIFEST_FILE` | `data/omp-agent-manifest.json` | Published OMP Agent Host manifest |
 | `FILENEST_UPDATE_ADMIN_TOKEN` | empty | Bearer token; empty disables all admin endpoints |
 | `FILENEST_UPDATE_ALLOWED_ORIGINS` | empty | Comma-separated browser origins allowed by CORS |
 

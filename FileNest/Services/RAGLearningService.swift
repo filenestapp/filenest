@@ -47,6 +47,7 @@ final class RAGLearningService {
         }
 
         let sourceKind: String
+        let harnessKind: String?
         let question: String
         let answer: String
         let rating: String
@@ -99,6 +100,7 @@ final class RAGLearningService {
             let question: String
             let answer: String
             let resultFileIDs: [Int64]
+            let harnessKind: String?
             switch sourceKind {
             case .chat:
                 guard let sessionID = feedback.sessionID,
@@ -117,10 +119,12 @@ final class RAGLearningService {
                 })?.content ?? ""
                 answer = assistant.content
                 resultFileIDs = Self.decodedFileIDs(assistant.relatedFileIds)
+                harnessKind = feedback.harnessKind ?? assistant.responseHarnessKind
             case .search, .smartSearch:
                 question = feedback.searchQuery ?? ""
                 answer = ""
                 resultFileIDs = Self.decodedFileIDs(feedback.resultFileIDsJSON)
+                harnessKind = nil
             }
             let filesByID = try store.files(ids: Set(resultFileIDs))
             let retrievedFiles = resultFileIDs.compactMap { id -> String? in
@@ -133,6 +137,7 @@ final class RAGLearningService {
             let existingLegacySkills = (try? store.allAISystemSkills()) ?? []
             let payload = FeedbackPayload(
                 sourceKind: sourceKind.rawValue,
+                harnessKind: harnessKind,
                 question: Self.limited(question, maximum: 4_000),
                 answer: Self.limited(answer, maximum: 8_000),
                 rating: feedback.rating,

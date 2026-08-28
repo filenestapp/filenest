@@ -59,3 +59,40 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  update-server:
+    name: Update server tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: update-server
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: update-server/go.mod
+          cache: true
+
+      - name: Run Go tests
+        run: go test ./...
+
+  omp-agent-host-source:
+    name: OMP Agent Host source checks
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Run TypeScript checks
+        working-directory: AgentHost
+        run: |
+          bun install --frozen-lockfile
+          bun run check

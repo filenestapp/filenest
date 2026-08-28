@@ -119,6 +119,7 @@ final class AppSettings: ObservableObject {
     @Published var cloudOCRModel: String = "gpt-4.1-mini"
     @Published var cloudOCRReuseChatCredentials: Bool = false
     @Published var thinkingMode: Bool = false
+    @Published var chatAgentEngine: String = ChatAgentEngineChoice.legacy.rawValue
     @Published var appLanguage: String = AppLanguage.system.rawValue
     @Published var appearance: String = AppAppearance.system.rawValue
     @Published var quickSearchShortcutKeyCode: UInt32 = QuickSearchShortcut.defaultValue.keyCode
@@ -131,6 +132,20 @@ final class AppSettings: ObservableObject {
     enum LLMChoice: String, CaseIterable, Identifiable { case ollama, cloud, none
         var id: String { rawValue }
         var label: String { self == .ollama ? "Local Ollama" : self == .cloud ? "Cloud API" : "Disabled" }
+    }
+
+    enum ChatAgentEngineChoice: String, CaseIterable, Identifiable {
+        case legacy
+        case omp
+
+        var id: String { rawValue }
+        var label: String { self == .omp ? "OMP Preview" : "Classic" }
+
+        /// Keeps the persisted setting backward-compatible while exposing the
+        /// application-level harness vocabulary to routing code.
+        var harnessKind: AgentHarnessKind {
+            self == .omp ? .omp : .classic
+        }
     }
 
     enum CloudAPIFormat: String, CaseIterable, Identifiable {
@@ -346,6 +361,7 @@ final class AppSettings: ObservableObject {
         cloudOCRModel = load(.cloudOCRModel) ?? "gpt-4.1-mini"
         cloudOCRReuseChatCredentials = load(.cloudOCRReuseChatCredentials) == "1"
         thinkingMode = load(.thinkingMode) == "1"
+        chatAgentEngine = Self.normalizedChatAgentEngine(load(.chatAgentEngine))
         appLanguage = AppLanguage(rawValue: load(.appLanguage) ?? "")?.rawValue
             ?? AppLanguage.system.rawValue
         appearance = AppAppearance(rawValue: load(.appearance) ?? "")?.rawValue
@@ -545,6 +561,34 @@ final class AppSettings: ObservableObject {
         thinkingMode = value
         save(.thinkingMode, value ? "1" : "0")
     }
+    func setChatAgentEngine(_ value: String) {
+        let normalized = Self.normalizedChatAgentEngine(value)
+        chatAgentEngine = normalized
+        save(.chatAgentEngine, normalized)
+    }
+
+    var selectedAgentHarnessKind: AgentHarnessKind {
+        AgentHarnessKind(rawValue: chatAgentEngine)
+    }
+
+    func setAgentHarness(_ kind: AgentHarnessKind) {
+        setChatAgentEngine(kind.rawValue)
+    }
+
+    private static func normalizedChatAgentEngine(_ value: String?) -> String {
+        let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return ChatAgentEngineChoice.legacy.rawValue }
+        switch AgentHarnessKind(rawValue: trimmed) {
+        case .classic:
+            // Keep the legacy spelling for downgrade compatibility when it was already stored.
+            return trimmed == "legacy" ? ChatAgentEngineChoice.legacy.rawValue : AgentHarnessKind.classic.rawValue
+        case .omp:
+            return AgentHarnessKind.omp.rawValue
+        case .custom:
+            return trimmed
+        }
+    }
+
     func setDoclingEnabled(_ value: Bool) {
         doclingEnabled = value
         save(.doclingEnabled, value ? "1" : "0")
@@ -724,6 +768,7 @@ final class AppSettings: ObservableObject {
         case cloudOCRReuseChatCredentials = "cloud_ocr_reuse_chat_credentials"
         case paddleOCRDefaultMigration = "paddle_ocr_default_migration_v1"
         case thinkingMode = "thinking_mode"
+        case chatAgentEngine = "chat_agent_engine"
         case appLanguage = "app_language"
         case appearance = "appearance"
         case quickSearchShortcutKeyCode = "quick_search_shortcut_key_code"
@@ -871,6 +916,41 @@ final class AppSettings: ObservableObject {
         return [desktop, downloads].compactMap { url in
             let path = url.standardizedFileURL.path
             return seen.insert(path).inserted ? path : nil
+        }
+    }
+
+    /// Projects the global FileNest LLM selection into the generic harness contract.
+    /// This is intentionally not persisted separately for any harness.
+    func agentGenerationConfiguration(modelOverride: String? = nil) -> AgentGenerationConfiguration? {
+        switch LLMChoice(rawValue: llmChoice) ?? .ollama {
+        case .ollama:
+            let model = (modelOverride ?? ollamaModel).trimmingCharacters(in: .whitespacesAndNewlines)
+            let baseURL = ollamaHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !model.isEmpty, !baseURL.isEmpty else { return nil }
+            return AgentGenerationConfiguration(
+                provider: .ollama,
+                model: model,
+                baseURL: baseURL,
+                apiKey: nil,
+                thinkingEnabled: thinkingMode
+            )
+        case .cloud:
+            let cloudModel = (modelOverride ?? self.cloudModel)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let baseURL = effectiveCloudBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cloudModel.isEmpty, !baseURL.isEmpty else { return nil }
+            let apiKey = cloudAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            return AgentGenerationConfiguration(
+                provider: CloudAPIFormat(rawValue: cloudAPIFormat) == .anthropic
+                    ? .anthropic
+                    : .openAICompatible,
+                model: cloudModel,
+                baseURL: baseURL,
+                apiKey: apiKey.isEmpty ? nil : apiKey,
+                thinkingEnabled: thinkingMode
+            )
+        case .none:
+            return nil
         }
     }
 

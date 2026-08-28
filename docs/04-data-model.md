@@ -57,7 +57,7 @@ Windows now persists the same structured chunk vocabulary and contextual text in
 
 ## Data locations
 
-- macOS database: Application Support `FileNest/filenest.sqlite` with legacy-location migration.
+- macOS production database: Application Support `FileNest/filenest.sqlite` with legacy-location migration. The Debug app stores its independent database in `FileNest Dev/filenest.sqlite`.
 - Windows database: `%APPDATA%/FileNest/filenest-windows.sqlite`.
 - Windows logs and managed service environments also live under the Electron user-data directory.
 

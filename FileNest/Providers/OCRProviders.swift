@@ -33,9 +33,8 @@ final class PaddleOCRServiceManager: ObservableObject {
     }
 
     nonisolated static var installRoot: URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return support.appendingPathComponent("FileNest/PaddleOCR", isDirectory: true)
+        ManagedRuntimePaths.applicationSupportRoot
+            .appendingPathComponent("PaddleOCR", isDirectory: true)
     }
 
     nonisolated static var pythonExecutable: URL {
