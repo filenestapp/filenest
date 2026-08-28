@@ -678,6 +678,9 @@ jobs:
       FILENEST_OMP_MANIFEST_FILE: ${{ vars.FILENEST_OMP_MANIFEST_FILE }}
 
     steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
       - name: Require signed and notarized macOS output
         shell: bash
         run: |
