@@ -235,10 +235,19 @@ jobs:
             app=".build/ReleaseDerivedData/Build/Products/Release/FileNest.app"
             sparkle="$app/Contents/Frameworks/Sparkle.framework"
             sparkle_version="$sparkle/Versions/B"
+            agent_host="$app/Contents/Resources/AgentHost/filenest-agent-host"
+
+            if [[ ! -x "$agent_host" ]]; then
+              echo "Bundled FileNest Agent Host is missing: $agent_host" >&2
+              exit 1
+            fi
 
             # Xcode's Embed & Sign phase does not re-sign Sparkle's nested helpers.
             # Sign from the innermost services outward, following Sparkle's
             # distribution guidance, then re-sign the containing app.
+            codesign --force --sign "$SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              "$agent_host"
             codesign --force --sign "$SIGNING_IDENTITY" \
               --options runtime --timestamp \
               "$sparkle_version/XPCServices/Installer.xpc"
@@ -261,6 +270,7 @@ jobs:
               "$app"
 
             signed_targets=(
+              "$agent_host"
               "$sparkle_version/XPCServices/Installer.xpc"
               "$sparkle_version/XPCServices/Downloader.xpc"
               "$sparkle_version/Autoupdate"
